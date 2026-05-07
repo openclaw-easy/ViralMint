@@ -62,7 +62,7 @@ python-jose==3.3.0
 python-telegram-bot>=22.0,<23.0
 # WhatsApp via neonize (Python bindings to Go's whatsmeow). Optional —
 # the WhatsApp channel reports `installed: false` if neonize isn't installed.
-neonize>=0.3.16
+neonize>=0.3.17.post0
 # Discord via gateway WebSocket (one bot token, DMs). Optional.
 discord.py>=2.3.0
 # Slack via Socket Mode (xoxb- bot token + xapp- app-level token). Optional.
