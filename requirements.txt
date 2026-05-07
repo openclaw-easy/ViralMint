@@ -7,7 +7,7 @@ websockets==12.0
 # DB
 sqlalchemy[asyncio]==2.0.35
 aiosqlite==0.20.0
-alembic==1.13.2
+alembic==1.18.4
 
 # Security
 cryptography==43.0.0
