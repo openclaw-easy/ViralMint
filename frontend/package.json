@@ -13,7 +13,7 @@
     "@emotion/styled": "^11.14.1",
     "@fontsource/inter": "^5.1.0",
     "@mui/icons-material": "^7.3.9",
-    "@mui/material": "^7.3.9",
+    "@mui/material": "^9.0.1",
     "@tanstack/react-table": "^8.20.0",
     "axios": "^1.7.0",
     "lucide-react": "^0.436.0",
