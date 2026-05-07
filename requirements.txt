@@ -23,7 +23,7 @@ openai>=1.55.0,<2.0
 
 # Scout
 google-api-python-client==2.143.0
-google-auth-oauthlib==1.2.1
+google-auth-oauthlib==1.4.0
 pytrends==4.9.2
 
 # Download
