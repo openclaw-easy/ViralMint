@@ -19,7 +19,7 @@ pydantic-settings==2.4.0
 # that httpx 0.28 removed. neonize transitively requires httpx >=0.28.1, so
 # we can't pin httpx down. Fixed in anthropic 0.39 / openai 1.55.
 anthropic>=0.39.0,<1.0
-openai>=1.55.0,<2.0
+openai>=1.109.1,<2.0
 
 # Scout
 google-api-python-client==2.143.0
