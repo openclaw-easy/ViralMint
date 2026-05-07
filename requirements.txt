@@ -59,7 +59,7 @@ aiohttp==3.10.5
 python-jose==3.3.0
 
 # Messaging channels
-python-telegram-bot>=22.0,<23.0
+python-telegram-bot>=22.7,<23.0
 # WhatsApp via neonize (Python bindings to Go's whatsmeow). Optional —
 # the WhatsApp channel reports `installed: false` if neonize isn't installed.
 neonize>=0.3.16
