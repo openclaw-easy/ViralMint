@@ -1,18 +1,18 @@
 # Web
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-python-multipart==0.0.9
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+python-multipart==0.0.28
 websockets==12.0
 
 # DB
-sqlalchemy[asyncio]==2.0.35
-aiosqlite==0.20.0
-alembic==1.13.2
+sqlalchemy[asyncio]==2.0.49
+aiosqlite==0.22.1
+alembic==1.18.4
 
 # Security
 cryptography==43.0.0
-python-dotenv==1.0.1
-pydantic-settings==2.4.0
+python-dotenv==1.2.2
+pydantic-settings==2.14.1
 
 # AI providers
 # Both bumped for httpx 0.28+ compat — older versions pass a `proxies` kwarg
@@ -22,8 +22,8 @@ anthropic>=0.39.0,<1.0
 openai>=1.55.0,<2.0
 
 # Scout
-google-api-python-client==2.143.0
-google-auth-oauthlib==1.2.1
+google-api-python-client==2.196.0
+google-auth-oauthlib==1.4.0
 pytrends==4.9.2
 
 # Download
@@ -53,10 +53,10 @@ playwright>=1.58.0
 # to 22.x which supports httpx 0.28+. Don't downgrade either pin without retesting
 # fresh installs end-to-end.
 httpx>=0.28.1,<1.0
-aiohttp==3.10.5
+aiohttp==3.13.5
 
 # Utils
-python-jose==3.3.0
+python-jose==3.5.0
 
 # Messaging channels
 python-telegram-bot>=22.0,<23.0
