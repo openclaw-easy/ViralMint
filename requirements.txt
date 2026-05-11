@@ -45,7 +45,7 @@ edge-tts>=6.1.0
 
 # TikTok upload (cookie fallback)
 tiktok-uploader>=1.2.0
-playwright>=1.58.0
+playwright>=1.59.0
 
 # HTTP
 # httpx>=0.28.1 because neonize requires it transitively (see comment above the
