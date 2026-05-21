@@ -11,6 +11,14 @@
 
 [🌐 Website](https://viralmint.net) • [Quick Start](#-quick-start) • [Features](#-features) • [Architecture](#-architecture) • [API Keys](#-bring-your-own-keys-byok) • [Contributing](CONTRIBUTING.md)
 
+> ### 🚦 Two ways to use ViralMint
+>
+> **1. This repo (self-hosted, OSS)** — clone, BYOK, full pipeline including the Uploader agent that posts directly to YouTube and TikTok. AGPL-3.0. The README below documents this variant.
+>
+> **2. Hosted at [viralmint.net](https://viralmint.net) (no install)** — prepaid credits, no API keys to manage, free daily allowance to evaluate. **Different feature shape**: no auto-upload — you download the mp4 and post manually. Closed-source SaaS.
+>
+> Same scout + analyze + generate engine; different operational trade-offs. Pick the one that matches how you want to work.
+
 [![Website](https://img.shields.io/badge/Website-viralmint.net-0d9f6e?style=for-the-badge)](https://viralmint.net)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue?style=for-the-badge)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/openclaw-easy/ViralMint/ci.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=CI)](https://github.com/openclaw-easy/ViralMint/actions/workflows/ci.yml)
