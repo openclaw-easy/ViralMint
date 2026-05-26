@@ -11,17 +11,68 @@
 
 [🌐 Website](https://viralmint.net) • [Quick Start](#-quick-start) • [Features](#-features) • [Architecture](#-architecture) • [API Keys](#-bring-your-own-keys-byok) • [Contributing](CONTRIBUTING.md)
 
-> ### 🚦 Two ways to use ViralMint
->
-> **1. This repo (self-hosted, OSS)** — clone, BYOK, full pipeline including the Uploader agent that posts directly to YouTube and TikTok. AGPL-3.0. The README below documents this variant.
->
-> **2. Hosted at [viralmint.net](https://viralmint.net) (no install)** — prepaid credits, no API keys to manage, free daily allowance to evaluate. **Different feature shape**: no auto-upload — you download the mp4 and post manually. Closed-source SaaS.
->
-> Same scout + analyze + generate engine; different operational trade-offs. Pick the one that matches how you want to work.
+</div>
 
-[![Website](https://img.shields.io/badge/Website-viralmint.net-0d9f6e?style=for-the-badge)](https://viralmint.net)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue?style=for-the-badge)](LICENSE)
+## 🚦 Two ways to use ViralMint
+
+Same scout + analyze + generate engine. Different operational trade-offs. Pick the one that matches how you want to work.
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🛠 Self-host (this repo)
+
+**Your machine · BYOK · AGPL-3.0**
+
+- ✅ Full pipeline including the **Uploader agent** that posts directly to YouTube + TikTok
+- ✅ Phone-control via Telegram / WhatsApp / Discord / Slack
+- ✅ 100% local — keys + scripts + videos never leave your machine
+- ✅ Modify, fork, redistribute (AGPL-3.0)
+- ⚠️ You manage the API keys, install, and updates
+
+```bash
+git clone https://github.com/openclaw-easy/ViralMint
+cd ViralMint && python run.py
+```
+
+**[👉 Quick Start guide ↓](#-quick-start)**
+
+</td>
+<td width="50%" valign="top">
+
+### ☁️ Hosted at [viralmint.net](https://viralmint.net)
+
+**No install · prepaid credits · daily starter allowance**
+
+- ✅ **Zero setup** — sign in and start
+- ✅ No API keys to wire up — one bill, one dashboard
+- ✅ Signed + notarized desktop installer (Mac / Win / Linux)
+- ✅ Extras the OSS variant doesn't ship: **AI Music Studio**, **Visual Style preset**, **Translate-and-Dub**, polished **Tools** page
+- ⚠️ No auto-upload (you download the mp4 and post manually)
+- ⚠️ Closed-source SaaS
+
+**[🚀 Try viralmint.net free →](https://viralmint.net)**
+
+</td>
+</tr>
+</table>
+
+The README below documents the **self-host** variant — keep reading if that's the path you want, or hop over to **[viralmint.net](https://viralmint.net)** for the hosted experience.
+
+<div align="center">
+
+<!-- Activity badges (top row) — these auto-update from GitHub, so they
+     reflect real maintenance signal at a glance for awesome-list reviewers
+     and new visitors. -->
+[![Stars](https://img.shields.io/github/stars/openclaw-easy/ViralMint?style=for-the-badge&logo=github&color=yellow)](https://github.com/openclaw-easy/ViralMint/stargazers)
+[![Last commit](https://img.shields.io/github/last-commit/openclaw-easy/ViralMint?style=for-the-badge&color=brightgreen)](https://github.com/openclaw-easy/ViralMint/commits/main)
+[![Release](https://img.shields.io/github/v/release/openclaw-easy/ViralMint?style=for-the-badge&color=blue&label=latest)](https://github.com/openclaw-easy/ViralMint/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/openclaw-easy/ViralMint/ci.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=CI)](https://github.com/openclaw-easy/ViralMint/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue?style=for-the-badge)](LICENSE)
+
+<!-- Stack badges (second row) — what the project is built on. -->
+[![Website](https://img.shields.io/badge/Website-viralmint.net-0d9f6e?style=for-the-badge)](https://viralmint.net)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![React 18](https://img.shields.io/badge/React-18-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -93,6 +144,18 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 Output lands in `desktop/release/`. First build takes ~10–15 min (PyInstaller bundling is the long pole). Skip flags, signing/notarization env vars, and the smoke-test recipe live in **[`desktop/README.md`](desktop/README.md)**.
 
 Note: this build is a **vanilla bundle of the OSS app** — your browser is the UI, no tray launcher, no auto-update, no signed binaries unless you provide a Developer ID. The richer desktop experience (Tools page, AI Music tab, Visual Style preset, signed-and-notarized installer) comes from the prebuilt [viralmint.net](https://viralmint.net) installer.
+
+---
+
+<div align="center">
+
+### 🚀 Want the polish without the setup?
+
+Try **[viralmint.net](https://viralmint.net)** — same scout + analyze + generate engine, hosted, no API keys to wire up. Sign up in 30 seconds, free daily allowance to evaluate, signed + notarized desktop installer + AI Music Studio + Visual Style preset + Translate-and-Dub included.
+
+**[Try viralmint.net free →](https://viralmint.net)**
+
+</div>
 
 ---
 
@@ -271,7 +334,7 @@ Every key can be set in `.env` *or* per-user inside the app under Settings — w
 |:------|:------|
 | **Backend** | Python 3.11+ · FastAPI · SQLAlchemy 2.0 (async) · SQLite · WebSockets |
 | **Frontend** | React 18 · Vite · MUI 7 · Zustand · React Router 6 |
-| **AI (BYOK)** | Anthropic Claude SDK · OpenAI SDK |
+| **AI (BYOK)** | Anthropic Claude SDK · OpenAI SDK · OpenRouter (300+ models via one key) |
 | **Transcription** | faster-whisper (local, multilingual, GPU-aware) |
 | **TTS** | Edge TTS (free) · OpenAI TTS |
 | **Video** | Pexels stock · FFmpeg · Ken Burns image fallback |
@@ -355,8 +418,37 @@ In practice that means:
 
 **Built with FastAPI, React, Whisper, FFmpeg, and a lot of async Python.**
 
-Project website: **[viralmint.net](https://viralmint.net)**
+</div>
 
-If ViralMint is useful to you, ⭐ star the repo — it helps a lot.
+<table align="center">
+<tr>
+<td width="50%" align="center" valign="top">
+
+### ☁️ Prefer the hosted version?
+
+No install, no API-key setup, free starter allowance.
+**Signed + notarized desktop installer.**
+AI Music Studio · Visual Style preset · Tools page included.
+
+**[→ Try viralmint.net free](https://viralmint.net)**
+
+</td>
+<td width="50%" align="center" valign="top">
+
+### ⭐ Helping this project?
+
+The fastest way to help: hit the star button at the top.
+Stars unlock awesome-list eligibility, attract contributors,
+and signal to the world that this matters.
+
+**[→ Star openclaw-easy/ViralMint](https://github.com/openclaw-easy/ViralMint)**
+
+</td>
+</tr>
+</table>
+
+<div align="center">
+
+Project website: **[viralmint.net](https://viralmint.net)** · Source: **[github.com/openclaw-easy/ViralMint](https://github.com/openclaw-easy/ViralMint)** · License: **[AGPL-3.0](LICENSE)**
 
 </div>
