@@ -1,7 +1,7 @@
 # Web
 fastapi==0.136.3
 uvicorn[standard]==0.48.0
-python-multipart==0.0.29
+python-multipart==0.0.30
 websockets==12.0
 
 # DB
@@ -22,7 +22,7 @@ anthropic>=0.39.0,<1.0
 openai>=1.109.1,<2.0
 
 # Scout
-google-api-python-client==2.196.0
+google-api-python-client==2.197.0
 google-auth-oauthlib==1.4.0
 pytrends==4.9.2
 
@@ -56,7 +56,7 @@ playwright>=1.59.0
 # to 22.x which supports httpx 0.28+. Don't downgrade either pin without retesting
 # fresh installs end-to-end.
 httpx>=0.28.1,<1.0
-aiohttp==3.13.5
+aiohttp==3.14.0
 
 # Utils
 python-jose==3.5.0
