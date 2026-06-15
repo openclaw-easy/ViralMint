@@ -234,6 +234,105 @@ class UserIntelligence:
                 ),
             }
 
+    async def get_pipeline_state(self, user_id: str = "local") -> dict:
+        """Where the user is in the content funnel RIGHT NOW — read live from the
+        content tables (not the event log). This is what lets the planner be
+        genuinely proactive ("you downloaded 3 videos but haven't made a short
+        from any — want me to?") instead of waiting to be asked. Cheap (a few
+        indexed counts); computed every turn. Returns {} on any error so it can
+        never break a chat turn.
+
+        OSS funnel is download -> generate -> UPLOAD (the OSS build ships the
+        uploader), so the nudges culminate in "upload the finished video".
+        """
+        from backend.models.downloaded_video import DownloadedVideo
+        from backend.models.generated_video import GeneratedVideo
+        from backend.models.scout_result import ScoutResult
+        from backend.models.job import Job
+        try:
+            async with AsyncSessionLocal() as db:
+                dl_rows = (await db.execute(
+                    select(DownloadedVideo.id, DownloadedVideo.insights_json)
+                    .where(DownloadedVideo.user_id == user_id)
+                )).all()
+                downloaded_total = len(dl_rows)
+                downloaded_not_analyzed = sum(1 for r in dl_rows if not r.insights_json)
+                gen_source_ids = set((await db.execute(
+                    select(GeneratedVideo.source_downloaded_video_id)
+                    .where(GeneratedVideo.user_id == user_id,
+                           GeneratedVideo.source_downloaded_video_id.isnot(None))
+                )).scalars().all())
+                downloaded_not_generated = sum(1 for r in dl_rows if r.id not in gen_source_ids)
+
+                gen_rows = (await db.execute(
+                    select(GeneratedVideo.video_path, GeneratedVideo.uploaded_platforms_json,
+                           GeneratedVideo.source_type)
+                    .where(GeneratedVideo.user_id == user_id)
+                )).all()
+                generated_total = len(gen_rows)
+                # "Ready to ship" = has a rendered file but hasn't been uploaded yet.
+                generated_not_uploaded = sum(
+                    1 for r in gen_rows
+                    if r.video_path and (not r.uploaded_platforms_json
+                                         or r.uploaded_platforms_json.strip() in ("", "[]"))
+                )
+                clips_total = sum(1 for r in gen_rows if r.source_type == "clip_extraction")
+
+                last_scout = None
+                last_job = (await db.execute(
+                    select(Job).where(
+                        Job.user_id == user_id, Job.job_type == "scout", Job.status == "success"
+                    ).order_by(Job.completed_at.desc()).limit(1)
+                )).scalar_one_or_none()
+                if last_job:
+                    n_results = (await db.execute(
+                        select(func.count()).select_from(ScoutResult)
+                        .where(ScoutResult.job_id == last_job.id)
+                    )).scalar() or 0
+                    niche = None
+                    try:
+                        niche = json.loads(last_job.input_json or "{}").get("niche")
+                    except (TypeError, ValueError):
+                        pass
+                    last_scout = {"niche": niche, "results": n_results}
+
+            state = {
+                "downloaded_total": downloaded_total,
+                "downloaded_not_analyzed": downloaded_not_analyzed,
+                "downloaded_not_generated": downloaded_not_generated,
+                "generated_total": generated_total,
+                "generated_not_uploaded": generated_not_uploaded,
+                "clips_total": clips_total,
+                "last_scout": last_scout,
+            }
+            state["next_best_action"] = self._next_best_action(state)
+            return state
+        except Exception as e:
+            logger.debug("get_pipeline_state failed: %s", e)
+            return {}
+
+    @staticmethod
+    def _next_best_action(s: dict) -> str | None:
+        """The single highest-value next step, derived from funnel state. The
+        planner surfaces this proactively (one nudge, not a checklist)."""
+        if s.get("downloaded_not_generated", 0) > 0:
+            return (f"{s['downloaded_not_generated']} downloaded video(s) have no short made "
+                    "from them yet — offer to generate one.")
+        if s.get("downloaded_not_analyzed", 0) > 0:
+            return (f"{s['downloaded_not_analyzed']} downloaded video(s) aren't analyzed yet — "
+                    "offer to analyze for hook/structure/angle.")
+        ls = s.get("last_scout")
+        if ls and ls.get("results", 0) > 0 and s.get("downloaded_total", 0) == 0:
+            return (f"Scouted {ls['results']} videos for '{ls.get('niche')}' but downloaded none — "
+                    "offer to grab the top performers.")
+        if s.get("generated_not_uploaded", 0) > 0:
+            return (f"{s['generated_not_uploaded']} finished video(s) haven't been uploaded yet — "
+                    "offer to publish to YouTube/TikTok.")
+        if s.get("generated_total", 0) == 0 and s.get("downloaded_total", 0) == 0:
+            return ("Brand-new — no content yet. Suggest scouting a niche or making a first video "
+                    "from a topic.")
+        return None
+
     async def get_smart_suggestions(self, user_id: str = "local") -> list[str]:
         """Get suggestions — uses AI if the user has enough history, else rule-based."""
         ctx = await self.get_context_summary(user_id)
@@ -242,8 +341,17 @@ class UserIntelligence:
 
         profile = await self.get_user_profile(user_id)
 
-        # Try AI suggestions if user has enough activity (20+ events = has a profile)
-        if profile and (ctx["total_scouts"] + ctx["total_generated"]) >= 5:
+        # Try AI suggestions once the user shows real activity. Count downloads
+        # and uploads too (not just scouts+generates) — the behavior engine now
+        # records the full funnel, so a user who downloaded + analyzed but hasn't
+        # generated still has strong signal worth tailoring to. Threshold 5->3.
+        activity_signal = (
+            ctx["total_scouts"]
+            + ctx["total_generated"]
+            + ctx.get("total_uploads", 0)
+            + ctx.get("downloaded_not_generated", 0)
+        )
+        if profile and activity_signal >= 3:
             ai_suggestions = await self._get_ai_suggestions(user_id, ctx, profile)
             if ai_suggestions:
                 return ai_suggestions

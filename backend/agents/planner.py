@@ -212,6 +212,9 @@ Note: Scouting credentials (YouTube API key, TikHub token, Pexels) are configure
 ## User Context (current session stats)
 {user_context}
 
+## Live Pipeline State (where the user is in the funnel RIGHT NOW — be proactive about `next_best_action`)
+{pipeline_state}
+
 ## Credential Status (what's configured vs missing)
 {credential_status}
 
@@ -302,8 +305,15 @@ class PlannerAgent:
         if news_ctx and news_ctx.get("total_news_scouts", 0) > 0:
             news_text = json.dumps(news_ctx, indent=2, ensure_ascii=False)
 
+        # Live funnel state — where the user is right now (downloaded-not-generated,
+        # generated-not-uploaded, etc.) + the single highest-value next step. This
+        # is what makes the planner proactive instead of purely reactive.
+        pipeline = await self.intelligence.get_pipeline_state(user_id)
+        pipeline_text = json.dumps(pipeline, indent=2, ensure_ascii=False) if pipeline else "Unknown."
+
         system = SYSTEM_PROMPT.format(
             user_context=json.dumps(ctx, indent=2),
+            pipeline_state=pipeline_text,
             smart_suggestions=json.dumps(suggestions),
             credential_status="\n".join(cred_lines),
             user_profile=profile_text,
@@ -420,8 +430,14 @@ class PlannerAgent:
             else "No news scouting history yet."
         )
 
+        # Live funnel state — cheap (indexed counts) and high-value even for
+        # messaging: it's how the bot proactively nudges the next step.
+        pipeline = await self.intelligence.get_pipeline_state(user_id)
+        pipeline_text = json.dumps(pipeline, ensure_ascii=False) if pipeline else "Unknown."
+
         system = SYSTEM_PROMPT.format(
             user_context=json.dumps(ctx, indent=2),
+            pipeline_state=pipeline_text,
             smart_suggestions=json.dumps(suggestions),
             credential_status="\n".join(cred_lines),
             user_profile=profile_text,
