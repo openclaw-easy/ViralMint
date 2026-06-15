@@ -143,7 +143,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 
 Output lands in `desktop/release/`. First build takes ~10–15 min (PyInstaller bundling is the long pole). Skip flags, signing/notarization env vars, and the smoke-test recipe live in **[`desktop/README.md`](desktop/README.md)**.
 
-Note: this build is a **vanilla bundle of the OSS app** — your browser is the UI, no tray launcher, no auto-update, no signed binaries unless you provide a Developer ID. The richer desktop experience (Tools page, AI Music tab, Visual Style preset, signed-and-notarized installer) comes from the prebuilt [viralmint.net](https://viralmint.net) installer.
+Note: this build is a **vanilla bundle of the OSS app** — your browser is the UI, no tray launcher, no auto-update, no signed binaries unless you provide a Developer ID. The extra polish (AI Music Studio, Visual Style preset, AI image/video generators, signed-and-notarized installer) comes from the prebuilt [viralmint.net](https://viralmint.net) installer.
 
 ---
 
@@ -218,6 +218,20 @@ yt-dlp under the hood — supports YouTube, TikTok, Bilibili, Instagram, Twitter
 
 </td>
 </tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🧰 Tools
+18 single-purpose utilities — captions, reframe, GIF, speed, trim, subtitles, watermark, merge, auto-zoom, music-visualizer, voice-over, plus AI helpers (translate, metadata, hook analysis, auto-chapters). **Most run 100% locally on ffmpeg + Whisper — no API key.** Each has an inline result preview and an ✨ Enhance button that polishes your prompt with your own key.
+
+</td>
+<td width="50%" valign="top">
+
+### ✨ Proactive assistant
+The chat reads your live pipeline — *downloaded-but-not-clipped*, *generated-but-not-uploaded*, *scouted-but-not-downloaded* — and suggests the single highest-value next step instead of waiting to be asked.
+
+</td>
+</tr>
 </table>
 
 ---
@@ -269,6 +283,7 @@ yt-dlp under the hood — supports YouTube, TikTok, Bilibili, Instagram, Twitter
 | Word-by-word animated captions | FFmpeg + ASS subtitles | $0 |
 | Background music library | Royalty-free local library | $0 |
 | Sound effects auto-placement | FFmpeg-synthesized | $0 |
+| Tools: reframe, GIF, speed, trim, watermark, merge, auto-zoom, music-visualizer, subtitles… | FFmpeg + Whisper | $0 |
 
 YouTube/TikTok/Pexels still require free API keys — links in the next section.
 
