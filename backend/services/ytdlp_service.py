@@ -60,13 +60,35 @@ except Exception as _e:  # noqa: BLE001
 
 def _yt_dlp_base_opts() -> dict:
     """Base options for all yt-dlp calls — quiet mode + logger redirect.
-    Adds Chrome TLS impersonation when curl-cffi is importable (no-op
-    fallback otherwise)."""
-    opts = {
+
+    `format_sort` declares preference order for the picked format. `lang` is
+    FIRST so that on YouTube multi-language videos we pick the ORIGINAL audio
+    track — without it, plain `bestaudio` sorted by bitrate alone, which on
+    multi-language videos commonly picked a dub (observed: an English video
+    downloading with Portuguese audio). No-op for non-YouTube sources.
+
+    `retry_sleep_functions` aligns with yt-dlp's documented best practice for
+    resilience under rate limits: exponential backoff per retry-pool instead
+    of a static sleep that wastes retry budget.
+
+    `throttledratelimit` catches stale signed URLs that "succeed" but trickle
+    bytes — yt-dlp re-extracts from scratch when speed drops below it.
+
+    `impersonate` enables curl-cffi browser fingerprinting when the lib is
+    importable; otherwise omitted (no-op fallback to urllib).
+    """
+    opts: dict = {
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
         "logger": _YtDlpLogger(),
+        "format_sort": ["lang", "res:1080", "fps", "codec:avc:m4a", "size", "br"],
+        "retry_sleep_functions": {
+            "http":        lambda n: min(60, 2 ** n),         # 1, 2, 4, 8, 16, 32, 60...
+            "fragment":    lambda n: min(120, 2 * (n + 1)),   # 2, 4, 6, 8... (linear, capped)
+            "file_access": lambda n: 0.5 * n,                 # quick disk retries
+        },
+        "throttledratelimit": 100_000,  # 100 KB/s
     }
     if _IMPERSONATE_TARGET is not None:
         opts["impersonate"] = _IMPERSONATE_TARGET
@@ -74,11 +96,46 @@ def _yt_dlp_base_opts() -> dict:
 
 
 def _yt_dlp_js_opts() -> dict:
-    """Enable Node.js runtime + EJS challenge solver for YouTube extraction.
-    Without these, yt-dlp ≥ 2026.03 may fail to extract video formats."""
+    """Enable Node.js runtime + EJS challenge solver for YouTube extraction,
+    plus the per-extractor tweaks that keep the flaky sites working.
+
+    - **youtube**: cycle player clients, leading with the three that yt-dlp's
+      PO Token Guide lists as NOT requiring a token (tv, web_embedded,
+      android_vr) — when one client gets bot-blocked, the next takes over.
+      `webpage_client` controls the identity for the initial page scrape,
+      distinct from the streaming-URL request. `formats: missing_pot` allows
+      degraded-quality formats over no download at all.
+    - **youtubetab**: `skip=authcheck` — with cookies present, public channel
+      extraction otherwise fails an unnecessary auth check.
+    - **tiktok**: `app_info=[""]` triggers the genuine-device-id flow (most
+      stable); app versions match TikTok's current mobile app.
+    - **twitter**: force the syndication API — the default graphql path 403s
+      guest-token requests for most tweets.
+    - **instagram/reddit**: bump extractor retries (known to flake).
+    """
     return {
         "js_runtimes": {"node": {}},
         "remote_components": {"ejs:github": {}},
+        "extractor_args": {
+            "youtube": {
+                "player_client": [
+                    "tv", "web_embedded", "android_vr",   # no-token (lead)
+                    "tv_simply", "ios", "mweb",            # token-gated fallbacks
+                    "web_safari", "web",                    # last resort
+                ],
+                "webpage_client": ["web"],
+                "formats": ["missing_pot"],
+            },
+            "youtubetab": {"skip": ["authcheck"]},
+            "tiktok": {
+                "app_info": [""],
+                "app_version": ["35.1.3"],
+                "manifest_app_version": ["2023501030"],
+            },
+            "twitter": {"api": ["syndication"]},
+            "instagram": {"extractor_retries": ["5"]},
+            "reddit": {"extractor_retries": ["5"]},
+        },
     }
 
 
@@ -146,8 +203,13 @@ def _try_update_ytdlp() -> bool:
 
     try:
         logger.info("Auto-updating yt-dlp...")
+        # Version-bounded spec: on an environment whose Python is too old for
+        # current yt-dlp, an unbounded "-U yt-dlp" silently resolves to an
+        # ANCIENT release (macOS system python3 = 3.9 → a 2025.10 build that
+        # fails on modern YouTube). Bounded, pip errors loudly instead of
+        # installing a silently-broken downloader.
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
+            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp>=2026.7.4"],
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode == 0:

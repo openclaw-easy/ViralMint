@@ -16,6 +16,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   yt-dlp call (`ytdlp_service`), so TLS-fingerprinting bot defenses
   (Cloudflare/Akamai) can't block downloads by handshake; degrades cleanly to
   urllib's fingerprint if curl-cffi is missing or incompatible.
+- **Download reliability port from the hosted variant** (`ytdlp_service`):
+  original-audio `format_sort` with `lang` leading (multi-language YouTube
+  videos no longer download a dubbed audio track), exponential
+  `retry_sleep_functions` per retry-pool, a 100 KB/s `throttledratelimit`
+  guard that re-extracts stale signed URLs, and per-extractor args —
+  PO-token-aware YouTube `player_client` ordering (token-free clients lead),
+  `youtubetab` authcheck skip for public channel extraction, TikTok
+  genuine-device-id flow, Twitter syndication API, Instagram/Reddit retry
+  bumps. The pip self-update is now version-bounded (`yt-dlp>=2026.7.4`) so
+  an outdated Python can't silently downgrade the downloader.
 
 ### Added
 - **Tools page** — 18 single-purpose utilities (captions, reframe, audio-enhance, watermark, remove-silence, merge-clips, GIF, speed, trim, subtitles, auto-zoom, transform, music-visualizer, voice-over via Edge TTS, plus AI helpers: translate, metadata, hook-analysis, auto-chapters). The 13 ffmpeg/Whisper tools run fully locally with no API key; the AI helpers and the ✨ Enhance-prompt button use the user's own key (BYOK). Each tool has an inline result preview. New `/api/tools/*` router + `backend/core/tool_runners.py`. (AI media generators — image/music/video — are intentionally not in the OSS build.)
