@@ -43,14 +43,34 @@ class _YtDlpLogger:
         logger.error(msg)
 
 
+# curl-cffi browser impersonation — replays Chrome's TLS handshake (JA3
+# fingerprint) so sites with TLS-aware bot defenses (Cloudflare/Akamai)
+# can't fingerprint the client by handshake alone. Wrapped in try/except so
+# a missing or version-incompatible curl-cffi NEVER breaks downloads —
+# they just fall back to urllib's default fingerprint. Pair versions per
+# requirements.txt (curl-cffi 0.10–0.14 with current yt-dlp).
+_IMPERSONATE_TARGET = None
+try:
+    import curl_cffi  # noqa: F401  (presence test; yt-dlp loads its own handler)
+    from yt_dlp.networking.impersonate import ImpersonateTarget as _ImpersonateTarget
+    _IMPERSONATE_TARGET = _ImpersonateTarget("chrome")
+except Exception as _e:  # noqa: BLE001
+    logger.info("curl-cffi impersonation unavailable: %s — downloads use urllib fingerprint", _e)
+
+
 def _yt_dlp_base_opts() -> dict:
-    """Base options for all yt-dlp calls — quiet mode + logger redirect."""
-    return {
+    """Base options for all yt-dlp calls — quiet mode + logger redirect.
+    Adds Chrome TLS impersonation when curl-cffi is importable (no-op
+    fallback otherwise)."""
+    opts = {
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
         "logger": _YtDlpLogger(),
     }
+    if _IMPERSONATE_TARGET is not None:
+        opts["impersonate"] = _IMPERSONATE_TARGET
+    return opts
 
 
 def _yt_dlp_js_opts() -> dict:

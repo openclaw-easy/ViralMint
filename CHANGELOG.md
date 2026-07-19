@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- **Download hardening — pinned yt-dlp floor + TLS impersonation.**
+  `requirements.txt` now pins `yt-dlp>=2026.7.4`: an unbounded `yt-dlp` on an
+  old Python (macOS's system `python3` is 3.9) silently resolves to an ancient
+  2025.10 release that fails on modern YouTube — the floor turns that into a
+  loud install error instead of a broken downloader. Added
+  `curl-cffi>=0.10,<0.15` and wired Chrome TLS impersonation into every
+  yt-dlp call (`ytdlp_service`), so TLS-fingerprinting bot defenses
+  (Cloudflare/Akamai) can't block downloads by handshake; degrades cleanly to
+  urllib's fingerprint if curl-cffi is missing or incompatible.
+
 ### Added
 - **Tools page** — 18 single-purpose utilities (captions, reframe, audio-enhance, watermark, remove-silence, merge-clips, GIF, speed, trim, subtitles, auto-zoom, transform, music-visualizer, voice-over via Edge TTS, plus AI helpers: translate, metadata, hook-analysis, auto-chapters). The 13 ffmpeg/Whisper tools run fully locally with no API key; the AI helpers and the ✨ Enhance-prompt button use the user's own key (BYOK). Each tool has an inline result preview. New `/api/tools/*` router + `backend/core/tool_runners.py`. (AI media generators — image/music/video — are intentionally not in the OSS build.)
 - **Proactive assistant** — the planner now reads live pipeline state (downloaded-not-clipped, generated-not-uploaded, scouted-not-downloaded) and surfaces the single highest-value next step. Backed by behavior-event instrumentation so the personalization engine learns from every completed job.

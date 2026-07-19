@@ -26,8 +26,21 @@ google-api-python-client==2.196.0
 google-auth-oauthlib==1.4.0
 pytrends==4.9.2
 
-# Download
-yt-dlp
+# Download — yt-dlp + curl-cffi for browser TLS impersonation.
+#
+# yt-dlp floor: versions below 2026.7 miss current extractor fixes AND —
+# the sharp edge — an OLD Python's pip resolves an unbounded "yt-dlp" to
+# an ancient release (macOS system python3 is 3.9, for which "latest" is
+# a 2025.10 build that can't use curl-cffi ≥0.10 and fails on modern
+# YouTube). The floor makes such an install fail loudly instead of
+# producing a silently-broken downloader. Upgrade freely above it.
+#
+# curl-cffi: capped <0.15 — 0.15.0 broke yt-dlp's curl_cffi request
+# handler; 0.10–0.14 are the known-good range for current yt-dlp.
+# Optional at runtime: the service degrades to urllib's fingerprint if
+# it's missing/incompatible (see ytdlp_service._IMPERSONATE_TARGET).
+yt-dlp>=2026.7.4
+curl-cffi>=0.10,<0.15
 
 # Transcription
 faster-whisper
