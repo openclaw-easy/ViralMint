@@ -354,6 +354,132 @@ def resolve_caption_font(preferred_font: str, text: str) -> str:
     return font
 
 
+_CJK_SCRIPT_NAMES = {"kana", "hangul", "han"}
+
+
+def _cjk_char_count(text: str) -> int:
+    ranges = [
+        r for name, rs in _SCRIPT_RANGES if name in _CJK_SCRIPT_NAMES for r in rs
+    ]
+    return sum(1 for ch in text if any(lo <= ord(ch) <= hi for lo, hi in ranges))
+
+
+def align_script_to_segments(script: str, segments: list[dict]) -> list[dict]:
+    """Replace ASR-recognized caption text with the KNOWN narration script,
+    keeping Whisper's word timings.
+
+    The pipeline synthesizes the script to audio, then Whisper re-transcribes
+    that audio purely to obtain word TIMESTAMPS — but the captions displayed
+    Whisper's recognized text. For Chinese that text is riddled with homophone
+    substitutions (observed live: 崇祯→重真, 勤政→情政, 印制→硬质, 读客→独克),
+    so viewers saw wrong characters for a script we had verbatim. Char-level
+    sequence alignment maps the true script onto the timed ASR words: each word
+    keeps its start/end, only its text is corrected. Script punctuation survives
+    too, which also improves the phrase-aware line grouping.
+
+    Scope + safety:
+    - Applied only when the script is CJK-dominant. Latin ASR of our own TTS
+      is near-perfect, and char-level alignment could split Latin words.
+    - Fail-open: if overall similarity < 0.5 (audio doesn't actually match
+      the script — shouldn't happen for our own TTS) the original segments
+      are returned untouched.
+    """
+    import difflib
+
+    if not script or not segments:
+        return segments
+
+    # CJK-dominant gate.
+    stripped = "".join(script.split())
+    cjk = _cjk_char_count(stripped)
+    if not stripped or cjk < len(stripped) * 0.5:
+        return segments
+
+    # Flatten timed words; remember (segment_idx, word_idx) per flat index.
+    flat: list[dict] = []
+    for si, seg in enumerate(segments):
+        for w in seg.get("words") or []:
+            text = (w.get("word") or w.get("text") or "")
+            if text.strip():
+                flat.append({"seg": si, "text": text, "start": w.get("start"), "end": w.get("end")})
+    if not flat:
+        return segments
+
+    # Char streams (whitespace stripped) with a char→flat-word-index map.
+    asr_chars: list[str] = []
+    asr_char_word: list[int] = []
+    for wi, w in enumerate(flat):
+        for ch in w["text"]:
+            if not ch.isspace():
+                asr_chars.append(ch)
+                asr_char_word.append(wi)
+    script_chars = [ch for ch in script if not ch.isspace()]
+    if not asr_chars or not script_chars:
+        return segments
+
+    sm = difflib.SequenceMatcher(a=asr_chars, b=script_chars, autojunk=False)
+    if sm.ratio() < 0.5:
+        logger.warning(
+            "Caption script alignment skipped — ASR/script similarity %.2f too low",
+            sm.ratio(),
+        )
+        return segments
+
+    # Distribute the true script chars into per-word buffers.
+    buffers: dict[int, list[str]] = {wi: [] for wi in range(len(flat))}
+    last_word = 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for off in range(i2 - i1):
+                wi = asr_char_word[i1 + off]
+                buffers[wi].append(script_chars[j1 + off])
+                last_word = wi
+        elif tag == "replace":
+            a_span, b_span = i2 - i1, j2 - j1
+            for off in range(b_span):
+                a_off = min(a_span - 1, int(off * a_span / b_span))
+                wi = asr_char_word[i1 + a_off]
+                buffers[wi].append(script_chars[j1 + off])
+                last_word = wi
+        elif tag == "insert":
+            # Script chars the ASR missed (typically punctuation) — attach to
+            # the previous word so sentence breaks land where they belong.
+            buffers[last_word].extend(script_chars[j1:j2])
+        # "delete": ASR hallucinated chars — contribute nothing.
+
+    # Rebuild segments with corrected words (empty words dropped).
+    out: list[dict] = []
+    words_by_seg: dict[int, list[dict]] = {}
+    for wi, w in enumerate(flat):
+        text = "".join(buffers[wi])
+        if not text:
+            continue
+        words_by_seg.setdefault(w["seg"], []).append(
+            {"word": text, "start": w["start"], "end": w["end"]},
+        )
+    for si, seg in enumerate(segments):
+        words = words_by_seg.get(si, [])
+        if not words:
+            # Segments Whisper returned WITHOUT word timestamps never entered
+            # the alignment — pass them through untouched rather than dropping
+            # them (a dropped segment is a silent caption gap). Segments whose
+            # words were all consumed by the alignment (ASR hallucinations)
+            # are legitimately dropped.
+            if not (seg.get("words") or []):
+                out.append(seg)
+            continue
+        out.append({
+            **seg,
+            "text": "".join(w["word"] for w in words),
+            "words": words,
+        })
+    logger.info(
+        "Caption text realigned to the true script (%d chars, similarity %.2f)",
+        len(script_chars), sm.ratio(),
+    )
+    return out or segments
+
+
 async def _load_custom_style(style_id: str) -> dict | None:
     """Load a custom caption style from the database by ID."""
     try:

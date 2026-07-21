@@ -117,7 +117,7 @@ class GeneratorAgent:
             segments = []
             if voice_path and opts["caption_enabled"]:
                 await ws_manager.send_progress(job_id, 25, "Extracting word timestamps...", user_id)
-                segments = await self._transcribe_for_captions(voice_path)
+                segments = await self._transcribe_for_captions(voice_path, script=script)
 
             # Generate video clips (stock footage / kenburns / text fallback)
             await ws_manager.send_progress(job_id, 35, "Generating video (stock footage)...", user_id)
@@ -475,13 +475,22 @@ class GeneratorAgent:
 
     # ── Transcription ───────────────────────────────────────────────────
 
-    async def _transcribe_for_captions(self, voice_path: Path) -> list[dict]:
-        """Transcribe the generated voice audio to get word-level timestamps."""
+    async def _transcribe_for_captions(self, voice_path: Path, script: str | None = None) -> list[dict]:
+        """Transcribe the generated voice audio to get word-level timestamps.
+
+        Whisper is used for TIMING ONLY — when the narration `script` is known,
+        its true text is aligned onto the timed words so CJK captions never
+        display ASR homophone errors (崇祯→重真, 勤政→情政 burned into a real
+        render's captions). Fail-open: no script or non-CJK → unchanged."""
         try:
             from backend.services.whisper_service import whisper_service
             whisper_service.load("fast")
             result = await whisper_service.transcribe(voice_path, language=None)
-            return result.get("segments", [])
+            segments = result.get("segments", [])
+            if script:
+                from backend.services.caption_service import align_script_to_segments
+                segments = align_script_to_segments(script, segments)
+            return segments
         except Exception as e:
             logger.warning(f"Voice transcription for captions failed: {e}")
             return []
@@ -545,7 +554,14 @@ class GeneratorAgent:
             aspect_ratio=aspect_ratio,
             emoji_style=opts.get("caption_emoji_style", "moderate"),
         )
-        return await burn_captions(video_path, ass_path)
+        result = await burn_captions(video_path, ass_path)
+        # Clean up the actual temp ASS file returned by generate_captions_ass
+        # (Wave-1 writes captions_{uuid}.ass, not a fixed name).
+        try:
+            ass_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return result
 
     async def _generate_metadata(self, script: str, niche: str, user_settings) -> dict:
         """Generate YouTube + TikTok metadata via AI."""
