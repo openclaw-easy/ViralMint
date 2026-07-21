@@ -103,6 +103,12 @@ def start_uvicorn(host="127.0.0.1", port=16888, reload=False):
     return p
 
 def open_browser(port=16888, delay=2.5):
+    # The launcher owns browser-opening (it sets VIRALMINT_NO_BROWSER=1 and
+    # opens the tab itself once /health goes 200). When launched by the tray
+    # launcher, skip run.py's own auto-open so the user doesn't get two tabs.
+    # Standalone `python run.py` (var unset) keeps the original behavior.
+    if os.environ.get("VIRALMINT_NO_BROWSER"):
+        return
     def _open():
         time.sleep(delay)
         webbrowser.open(f"http://localhost:{port}")
