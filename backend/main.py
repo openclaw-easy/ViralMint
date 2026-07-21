@@ -150,6 +150,11 @@ def create_app() -> FastAPI:
     # unknown ahead of time), so when the user has explicitly opted into LAN
     # exposure we skip the strict origin check entirely. On the loopback
     # default (127.0.0.1) we enforce it.
+    # Only HOST=0.0.0.0 has an unenumerable origin (the phone hits the machine's
+    # LAN IP, unknown ahead of time) → skip the strict check there. A concrete
+    # non-loopback bind (e.g. HOST=192.168.1.5) DOES have an enumerable origin,
+    # so we keep CSRF enforced and just allowlist it below. Reverse-proxy / custom
+    # domain deployments set FRONTEND_URL, which is already allowlisted.
     lan_mode = settings.HOST == "0.0.0.0"
     allowed_origins = {
         settings.FRONTEND_URL,
@@ -158,6 +163,8 @@ def create_app() -> FastAPI:
         f"http://localhost:{settings.PORT}",
         f"http://127.0.0.1:{settings.PORT}",
     }
+    if settings.HOST not in ("0.0.0.0", "127.0.0.1", "localhost"):
+        allowed_origins.add(f"http://{settings.HOST}:{settings.PORT}")
     safe_methods = {"GET", "HEAD", "OPTIONS"}
 
     def _origin_ok(header: str) -> bool:
