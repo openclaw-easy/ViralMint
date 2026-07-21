@@ -22,9 +22,22 @@ from pathlib import Path
 from uuid import uuid4
 
 from backend.config import settings
+from backend.core.concurrency import _ffmpeg_semaphore
 from backend.core.ws_manager import ws_manager
 
 logger = logging.getLogger(__name__)
+
+
+async def _ffmpeg_limited(coro):
+    """Wrap an ffmpeg-using coroutine in the global ffmpeg-work semaphore so
+    a single big extract (e.g. 18 clips) can't fire 18 parallel ffmpegs at
+    once. Without this, heavy jobs peg the CPU and even fast UI requests
+    queue behind the system load — see _ffmpeg_semaphore in
+    backend.core.concurrency for the full reasoning. Coroutines are passed
+    pre-built; they don't actually start until awaited inside the sem.
+    """
+    async with _ffmpeg_semaphore:
+        return await coro
 
 # ── AI Prompts ────────────────────────────────────────────────────────────────
 
@@ -90,40 +103,88 @@ Return ONLY valid JSON, no markdown fences:
 
 # ── Clip count estimation ──────────────────────────────────────────────────────
 
-def _estimate_realistic_clip_count(segments: list[dict], duration: int, requested_max: int) -> int:
+def _has_cjk(text: str) -> bool:
+    """Check if text contains CJK characters (Chinese, Japanese, Korean)."""
+    import unicodedata
+    for ch in text[:500]:  # sample first 500 chars
+        try:
+            name = unicodedata.name(ch, "")
+            if "CJK" in name or "HANGUL" in name or "HIRAGANA" in name or "KATAKANA" in name:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _count_speech_units(text: str) -> int:
+    """
+    Count speech units in a language-aware way.
+    For CJK languages (Chinese, Japanese, Korean), count characters instead of
+    space-separated words since these languages don't use spaces.
+    For alphabetic languages, count words normally.
+    """
+    if not text:
+        return 0
+    if _has_cjk(text):
+        # CJK: count characters (excluding spaces and common punctuation)
+        import re
+        chars = re.sub(r'[\s.,!?;:\-\"\'\(\)\[\]，。！？；：、""''（）《》【】…～·]', '', text)
+        return len(chars)
+    return len(text.split())
+
+
+def _estimate_realistic_clip_count(
+    segments: list[dict],
+    duration: int,
+    requested_max: int,
+    min_duration: int | None = None,
+) -> int:
     """
     Estimate how many clips can realistically be extracted, based on transcript
-    content density rather than just video duration.
+    content density and video length.
 
-    A 30s clip needs ~60-80 words of transcript. We estimate from actual content.
+    Language-aware: handles CJK (Chinese/Japanese/Korean) where text has no
+    spaces by counting characters instead of words.
+
+    `min_duration` MUST match the user's requested minimum clip length (the
+    same value passed to the AI prompt as `min_clip`). Without it the
+    estimator silently assumed every clip would be ~40s long, which capped
+    a 1-minute source asking for 3×15s clips down to 1 — bug observed
+    2026-04-30 with a 63-second video. The fix divides by the actual
+    minimum, not an internal average.
     """
     if not segments or duration <= 0:
         return min(requested_max, 3)
 
+    # Same default the AI prompt uses (see `_select_clip_windows*` callers).
+    # Anything shorter than 10s makes for unwatchable shorts; floor it.
+    min_clip_floor = max(10, int(min_duration)) if min_duration else 15
+
     # Calculate speech density
     total_text = " ".join(s.get("text", "") for s in segments)
-    word_count = len(total_text.split())
-    words_per_second = word_count / max(duration, 1)
+    is_cjk = _has_cjk(total_text)
+    speech_units = _count_speech_units(total_text)
 
     # Speech coverage: what fraction of video has speech
     speech_duration = sum(s.get("end", 0) - s.get("start", 0) for s in segments)
     speech_coverage = speech_duration / max(duration, 1)
 
-    # Estimate based on content density
-    # A good 30s clip needs ~80 words; a 60s clip needs ~160 words
-    avg_clip_words = 100  # ~40s clip average
-    content_based_max = max(1, word_count // avg_clip_words)
+    # Content density floor — how many minimum-length clips' worth of speech
+    # we have. CJK speech rate ~4.5 chars/sec; English ~2.5 words/sec.
+    units_per_sec = 4.5 if is_cjk else 2.5
+    units_per_min_clip = max(1, int(min_clip_floor * units_per_sec))
+    content_based_max = max(1, speech_units // units_per_min_clip)
 
-    # Also cap based on duration (can't have overlapping clips)
-    avg_clip_duration = 40  # seconds
-    duration_based_max = max(1, duration // avg_clip_duration)
+    # Duration floor — how many minimum-length non-overlapping clips fit.
+    duration_based_max = max(1, duration // min_clip_floor)
 
-    # Use the more restrictive estimate
+    # Use the more restrictive estimate.
     realistic = min(content_based_max, duration_based_max, requested_max)
 
+    lang_label = "CJK chars" if is_cjk else "words"
     logger.info(
-        f"Clip count estimation: {word_count} words, {words_per_second:.1f} wps, "
-        f"{speech_coverage:.0%} speech coverage → "
+        f"Clip count estimation: {speech_units} {lang_label}, "
+        f"{speech_coverage:.0%} speech coverage, min_clip_floor={min_clip_floor}s → "
         f"content_max={content_based_max}, duration_max={duration_based_max}, "
         f"requested={requested_max}, final={realistic}"
     )
@@ -162,7 +223,7 @@ async def extract_viral_clips(
 
     # Auto-scale max_clips based on actual content
     duration = video.duration_seconds or 0
-    effective_max = _estimate_realistic_clip_count(segments, duration, max_clips)
+    effective_max = _estimate_realistic_clip_count(segments, duration, max_clips, min_duration=min_duration)
     if effective_max < max_clips:
         logger.info(f"Scaled max_clips from {max_clips} to {effective_max} based on content analysis")
 
@@ -291,8 +352,19 @@ async def _load_or_transcribe_segments(video, user_settings, whisper_quality: st
         await asyncio.to_thread(whisper_service.load, whisper_quality)
         transcript_data = await whisper_service.transcribe(audio_path)
     except Exception as e:
-        logger.error(f"Whisper transcription failed for {video.id[:8]}: {e}")
-        return []
+        # Whisper crashed (corrupt audio, OOM, model load failure, etc.) — re-raise
+        # so the job fails LOUDLY instead of silently downgrading to duration-based
+        # clips. Returning [] here used to land us in the no-speech fallback path,
+        # which produced random time-cut clips. The legitimate "video has no speech"
+        # case is unaffected: Whisper returns successfully with an empty `segments`
+        # list, which the caller routes to the duration-based fallback as before.
+        logger.error(f"Whisper transcription failed for {video.id[:8]}: {e}", exc_info=True)
+        raise ValueError(
+            f"Audio transcription failed: {e}. "
+            f"This usually means the audio track is corrupt, missing, or in an "
+            f"unsupported format. Try re-downloading the video, or re-analyze "
+            f"with a different Whisper quality setting."
+        )
 
     segments = transcript_data.get("segments", [])
 
@@ -326,8 +398,18 @@ async def _select_clip_windows_with_retries(
     segments, title, duration, max_clips, user_settings,
     min_duration=None, max_duration=None, job_id=None, user_id="local",
 ) -> list[dict]:
-    """Try clip selection with progressively relaxed constraints."""
-    # Attempt 1: normal constraints
+    """Try clip selection with progressively relaxed constraints.
+
+    User-pinned bounds are non-negotiable: the fallback cascade only widens
+    the side(s) the user did NOT specify. Pre-2026-05-26 the retries
+    hardcoded 10-90s then 5-120s regardless of input, so a request for
+    10-20s clips could silently ship a 53s clip when attempt 1 found
+    nothing in-range. _select_clip_windows already retries the AI call
+    twice internally, so when both bounds are pinned a third call with the
+    same bounds is unlikely to help — return [] and let extract_viral_clips
+    raise a clean "no clips found" error.
+    """
+    # Attempt 1: try the requested constraints exactly.
     clip_windows = await _select_clip_windows(
         segments, title, duration, max_clips, user_settings,
         min_duration=min_duration, max_duration=max_duration,
@@ -335,25 +417,45 @@ async def _select_clip_windows_with_retries(
     if clip_windows:
         return clip_windows
 
-    # Attempt 2: relaxed duration (10-90s)
-    logger.info("No clips found with default constraints, retrying with relaxed duration (10-90s)...")
+    # If the user pinned BOTH bounds the duration window is non-negotiable.
+    # _select_clip_windows already retried the AI 2x; widening would silently
+    # violate the user's request. Surface the failure cleanly instead.
+    if min_duration is not None and max_duration is not None:
+        logger.info(
+            f"No clips found within user range {min_duration}-{max_duration}s "
+            f"(not relaxing — user pinned both bounds)"
+        )
+        return []
+
+    # Auto-mode or one-sided override: widen only the unspecified side(s).
+    relax_min = min_duration if min_duration is not None else 10
+    relax_max = max_duration if max_duration is not None else 90
+    logger.info(
+        f"No clips found with default constraints, retrying with relaxed duration "
+        f"({relax_min}-{relax_max}s)..."
+    )
     if job_id:
         await ws_manager.send_progress(job_id, 20, "Retrying with relaxed duration constraints...", user_id)
     clip_windows = await _select_clip_windows(
         segments, title, duration, max_clips, user_settings,
-        min_duration=10, max_duration=90,
+        min_duration=relax_min, max_duration=relax_max,
     )
     if clip_windows:
         return clip_windows
 
-    # Attempt 3: very permissive (5-120s) but keep reasonable clip count (halved, min 2)
+    # Attempt 3: most permissive — but user-set bounds still win where present.
+    perm_min = min_duration if min_duration is not None else 5
+    perm_max = max_duration if max_duration is not None else 120
     reduced_clips = max(2, max_clips // 2)
-    logger.info(f"Still no clips, trying permissive extraction (5-120s, {reduced_clips} clips)...")
+    logger.info(
+        f"Still no clips, trying permissive extraction "
+        f"({perm_min}-{perm_max}s, {reduced_clips} clips)..."
+    )
     if job_id:
         await ws_manager.send_progress(job_id, 25, "Last attempt with relaxed constraints...", user_id)
     clip_windows = await _select_clip_windows(
         segments, title, duration, reduced_clips, user_settings,
-        min_duration=5, max_duration=120,
+        min_duration=perm_min, max_duration=perm_max,
     )
     return clip_windows or []
 
@@ -478,9 +580,30 @@ async def _select_clip_windows(
     time_offset: float = 0,
 ) -> list[dict]:
     """Use AI to identify the best clip windows from the transcript."""
-    # Dynamic clip duration based on source video length (can be overridden)
+    # Resolve clip duration range from user input + source duration. Order
+    # matters: explicit user values win in full; if the user gave only one
+    # bound we derive the other while respecting the bound they typed;
+    # otherwise we fall back to the duration-based defaults that have shipped
+    # since launch. The earlier code only honored user input when BOTH bounds
+    # were set, silently ignoring a single-bound override (bug 2026-04-30).
     if min_duration and max_duration:
         min_clip_sec, max_clip_sec = min_duration, max_duration
+    elif min_duration:
+        # User typed only a minimum. Pick a max that respects min and the
+        # source length: the clip can't be longer than the source itself,
+        # and we keep at least min+5s of headroom so the AI has flexibility.
+        if duration and duration < 120:
+            max_clip_sec = max(min_duration + 5, min(60, duration - 5))
+        elif duration and duration < 300:
+            max_clip_sec = max(min_duration + 5, 60)
+        else:
+            max_clip_sec = max(min_duration + 5, 90)
+        min_clip_sec = min_duration
+    elif max_duration:
+        # User typed only a maximum. Derive a sensible min — third of the
+        # max, floored at 10s so we never end up below the API's lower bound.
+        min_clip_sec = max(10, min(15, max_duration // 3))
+        max_clip_sec = max_duration
     elif duration and duration < 120:
         min_clip_sec, max_clip_sec = 15, min(60, max(duration - 5, 20))
     elif duration and duration < 300:
@@ -549,12 +672,18 @@ async def _select_clip_windows(
         except (TypeError, ValueError):
             continue
 
-        # Apply time offset for chunked extraction
-        if time_offset > 0:
-            start += time_offset
-            end += time_offset
-
-        # Clamp to valid range
+        # Clamp to valid range. The chunked path passes segments to the AI
+        # with their *global* timestamps already (see `_chunked_clip_selection`
+        # — `chunk_segments` keeps each segment's original start/end, and
+        # `_build_segments_text` formats them as-is). So AI returns clips
+        # in global time, and we should NOT add `time_offset` here — doing
+        # so was double-counting and made chunks 2+ silently lose almost
+        # every clip via the `start >= end` skip below. (Bug 2026-04-30:
+        # an 18-clip request on a 9.2-min source returned only 4 because
+        # chunks 2 & 3 produced unusable times.)
+        #
+        # `total_duration` still uses `duration + time_offset` so we clamp
+        # at the chunk's *global* end, not the chunk's local length.
         if start < 0:
             start = 0
         total_duration = duration + time_offset if time_offset > 0 else duration
@@ -562,6 +691,13 @@ async def _select_clip_windows(
             end = total_duration
 
         if start >= end:
+            # AI returned a clip that fell outside the chunk's global range
+            # (e.g. an end time smaller than start after clamp). Visible at
+            # info level so future regressions of this kind aren't silent.
+            logger.info(
+                f"Skipping invalid clip after clamp: start={start:.1f}, end={end:.1f} "
+                f"(chunk total_duration={total_duration})"
+            )
             continue
 
         # Re-validate length AFTER clamping — be lenient
@@ -660,7 +796,7 @@ async def _process_clips_parallel(
         )
         return clip_path
 
-    extract_tasks = [_extract_one(i, w) for i, w in enumerate(clip_windows)]
+    extract_tasks = [_ffmpeg_limited(_extract_one(i, w)) for i, w in enumerate(clip_windows)]
     clip_paths = await asyncio.gather(*extract_tasks, return_exceptions=True)
 
     # Phase 2: Burn captions in parallel (on successfully extracted clips)
@@ -675,7 +811,7 @@ async def _process_clips_parallel(
         captioned_path, caption_status = await _burn_clip_captions(clip_path, clip_segments, caption_style)
         return captioned_path, caption_status
 
-    caption_tasks = [_caption_one(i, cp, w) for i, (cp, w) in enumerate(zip(clip_paths, clip_windows))]
+    caption_tasks = [_ffmpeg_limited(_caption_one(i, cp, w)) for i, (cp, w) in enumerate(zip(clip_paths, clip_windows))]
     caption_results = await asyncio.gather(*caption_tasks, return_exceptions=True)
 
     # Phase 3: Thumbnails + metadata in parallel
@@ -692,12 +828,23 @@ async def _process_clips_parallel(
             continue
 
         captioned_path, caption_status = cap_result
+        # `caption_status == "extract_failed"` means the underlying clip
+        # extract raised; `captioned_path` is the original Exception object,
+        # NOT a real Path. Letting it through would propagate a garbage
+        # `video_path` (the str() of the exception) into the GeneratedVideo
+        # row downstream. Drop it here.
+        if caption_status == "extract_failed":
+            logger.warning(
+                f"Clip {i+1} skipped: extract step failed for window "
+                f"{window.get('start')}-{window.get('end')}s"
+            )
+            continue
         clip_segments = _filter_and_offset_segments(segments, window["start"], window["end"])
 
         # Adaptive thumbnail timestamp (30% through clip, max 5s)
         clip_dur = window["end"] - window["start"]
         thumb_ts = min(clip_dur * 0.3, 5.0)
-        thumb_tasks.append(extract_thumbnail(captioned_path, timestamp=thumb_ts))
+        thumb_tasks.append(_ffmpeg_limited(extract_thumbnail(captioned_path, timestamp=thumb_ts)))
 
         transcript_text = " ".join(s["text"] for s in clip_segments)
         meta_tasks.append(_generate_clip_metadata(
@@ -811,6 +958,20 @@ async def _burn_clip_captions(clip_path: Path, segments: list[dict], style: str 
                 ass_path.unlink(missing_ok=True)
             except Exception:
                 pass
+
+        # `caption_service.burn_captions` returns the *input* path unchanged
+        # in three failure modes that don't raise: FFmpeg missing libass,
+        # the burn command returning non-zero, or the ASS file ending up
+        # empty (no extractable words for these segments). Treat any of
+        # those as a failure — otherwise the clip ships with NO captions
+        # but `caption_status="applied"`. Bug 2026-04-30.
+        if captioned == clip_path:
+            logger.warning(
+                f"Caption burn returned input path unchanged for {clip_path.name} — "
+                f"libass missing, ffmpeg burn failed, or no words extractable from "
+                f"{len(segments)} segment(s). Marking caption_status=failed."
+            )
+            return clip_path, "failed"
 
         return captioned, "applied"
     except Exception as e:
