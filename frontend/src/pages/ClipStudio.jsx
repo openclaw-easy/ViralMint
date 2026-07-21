@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import {
   Box, Typography, Paper, Stack, Chip, IconButton, Button, Divider,
   TextField, Tooltip, CircularProgress, Slider, Menu, MenuItem,
   ListItemText, ListItemIcon, Skeleton, Badge, alpha, FormControlLabel, Checkbox,
   Dialog, DialogTitle, DialogContent, DialogActions,
+  LinearProgress, Collapse, Tabs, Tab,
 } from "@mui/material"
 import ContentCutIcon from "@mui/icons-material/ContentCut"
 import WhatshotIcon from "@mui/icons-material/Whatshot"
@@ -25,6 +26,10 @@ import CloseIcon from "@mui/icons-material/Close"
 import CheckCircleIcon from "@mui/icons-material/CheckCircle"
 import VideocamIcon from "@mui/icons-material/Videocam"
 import FolderOpenIcon from "@mui/icons-material/FolderOpen"
+import AddIcon from "@mui/icons-material/Add"
+import TuneIcon from "@mui/icons-material/TuneOutlined"
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore"
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesomeOutlined"
 import http from "../api/http"
 import useAppStore from "../store/appStore"
 import ActiveJobsBanner from "../components/create/ActiveJobsBanner"
@@ -50,6 +55,134 @@ function viralityLabel(score) {
   if (score >= 6) return "Good"
   if (score >= 4) return "Average"
   return "Low"
+}
+
+// Map AI-returned hook_type values to short user-facing labels. The closed
+// set lives server-side in clip_extractor (curiosity_gap, contrarian,
+// emotional_peak, question, number_promise, story_loop, actionable_tip,
+// shocking_claim, general). "general" is the catch-all and renders as null
+// (no chip) so we don't crowd the UI with an uninformative label.
+const HOOK_TYPE_LABEL = {
+  curiosity_gap:  "Curiosity gap",
+  contrarian:     "Contrarian",
+  emotional_peak: "Emotional peak",
+  question:       "Question hook",
+  number_promise: "Number promise",
+  story_loop:     "Story loop",
+  actionable_tip: "Actionable tip",
+  shocking_claim: "Shocking claim",
+}
+
+function hookTypeLabel(t) {
+  if (!t || t === "general") return null
+  return HOOK_TYPE_LABEL[t] || null
+}
+
+// clip_score_breakdown_json arrives as a JSON string ({flow, value, trend,
+// shareability} each 1-10). Parse defensively — a legacy clip has no field,
+// a malformed one shouldn't throw. Returns the parsed object or null so the
+// scoreboard hides itself when there's nothing to show.
+function parseScoreBreakdown(clip) {
+  const raw = clip?.clip_score_breakdown_json
+  if (!raw) return null
+  if (typeof raw === "object") return raw
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === "object" ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/* ── Score breakdown scoreboard ─────────────────────────────── */
+
+const SCORE_FACTOR_META = {
+  hook:         { label: "Hook",  blurb: "Does the opening 2-3 seconds stop the scroll? Scored on the first sentence only." },
+  flow:         { label: "Flow",  blurb: "Logical narrative arc with a satisfying close — no dangling thoughts." },
+  value:        { label: "Value", blurb: "Emotional or practical resonance — a payoff, actionable takeaway, or gut reaction." },
+  trend:        { label: "Trend", blurb: "Alignment with what audiences are clicking on right now in this niche." },
+  shareability: { label: "Share", blurb: "Would a viewer quote this, screenshot it, or send it to a friend?" },
+}
+
+function scoreFactorColor(score) {
+  if (score == null) return "text.disabled"
+  if (score >= 8) return "success.main"
+  if (score >= 6) return "warning.main"
+  return "text.disabled"
+}
+
+function ScoreBar({ factor, score }) {
+  const meta = SCORE_FACTOR_META[factor]
+  if (!meta) return null
+  const pct = score == null ? 0 : Math.max(0, Math.min(score, 10)) * 10
+  const color = scoreFactorColor(score)
+  return (
+    <Tooltip title={meta.blurb} arrow placement="top">
+      <Box sx={{ cursor: "default" }}>
+        <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.25 }}>
+          <Typography variant="caption" sx={{ fontWeight: 600, fontSize: "0.7rem" }}>{meta.label}</Typography>
+          <Typography variant="caption" sx={{ fontWeight: 700, fontSize: "0.7rem", color }}>
+            {score == null ? "—" : score.toFixed(1)}
+          </Typography>
+        </Stack>
+        <LinearProgress
+          variant="determinate"
+          value={pct}
+          sx={{
+            height: 5, borderRadius: 3,
+            bgcolor: (t) => t.palette.mode === "dark" ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)",
+            "& .MuiLinearProgress-bar": { bgcolor: color, borderRadius: 3 },
+          }}
+        />
+      </Box>
+    </Tooltip>
+  )
+}
+
+// 5-factor virality scoreboard (Hook / Flow / Value / Trend / Share) shown in
+// the clip detail panel. Renders nothing on legacy clips that have neither a
+// hook score nor a parsed breakdown — keeps the panel backward-compatible.
+function ScoreBreakdownPanel({ clip }) {
+  if (!clip) return null
+  const hook = clip.clip_hook_score
+  const breakdown = parseScoreBreakdown(clip)
+  if (hook == null && !breakdown) return null
+
+  const factors = [
+    { key: "hook", score: hook },
+    { key: "flow", score: breakdown?.flow },
+    { key: "value", score: breakdown?.value },
+    { key: "trend", score: breakdown?.trend },
+    { key: "shareability", score: breakdown?.shareability },
+  ]
+
+  return (
+    <Paper variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
+        <WhatshotIcon sx={{ fontSize: 16, color: "primary.main" }} />
+        <Typography variant="overline" sx={{ color: "text.secondary", fontWeight: 700, fontSize: "0.65rem" }}>
+          Virality scoreboard
+        </Typography>
+        {clip.clip_virality_score != null && (
+          <>
+            <Box sx={{ flex: 1 }} />
+            <Typography variant="caption" sx={{ color: "text.secondary", fontSize: "0.7rem" }}>
+              Overall: <strong>{clip.clip_virality_score.toFixed(1)}</strong>/10
+            </Typography>
+          </>
+        )}
+      </Stack>
+      <Box sx={{
+        display: "grid",
+        gridTemplateColumns: { xs: "repeat(2, 1fr)", sm: "repeat(3, 1fr)", md: "repeat(5, 1fr)" },
+        gap: 1.5,
+      }}>
+        {factors.map(({ key, score }) => (
+          <ScoreBar key={key} factor={key} score={score} />
+        ))}
+      </Box>
+    </Paper>
+  )
 }
 
 /* ── Source Video Sidebar Item ──────────────────────────────── */
@@ -213,21 +346,134 @@ const WHISPER_QUALITIES = [
   { value: "best", label: "Best (large-v3)", desc: "~8min per 5min video" },
 ]
 
+// Caption styles the OSS pipeline can render. emoji_style vocab matches the
+// backend's _EMOJI_STYLES set (none|minimal|moderate|heavy, default moderate).
+const CAPTION_STYLE_OPTIONS = ["viral", "classic", "bold", "none"]
+const EMOJI_STYLE_OPTIONS = [
+  { v: "none", label: "Off" },
+  { v: "minimal", label: "Minimal" },
+  { v: "moderate", label: "Moderate" },
+  { v: "heavy", label: "Heavy" },
+]
+
+// Mirrors _MANUAL_MAX_RANGES in backend/api/downloaded.py — keep aligned so
+// the UI's add-row cap matches what the backend will accept.
+const MANUAL_ROWS_MAX = 10
+
+// Client-side timestamp parse mirroring backend clip_extractor._parse_timestamp
+// so the dialog can red-state a bad row + disable Submit before posting. The
+// backend re-validates and is the authority; this is just instant feedback.
+function parseTimestamp(text) {
+  if (typeof text === "number") return text >= 0 ? text : null
+  const s = String(text ?? "").trim()
+  if (!s) return null
+  const parts = s.split(":")
+  if (parts.length > 3) return null
+  const nums = parts.map(p => parseFloat(p))
+  if (nums.some(n => !Number.isFinite(n) || n < 0)) return null
+  if (nums.length >= 2 && nums[nums.length - 1] >= 60) return null
+  if (nums.length === 3 && nums[1] >= 60) return null
+  if (nums.length === 1) return nums[0]
+  if (nums.length === 2) return nums[0] * 60 + nums[1]
+  return nums[0] * 3600 + nums[1] * 60 + nums[2]
+}
+
+// Shared post-processing controls (rendered under both extraction modes).
+function CaptionStylePicker({ value, onChange }) {
+  return (
+    <Box>
+      <Typography variant="caption" sx={{ fontWeight: 600, mb: 0.5, display: "block" }}>Caption style</Typography>
+      <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+        {CAPTION_STYLE_OPTIONS.map(s => (
+          <Chip key={s} label={s} size="small"
+            variant={value === s ? "filled" : "outlined"}
+            color={value === s ? "primary" : "default"}
+            onClick={() => onChange(s)}
+            sx={{ textTransform: "capitalize", cursor: "pointer" }} />
+        ))}
+      </Stack>
+    </Box>
+  )
+}
+
+function EmojiStylePicker({ value, onChange, disabled }) {
+  return (
+    <Box>
+      <Typography variant="caption" sx={{ fontWeight: 600, mb: 0.5, display: "block" }}>
+        AutoEmoji <Chip label="captions only" size="small" variant="outlined" sx={{ ml: 0.5, height: 18, fontSize: "0.6rem" }} />
+      </Typography>
+      <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+        {EMOJI_STYLE_OPTIONS.map(({ v, label }) => (
+          <Chip key={v} label={label} size="small"
+            variant={value === v ? "filled" : "outlined"}
+            color={value === v ? "primary" : "default"}
+            onClick={() => onChange(v)}
+            sx={{ cursor: "pointer" }}
+            disabled={disabled} />
+        ))}
+      </Stack>
+      <Typography variant="caption" sx={{ color: "text.secondary", mt: 0.5, display: "block" }}>
+        Emojis are inserted after matched keywords (🔥 fire, 💰 money, ❤️ love, etc.).
+        {disabled ? " Disabled because captions are off." : ""}
+      </Typography>
+    </Box>
+  )
+}
+
 function ExtractDialog({ open, onClose, video, onExtract }) {
   const hasSegments = !!video?.has_transcript_segments
-  const [opts, setOpts] = useState({ caption_style: "viral", min_duration: null, max_duration: null, whisper_quality: "balanced", retranscribe: false })
+  const [opts, setOpts] = useState({
+    caption_style: "viral", min_duration: null, max_duration: null,
+    whisper_quality: "balanced", retranscribe: false,
+    remove_silence: false, user_query: "", target_platform: "",
+    emoji_style: "moderate", genre: "",
+  })
+  const [advancedOpen, setAdvancedOpen] = useState(false)
 
-  // Reset retranscribe when video changes
-  useEffect(() => { setOpts(p => ({ ...p, retranscribe: false })) }, [video?.id])
+  // Extraction strategy: "ai" (viral-clip picker, default) or "manual" (cut
+  // user-supplied time ranges verbatim). Manual mode fills the `rows` list —
+  // one row per range, capped at MANUAL_ROWS_MAX.
+  const [mode, setMode] = useState("ai")
+  const [rows, setRows] = useState([{ start: "", end: "" }])
+
+  // Reset intent-tied state when the source video changes.
+  useEffect(() => {
+    setOpts(p => ({ ...p, retranscribe: false, user_query: "" }))
+    setAdvancedOpen(false)
+    setMode("ai")
+    setRows([{ start: "", end: "" }])
+  }, [video?.id])
+
+  // Per-row resolution for manual mode: each entry gets {startSec, endSec,
+  // valid, msg} so we can show an inline duration / error next to the fields.
+  const rowResolutions = useMemo(() => rows.map((r) => {
+    const startSec = parseTimestamp(r.start)
+    const endSec = parseTimestamp(r.end)
+    if (r.start === "" && r.end === "") return { startSec: null, endSec: null, valid: false, msg: null }
+    if (startSec == null || endSec == null) return { startSec, endSec, valid: false, msg: "invalid time" }
+    if (endSec <= startSec) return { startSec, endSec, valid: false, msg: "end ≤ start" }
+    if (endSec - startSec < 1) return { startSec, endSec, valid: false, msg: "< 1s" }
+    return { startSec, endSec, valid: true, msg: null }
+  }), [rows])
 
   if (!video) return null
 
   const transcribeEnabled = !hasSegments || opts.retranscribe
   const durationError = opts.min_duration && opts.max_duration && opts.max_duration - opts.min_duration < 1
-  const canSubmit = !durationError
+
+  // Active manual ranges = only the fully-valid rows. Any partial-but-invalid
+  // row blocks Submit so a half-typed range can't ship.
+  const activeManualRanges = mode === "manual"
+    ? rowResolutions.filter(r => r.valid).map(r => ({ start: r.startSec, end: r.endSec }))
+    : []
+  const manualHasErrors = mode === "manual" && rows.some((r, i) =>
+    (r.start !== "" || r.end !== "") && !rowResolutions[i].valid,
+  )
+  const manualEmpty = mode === "manual" && activeManualRanges.length === 0
+  const canSubmit = mode === "ai" ? !durationError : (!manualEmpty && !manualHasErrors)
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1 }}>
         <ContentCutIcon color="primary" /> Extract Clips
       </DialogTitle>
@@ -235,11 +481,24 @@ function ExtractDialog({ open, onClose, video, onExtract }) {
         <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
           From: <strong>{video.title || "Untitled"}</strong> ({formatTime(video.duration_seconds)})
         </Typography>
-        <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 2.5 }}>
-          AI will analyze the transcript and automatically find the best viral moments. The number of clips depends on how much quality content the video has.
-        </Typography>
+
+        {/* Mode toggle — AI picks the best moments, or you cut your own ranges. */}
+        <Tabs
+          value={mode}
+          onChange={(_, v) => v && setMode(v)}
+          variant="fullWidth"
+          sx={{
+            mb: 2, minHeight: 40,
+            "& .MuiTab-root": { textTransform: "none", minHeight: 40, fontWeight: 600, fontSize: "0.85rem" },
+          }}
+        >
+          <Tab value="ai" icon={<AutoAwesomeIcon sx={{ fontSize: 18 }} />} iconPosition="start" label="AI picks" />
+          <Tab value="manual" icon={<ContentCutIcon sx={{ fontSize: 18 }} />} iconPosition="start" label="My ranges" />
+        </Tabs>
+
         <Stack spacing={2.5}>
-          {/* Transcription */}
+          {/* Transcription — used by BOTH modes (manual still needs the
+              transcript to render captions against each cut range). */}
           <Box>
             <FormControlLabel
               control={
@@ -292,20 +551,9 @@ function ExtractDialog({ open, onClose, video, onExtract }) {
             </TextField>
           </Box>
 
-          {/* Caption style */}
-          <Box>
-            <Typography variant="caption" sx={{ fontWeight: 600, mb: 0.5, display: "block" }}>Caption style</Typography>
-            <Stack direction="row" spacing={1}>
-              {["viral", "classic", "bold", "none"].map(s => (
-                <Chip key={s} label={s} size="small"
-                  variant={opts.caption_style === s ? "filled" : "outlined"}
-                  color={opts.caption_style === s ? "primary" : "default"}
-                  onClick={() => setOpts(p => ({ ...p, caption_style: s }))}
-                  sx={{ textTransform: "capitalize", cursor: "pointer" }} />
-              ))}
-            </Stack>
-          </Box>
-
+          {/* ── AI mode ─────────────────────────────────────────── */}
+          {mode === "ai" && (
+          <>
           {/* Duration range */}
           <Box>
             <Typography variant="caption" sx={{ fontWeight: 600, mb: 0.5, display: "block" }}>
@@ -330,14 +578,224 @@ function ExtractDialog({ open, onClose, video, onExtract }) {
               </Typography>
             )}
           </Box>
+
+          <CaptionStylePicker
+            value={opts.caption_style}
+            onChange={v => setOpts(p => ({ ...p, caption_style: v }))} />
+
+          {/* Advanced-options expander — power-user knobs collapsed so the
+              dialog opens compact. Defaults are sensible; only niche cases
+              (custom query, platform / genre bias, emoji, silence) touch these. */}
+          <Box>
+            <Button
+              variant="text"
+              startIcon={<TuneIcon sx={{ fontSize: 18 }} />}
+              endIcon={<ExpandMoreIcon sx={{ fontSize: 18, transform: advancedOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .15s ease" }} />}
+              onClick={() => setAdvancedOpen(v => !v)}
+              sx={{
+                textTransform: "none", fontWeight: 600, color: "text.secondary", px: 0.5, py: 0.5,
+                "&:hover": { bgcolor: "action.hover", color: "primary.main" },
+              }}
+            >
+              Advanced options
+              <Typography variant="caption" sx={{ ml: 0.75, color: "text.disabled", fontWeight: 500 }}>
+                find specific moments · platform · genre · emoji · silence
+              </Typography>
+            </Button>
+          </Box>
+
+          <Collapse in={advancedOpen} timeout={200}>
+            <Stack spacing={2.5}>
+              {/* User query — natural-language clip filter. When non-empty the
+                  AI ranks segments by match to this query first, then virality. */}
+              <Box>
+                <Typography variant="caption" sx={{ fontWeight: 600, mb: 0.5, display: "block" }}>
+                  Find specific moments <Chip label="optional" size="small" variant="outlined" sx={{ ml: 0.5, height: 18, fontSize: "0.6rem" }} />
+                </Typography>
+                <TextField
+                  size="small" fullWidth
+                  placeholder='e.g. "every joke that landed", "all Q&A moments"'
+                  value={opts.user_query}
+                  onChange={e => setOpts(p => ({ ...p, user_query: e.target.value }))}
+                  slotProps={{ htmlInput: { maxLength: 500 } }}
+                />
+                <Typography variant="caption" sx={{ color: "text.secondary", mt: 0.5, display: "block" }}>
+                  Leave empty to find the most viral clips automatically.
+                </Typography>
+              </Box>
+
+              {/* Target platform — biases the AI hook-type ranker. */}
+              <Box>
+                <Typography variant="caption" sx={{ fontWeight: 600, mb: 0.5, display: "block" }}>
+                  Target platform <Chip label="optional" size="small" variant="outlined" sx={{ ml: 0.5, height: 18, fontSize: "0.6rem" }} />
+                </Typography>
+                <TextField select size="small" fullWidth
+                  value={opts.target_platform}
+                  onChange={e => setOpts(p => ({ ...p, target_platform: e.target.value }))}
+                >
+                  <MenuItem value="">Any (general viral ranking)</MenuItem>
+                  <MenuItem value="tiktok">TikTok — shock / contrarian / emotional</MenuItem>
+                  <MenuItem value="youtube_shorts">YouTube Shorts — curiosity / numbers / story</MenuItem>
+                  <MenuItem value="reels">Instagram Reels — emotional / lifestyle</MenuItem>
+                  <MenuItem value="linkedin">LinkedIn — actionable / data-backed</MenuItem>
+                  <MenuItem value="twitter">Twitter / X — hot takes / debates</MenuItem>
+                </TextField>
+                <Typography variant="caption" sx={{ color: "text.secondary", mt: 0.5, display: "block" }}>
+                  Biases which hook types the AI prioritizes. Clip length is unchanged.
+                </Typography>
+              </Box>
+
+              {/* Content genre — biases the AI's clip-selection heuristics. */}
+              <Box>
+                <Typography variant="caption" sx={{ fontWeight: 600, mb: 0.5, display: "block" }}>
+                  Content genre <Chip label="optional" size="small" variant="outlined" sx={{ ml: 0.5, height: 18, fontSize: "0.6rem" }} />
+                </Typography>
+                <TextField select size="small" fullWidth
+                  value={opts.genre}
+                  onChange={e => setOpts(p => ({ ...p, genre: e.target.value }))}
+                >
+                  <MenuItem value="">Auto-detect (no genre bias)</MenuItem>
+                  <MenuItem value="podcast">Podcast — guest's quotable moments</MenuItem>
+                  <MenuItem value="interview">Interview — best Q&amp;A answers</MenuItem>
+                  <MenuItem value="qa">Q&amp;A / AMA — question + answer pairs</MenuItem>
+                  <MenuItem value="vlog">Vlog — reactions + storytelling beats</MenuItem>
+                  <MenuItem value="tutorial">Tutorial / how-to — standalone tips</MenuItem>
+                  <MenuItem value="gaming">Gaming — big plays + reactions</MenuItem>
+                  <MenuItem value="reaction">Reaction — emotional peaks</MenuItem>
+                  <MenuItem value="lecture">Lecture / educational — concept explainers</MenuItem>
+                </TextField>
+                <Typography variant="caption" sx={{ color: "text.secondary", mt: 0.5, display: "block" }}>
+                  Tells the AI what shape a "good clip" has for this content type.
+                </Typography>
+              </Box>
+
+              <EmojiStylePicker
+                value={opts.emoji_style}
+                disabled={opts.caption_style === "none"}
+                onChange={v => setOpts(p => ({ ...p, emoji_style: v }))} />
+
+              {/* Silence & filler removal */}
+              <Box>
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      checked={opts.remove_silence}
+                      onChange={e => setOpts(p => ({ ...p, remove_silence: e.target.checked }))}
+                      size="small"
+                    />
+                  }
+                  label={<Typography variant="caption" sx={{ fontWeight: 600 }}>Remove silence & filler words</Typography>}
+                />
+                <Typography variant="caption" sx={{ color: "text.secondary", display: "block", ml: 4, mt: -0.5 }}>
+                  Cuts out "um", "uh", long pauses — tighter pacing for short-form
+                </Typography>
+              </Box>
+            </Stack>
+          </Collapse>
+          </>
+          )}
+
+          {/* ── Manual mode ─────────────────────────────────────── */}
+          {mode === "manual" && (
+          <>
+            <Box>
+              <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+                <Typography variant="caption" sx={{ fontWeight: 600 }}>Time ranges</Typography>
+                <Typography variant="caption" sx={{ color: "text.disabled" }}>
+                  ({rows.length}/{MANUAL_ROWS_MAX})
+                </Typography>
+              </Stack>
+              <Typography variant="caption" sx={{ color: "text.secondary", mb: 1, display: "block" }}>
+                Accepts <code>SS</code>, <code>MM:SS</code>, or <code>HH:MM:SS</code> (with optional <code>.fff</code>).
+              </Typography>
+
+              <Stack spacing={0.75}>
+                {rows.map((r, i) => {
+                  const res = rowResolutions[i]
+                  const isError = (r.start !== "" || r.end !== "") && !res.valid
+                  return (
+                    <Stack key={i} direction="row" spacing={1} alignItems="center">
+                      <TextField
+                        size="small" placeholder="Start" value={r.start}
+                        onChange={(e) => setRows(prev => prev.map((row, j) => j === i ? { ...row, start: e.target.value } : row))}
+                        error={isError && res.startSec == null}
+                        sx={{ width: 110 }}
+                        slotProps={{ htmlInput: { style: { fontFamily: "ui-monospace, monospace", fontSize: "0.85rem" } } }}
+                      />
+                      <Typography variant="caption" sx={{ color: "text.disabled" }}>→</Typography>
+                      <TextField
+                        size="small" placeholder="End" value={r.end}
+                        onChange={(e) => setRows(prev => prev.map((row, j) => j === i ? { ...row, end: e.target.value } : row))}
+                        error={isError && (res.endSec == null || (res.startSec != null && res.endSec != null && res.endSec <= res.startSec))}
+                        sx={{ width: 110 }}
+                        slotProps={{ htmlInput: { style: { fontFamily: "ui-monospace, monospace", fontSize: "0.85rem" } } }}
+                      />
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        {res.valid && (
+                          <Typography variant="caption" sx={{ color: "success.main", fontWeight: 600 }}>
+                            {Math.round(res.endSec - res.startSec)}s
+                          </Typography>
+                        )}
+                        {res.msg && (
+                          <Typography variant="caption" sx={{ color: "error.main" }}>{res.msg}</Typography>
+                        )}
+                      </Box>
+                      <IconButton
+                        size="small" aria-label="Remove row"
+                        onClick={() => setRows(prev => prev.length > 1 ? prev.filter((_, j) => j !== i) : prev)}
+                        disabled={rows.length === 1}
+                        sx={{ color: "text.secondary" }}
+                      >
+                        <CloseIcon sx={{ fontSize: 16 }} />
+                      </IconButton>
+                    </Stack>
+                  )
+                })}
+                <Button
+                  size="small"
+                  startIcon={<AddIcon sx={{ fontSize: 16 }} />}
+                  onClick={() => setRows(prev => prev.length < MANUAL_ROWS_MAX ? [...prev, { start: "", end: "" }] : prev)}
+                  disabled={rows.length >= MANUAL_ROWS_MAX}
+                  sx={{ textTransform: "none", alignSelf: "flex-start", fontSize: "0.78rem" }}
+                >
+                  Add range
+                </Button>
+                {rows.length >= MANUAL_ROWS_MAX && (
+                  <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                    Cap at {MANUAL_ROWS_MAX} ranges per submit.
+                  </Typography>
+                )}
+              </Stack>
+            </Box>
+
+            <CaptionStylePicker
+              value={opts.caption_style}
+              onChange={v => setOpts(p => ({ ...p, caption_style: v }))} />
+
+            <EmojiStylePicker
+              value={opts.emoji_style}
+              disabled={opts.caption_style === "none"}
+              onChange={v => setOpts(p => ({ ...p, emoji_style: v }))} />
+          </>
+          )}
         </Stack>
       </DialogContent>
       <DialogActions sx={{ px: 3, pb: 2 }}>
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="contained" startIcon={<ContentCutIcon />}
           disabled={!canSubmit}
-          onClick={() => { onExtract(video.id, { ...opts, force_retranscribe: transcribeEnabled }); onClose() }}>
-          Extract Clips
+          onClick={() => {
+            onExtract(video.id, {
+              ...opts,
+              force_retranscribe: transcribeEnabled,
+              mode,
+              time_ranges: mode === "manual" ? activeManualRanges : undefined,
+            })
+            onClose()
+          }}>
+          {mode === "manual"
+            ? `Extract ${activeManualRanges.length || ""} clip${activeManualRanges.length !== 1 ? "s" : ""}`.trim()
+            : "Extract Clips"}
         </Button>
       </DialogActions>
     </Dialog>
@@ -467,15 +925,40 @@ export default function ClipStudio() {
   const handleExtract = async (videoId, opts) => {
     setExtracting(true)
     try {
+      const isManual = opts.mode === "manual"
+      // Only send a knob when the user actually set it — the default request
+      // shape (and thus behavior) stays identical to before this feature.
       const payload = { caption_style: opts.caption_style }
       if (opts.force_retranscribe) {
         payload.whisper_quality = opts.whisper_quality
         payload.force_retranscribe = true
       }
-      if (opts.min_duration) payload.min_duration = opts.min_duration
-      if (opts.max_duration) payload.max_duration = opts.max_duration
+      // emoji_style default is "moderate" — only send when overridden.
+      if (opts.emoji_style && opts.emoji_style !== "moderate") payload.emoji_style = opts.emoji_style
+      // remove_silence is an AI-mode concept only. A hand-picked manual range
+      // is a deliberate cut, so never re-cut it for silence (would shift the
+      // user's chosen timing). Gate the field on mode rather than let a stale
+      // AI-mode value leak through.
+      if (opts.remove_silence && !isManual) payload.remove_silence = true
+
+      if (isManual) {
+        payload.mode = "manual"
+        payload.time_ranges = opts.time_ranges
+      } else {
+        if (opts.min_duration) payload.min_duration = opts.min_duration
+        if (opts.max_duration) payload.max_duration = opts.max_duration
+        if (opts.user_query && opts.user_query.trim()) payload.user_query = opts.user_query.trim()
+        if (opts.target_platform) payload.target_platform = opts.target_platform
+        if (opts.genre) payload.genre = opts.genre
+      }
+
       await http.post(`/api/downloaded/${videoId}/extract-clips`, payload)
-      showSnackbar("Extracting viral clips — AI will find the best moments", "success")
+      showSnackbar(
+        isManual
+          ? `Cutting ${opts.time_ranges?.length || "your"} clip${opts.time_ranges?.length !== 1 ? "s" : ""} at the times you picked`
+          : "Extracting viral clips — AI will find the best moments",
+        "success",
+      )
     } catch (e) {
       showSnackbar(`Extract failed: ${e.response?.data?.detail || e.message}`, "error")
     } finally {
@@ -766,6 +1249,19 @@ export default function ClipStudio() {
                         color={viralityColor(selectedClip.clip_virality_score)}
                       />
                     )}
+                    {selectedClip.clip_hook_score != null && (
+                      <Chip
+                        label={`Hook ${selectedClip.clip_hook_score.toFixed(1)}/10`}
+                        size="small" variant="outlined"
+                        color={selectedClip.clip_hook_score >= 8 ? "success" : selectedClip.clip_hook_score >= 5 ? "warning" : "error"}
+                      />
+                    )}
+                    {hookTypeLabel(selectedClip.clip_hook_type) && (
+                      <Chip
+                        label={hookTypeLabel(selectedClip.clip_hook_type)}
+                        size="small" variant="outlined" color="primary"
+                      />
+                    )}
                     <Chip label={`${formatTime(selectedClip.duration_seconds)}`} icon={<AccessTimeIcon />} size="small" variant="outlined" />
                     <Chip label="9:16" size="small" variant="outlined" />
                     {selectedClip.caption_status === "applied" && (
@@ -850,6 +1346,11 @@ export default function ClipStudio() {
                           </Typography>
                         )}
                       </Box>
+
+                      {/* 5-factor virality scoreboard — Hook / Flow / Value /
+                          Trend / Share bars. Hides itself for legacy clips that
+                          carry neither a hook score nor a breakdown. */}
+                      <ScoreBreakdownPanel clip={selectedClip} />
 
                       {/* YouTube */}
                       {selectedClip.youtube_title && (

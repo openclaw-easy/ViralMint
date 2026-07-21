@@ -6,7 +6,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- **Clip Studio — structured scoring + control knobs ported from the hosted variant.**
+  Clips now get a hook score + hook type and a flow/value/trend/shareability
+  score breakdown (new `clip_hook_score` / `clip_hook_type` /
+  `clip_score_breakdown_json` columns, auto-migrated). The extract dialog gains
+  a free-form "describe the clips you want" query, target-platform and genre
+  bias, an emoji-style control, a remove-silence toggle, and a manual mode for
+  extracting explicit time ranges. Extraction options are consolidated into a
+  single `ExtractOptions` object; each clip gets a descriptive title and an
+  optional on-screen hook overlay.
+- **Chat — rich cards now persist across reloads.** The backend became the
+  single writer of rich cards (scout results, channel analysis, …) and
+  job-complete rows at WS-emit time, so they survive a page reload and are
+  saved even when a job finishes with no tab open (previously they were
+  in-memory only and lost).
+- **Chat — quick-reply chips** and a composer-lock fix: when the assistant asks
+  a follow-up question (e.g. "which platform?"), the input no longer stays
+  locked, and suggested answers render as clickable chips.
+- **Clip Studio — selection-quality improvements ported from the hosted variant.**
+  Sentence-snap (clips no longer cut mid-word), silent-gap backfill, topic
+  dedup (drops re-told stories), a short-video fast-path (sources under 20s
+  emit the whole clip; the blanket <30s reject is gone), and batched clip
+  metadata (one AI call for N clips instead of N). No-speech sources now yield
+  duration-based clips instead of erroring.
+- **Captions — CJK homophone correction.** When the narration script is
+  CJK-dominant, the burned captions now use the true script text (keeping
+  Whisper's timings) instead of ASR homophone substitutions. Fail-open for
+  non-CJK content.
+
 ### Fixed
+- **Clip Studio — extraction hardening ported from the hosted variant (7 bugfixes).**
+  Fixes a `time_offset` double-count that silently dropped almost every clip
+  past the first chunk on long videos; a clip-count estimator that assumed 40s
+  clips (collapsing "3×15s from a 63s video" to 1); Whisper failures that
+  silently downgraded to random duration-based clips instead of failing loudly;
+  single-bound (min-only / max-only) duration overrides being ignored; the
+  retry cascade widening past user-pinned bounds; and two caption/exception
+  leaks into the output path. Adds `backend/core/concurrency.py` to cap
+  parallel ffmpeg work.
+- **Analyzer — chunked AI transcript correction.** The old single-call
+  correction on `raw_text[:6000]` silently discarded everything past 6000 chars
+  on long videos; now sentence-aligned chunking corrects the whole transcript
+  with a per-chunk sanity guard (never loses content). Plus a `has_audio_stream`
+  ffprobe preflight so a video-only/silent file raises a clear error instead of
+  faster-whisper's opaque "tuple index out of range".
+- **Captions — placement, flashing, and non-Latin fixes.** `alignment=5`
+  (frame-center, ignores margins) → `alignment=2` (bottom-anchored) with
+  per-aspect margins; phrase-aware line grouping with continuous-hold events so
+  captions no longer blank out during Whisper's inter-word gaps; script-aware
+  font fallback so CJK/Arabic/Thai captions stop burning as tofu boxes; libass
+  preflight; concurrency-safe temp file; new `brainrot`/`urban`/`warm`/`mono`
+  styles.
+- **Music mix — voiceover level.** `amix` defaulted `normalize=1`, halving the
+  voiceover to −6 dB; add `normalize=0` + an `alimiter` peak guard so the voice
+  stays full-level with music as a true −20 dB bed.
+- **Messaging — concurrent channel start.** `start_all()` now launches every
+  channel in parallel with per-channel failure isolation, so the slowest
+  channel no longer gates the rest.
 - **Download hardening — pinned yt-dlp floor + TLS impersonation.**
   `requirements.txt` now pins `yt-dlp>=2026.7.4`: an unbounded `yt-dlp` on an
   old Python (macOS's system `python3` is 3.9) silently resolves to an ancient

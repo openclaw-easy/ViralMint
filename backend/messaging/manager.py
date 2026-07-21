@@ -6,6 +6,7 @@ and wires inbound messages from channels into the PlannerAgent.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Awaitable, Callable, Optional
 
@@ -47,12 +48,24 @@ class MessagingManager:
         return None
 
     async def start_all(self) -> None:
-        for ch in self._channels:
+        """Start every registered channel CONCURRENTLY.
+
+        Each channel's start() does a network handshake (Telegram long-poll
+        init, Slack socket-mode, Discord gateway; WhatsApp backgrounds its own
+        connect). Running them serially made the slowest channel gate the
+        rest — and since the lifespan used to await this, it also gated the
+        browser-open "ready" signal. Gather connects them in parallel; each
+        channel's failure is isolated + logged so one bad token can't stop
+        the others (per-task try/except → gather never raises).
+        """
+        async def _start_one(ch: MessagingChannel) -> None:
             try:
                 await ch.start()
                 logger.info(f"Messaging channel started: {ch.channel_name}")
             except Exception as e:
                 logger.warning(f"Failed to start channel {ch.channel_name}: {e}")
+
+        await asyncio.gather(*(_start_one(ch) for ch in self._channels))
 
     async def stop_all(self) -> None:
         for ch in self._channels:

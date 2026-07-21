@@ -19,10 +19,18 @@ const useAppStore = create((set, get) => ({
   setMessages: (msgs) => set({ messages: msgs }),
   setStreaming: (v) => set({ isStreaming: v }),
   appendStreamToken: (token) => set((s) => ({ streamingText: s.streamingText + token })),
-  finalizeStream: (fullText) => {
+  // quickReplies is optional — when the planner emits a <quick_replies> block,
+  // the chips render below the just-finished assistant bubble. They live only
+  // in the in-memory message (not persisted), so they vanish on session reload
+  // (intended — the conversation has moved on).
+  finalizeStream: (fullText, quickReplies) => {
     const cleaned = fullText || get().streamingText
+    const msg = { role: "assistant", content: cleaned }
+    if (Array.isArray(quickReplies) && quickReplies.length > 0) {
+      msg.quickReplies = quickReplies
+    }
     set((s) => ({
-      messages: [...s.messages, { role: "assistant", content: cleaned }],
+      messages: [...s.messages, msg],
       streamingText: "",
       isStreaming: false,
     }))

@@ -35,6 +35,17 @@ class ConnectionManager:
         """Send a JSON message to all connections for a user."""
         msg_type = message.get("type", "unknown")
         logger.debug("WS send → %s | type=%s", user_id, msg_type)
+
+        # Backend is the single writer of rich cards + job rows into chat
+        # history (attributed via the CHAT_SESSION ContextVar). on_ws_event
+        # decides internally which types persist and must never raise, but we
+        # still guard here so a history-write bug can never break WS delivery.
+        try:
+            from backend.core.chat_history import on_ws_event
+            await on_ws_event(message, user_id)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("chat-history hook failed (non-fatal): %s", e)
+
         data = json.dumps(message)
         if user_id not in self._connections:
             logger.debug("WS send skipped — no connections for %s", user_id)

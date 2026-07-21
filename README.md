@@ -172,7 +172,7 @@ Multi-platform trend discovery across **YouTube, TikTok, Douyin, and Google Tren
 <td width="50%" valign="top">
 
 ### 🧠 Analyze
-Local Whisper transcription, AI insight extraction (hook, structure, tone, retention risks), segment-level scoring, and AI-generated improvement suggestions per video.
+Local Whisper transcription with clean long-form handling, AI insight extraction (hook, structure, tone, retention risks, suggested title & hooks, a ready-to-run recreate prompt), segment-level scoring, and improvement suggestions per video.
 
 </td>
 </tr>
@@ -180,13 +180,13 @@ Local Whisper transcription, AI insight extraction (hook, structure, tone, reten
 <td width="50%" valign="top">
 
 ### 🎬 Generate
-Full pipeline: AI script → TTS voice → Pexels stock footage matched to keywords → word-by-word animated captions → background music → AI thumbnail.
+Full pipeline: AI script → TTS voice → Pexels stock footage matched to keywords → phrase-aware animated captions (with CJK/Arabic/Thai support) → balanced background music → AI thumbnail.
 
 </td>
 <td width="50%" valign="top">
 
 ### ✂️ Clip Studio
-Extract viral 30–60s shorts from long-form videos. AI picks the best moments and auto-burns captions. One source video → many publishable clips.
+One long video → many publishable shorts. AI finds the best moments and scores each on **hook, flow, value, trend-fit and shareability**, snaps cuts to sentence boundaries, and drops re-told stories. Bias picks by **platform or genre**, describe exactly what you want (*"every joke that landed"*), or hand-pick **manual time ranges** — with optional silence trimming, emoji captions, and a burned-in hook overlay.
 
 </td>
 </tr>
@@ -200,7 +200,7 @@ Direct upload to **YouTube** (OAuth) and **TikTok** (OAuth or session cookie) wi
 <td width="50%" valign="top">
 
 ### 💬 Chat
-Streaming WebSocket chat that orchestrates every agent. Say *"scout cooking videos"* or *"download this URL"* and it just runs. Action blocks dispatch background jobs.
+Streaming WebSocket chat that orchestrates every agent. Say *"scout cooking videos"* or *"download this URL"* and it just runs. Tappable quick-reply chips, follow-up questions that never lock the composer, and rich result cards that persist across reloads.
 
 </td>
 </tr>

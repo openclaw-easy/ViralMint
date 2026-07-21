@@ -52,7 +52,8 @@ Return JSON only (no markdown):
     "composite": 7.1
   }},
   "structural_pattern": "hook-problem-solution or listicle or story-arc or tutorial or reaction",
-  "retention_risks": ["timestamp or moment where viewers likely drop off and why"]
+  "retention_risks": ["timestamp or moment where viewers likely drop off and why"],
+  "recreate_prompt": "A single ready-to-run generation brief that recreates this video's WINNING SHAPE for a new topic: name the hook archetype, beat order, pacing, tone, and visual treatment as directives (e.g. 'Open on a bold contrarian claim in the first sentence; 3 rapid proof beats of ~8s each; conversational expert tone; end with a question CTA'). Format + structure only — never reuse this video's wording or topic."
 }}
 
 IMPORTANT for the "scores" object:
@@ -168,6 +169,84 @@ RULES:
 - Each improvement should be different from the others"""
 
 
+# --- Transcript correction ---------------------------------------------------
+# The AI correction pass is best-effort polish: the transcript must NEVER lose
+# content because of it. Long transcripts are corrected in sentence-aligned
+# chunks (concurrently); a chunk whose correction fails or looks suspicious
+# keeps its raw text. Chunks past MAX_CORRECTION_CHUNKS pass through raw to
+# bound AI cost/latency on very long videos.
+CORRECTION_CHUNK_CHARS = 2500  # stays under max_tokens=4096 even for CJK (~1 token/char)
+MAX_CORRECTION_CHUNKS = 6      # ~15k chars ≈ an hour of dense speech
+_CORRECTION_CONCURRENCY = 3
+_SENTENCE_ENDS = "。！？…!?.\n"
+
+
+def _split_for_correction(text: str, chunk_chars: int = CORRECTION_CHUNK_CHARS) -> list[str]:
+    """Split text into <=chunk_chars pieces, cutting at sentence ends when possible."""
+    chunks = []
+    i, n = 0, len(text)
+    while i < n:
+        end = min(i + chunk_chars, n)
+        if end < n:
+            window = text[i:end]
+            cut = max(window.rfind(c) for c in _SENTENCE_ENDS)
+            if cut > chunk_chars // 2:
+                end = i + cut + 1
+        chunks.append(text[i:end])
+        i = end
+    return chunks
+
+
+async def _ai_correct_transcript(user_settings, raw_text: str) -> str:
+    """Best-effort AI cleanup of a Whisper transcript. AI failures never raise
+    and never lose content — worst case is the raw text back."""
+    chunks = _split_for_correction(raw_text)
+    to_correct = chunks[:MAX_CORRECTION_CHUNKS]
+    passthrough = chunks[MAX_CORRECTION_CHUNKS:]
+    if passthrough:
+        logger.info(
+            "Transcript correction: correcting %d/%d chunks (%d chars pass through raw)",
+            len(to_correct), len(chunks), sum(len(c) for c in passthrough),
+        )
+
+    try:
+        ai = get_ai_client(user_settings)
+    except Exception as e:
+        logger.warning(f"AI transcript correction unavailable: {e} — using raw Whisper output")
+        return raw_text
+    sem = asyncio.Semaphore(_CORRECTION_CONCURRENCY)
+
+    async def _correct_one(chunk: str) -> str:
+        async with sem:
+            corrected = await ai.chat(
+                messages=[{"role": "user", "content": TRANSCRIPT_CORRECTION_PROMPT.format(
+                    transcript=chunk.strip()
+                )}],
+                max_tokens=4096,
+            )
+        corrected = (corrected or "").strip()
+        if corrected and 0.5 * len(chunk) <= len(corrected) <= 2 * len(chunk) + 50:
+            return corrected
+        logger.warning(
+            "Transcript correction chunk looked suspicious (%d -> %d chars) — keeping raw",
+            len(chunk), len(corrected),
+        )
+        return chunk.strip()
+
+    results = await asyncio.gather(
+        *(_correct_one(c) for c in to_correct), return_exceptions=True
+    )
+    out = []
+    for chunk, res in zip(to_correct, results):
+        if isinstance(res, BaseException):
+            logger.warning(f"Transcript correction chunk failed: {res} — keeping raw")
+            out.append(chunk.strip())
+        else:
+            out.append(res)
+    out.extend(c.strip() for c in passthrough)
+    return "\n\n".join(p for p in out if p)
+
+
 class AnalyzerAgent:
     async def run(
         self,
@@ -238,25 +317,13 @@ class AnalyzerAgent:
                     transcript_data = await whisper_service.transcribe(audio_path)
                     transcript_source = "whisper"
 
-                    # AI post-correction of Whisper transcript
+                    # AI post-correction of Whisper transcript (chunked; never loses content)
                     raw_text = transcript_data.get("text", "")
                     if raw_text:
-                        try:
-                            ai = get_ai_client(user_settings)
-                            corrected = await ai.chat(
-                                messages=[{"role": "user", "content": TRANSCRIPT_CORRECTION_PROMPT.format(
-                                    transcript=raw_text[:6000]
-                                )}],
-                                max_tokens=4096,
-                            )
-                            corrected = corrected.strip()
-                            if corrected and len(corrected) > len(raw_text) * 0.5:
-                                transcript_data["text"] = corrected
-                                logger.info(f"AI-corrected transcript for {dv.id}")
-                            else:
-                                logger.warning(f"AI correction returned suspicious result, keeping raw transcript")
-                        except Exception as e:
-                            logger.warning(f"AI transcript correction failed for {dv.id}: {e} — using raw Whisper output")
+                        corrected = await _ai_correct_transcript(user_settings, raw_text)
+                        if corrected and corrected != raw_text:
+                            transcript_data["text"] = corrected
+                            logger.info(f"AI-corrected transcript for {dv.id}")
 
                 # Step 2: AI insight extraction (include chapters context if available)
                 insights_json = None
@@ -523,22 +590,12 @@ class AnalyzerAgent:
 
             await ws_manager.send_progress(job_id, 40, "Correcting transcript...", user_id)
 
-            # AI post-correction
+            # AI post-correction (chunked; never loses content)
             raw_text = transcript_data.get("text", "")
             if raw_text:
-                try:
-                    ai = get_ai_client(user_settings)
-                    corrected = await ai.chat(
-                        messages=[{"role": "user", "content": TRANSCRIPT_CORRECTION_PROMPT.format(
-                            transcript=raw_text[:6000]
-                        )}],
-                        max_tokens=4096,
-                    )
-                    corrected = corrected.strip()
-                    if corrected and len(corrected) > len(raw_text) * 0.5:
-                        transcript_data["text"] = corrected
-                except Exception as e:
-                    logger.warning(f"AI transcript correction failed: {e}")
+                corrected = await _ai_correct_transcript(user_settings, raw_text)
+                if corrected and corrected != raw_text:
+                    transcript_data["text"] = corrected
 
             await ws_manager.send_progress(job_id, 70, "Extracting insights...", user_id)
 

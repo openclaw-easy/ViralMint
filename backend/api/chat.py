@@ -12,6 +12,7 @@ from backend.database import AsyncSessionLocal
 from backend.models.user_settings import UserSettings
 from backend.models.chat_session import ChatSession, ChatMessage as ChatMessageModel
 from backend.core.ws_manager import ws_manager
+from backend.core.chat_history import CHAT_SESSION
 from backend.core.user_intelligence import UserIntelligence
 from backend.agents.planner import PlannerAgent
 
@@ -160,6 +161,9 @@ async def chat_websocket(websocket: WebSocket):
             if msg_type == "set_session":
                 # Frontend tells us which session to use
                 current_session_id = msg.get("session_id")
+                # Attribute backend-persisted rich cards / job rows to this
+                # session (rides asyncio context into dispatched jobs).
+                CHAT_SESSION.set(current_session_id)
                 logger.info(f"Session set to: {current_session_id}")
 
             elif msg_type == "chat_message":
@@ -181,6 +185,12 @@ async def chat_websocket(websocket: WebSocket):
                         "session_id": session.id,
                         "title": session.title,
                     }, user_id)
+
+                # Attribute everything this turn emits (planner rich cards,
+                # jobs it dispatches) to the active session. Dispatched jobs
+                # snapshot this context, so results that land after the turn
+                # returns still persist into the right session.
+                CHAT_SESSION.set(current_session_id)
 
                 # Persist user message
                 await _persist_message(current_session_id, "user", content=content, user_id=user_id)

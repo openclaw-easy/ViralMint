@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Best natural-sounding Edge TTS voices (multilingual variants sound more human)
 RECOMMENDED_VOICES = {
+    # English — US (4 multilingual + 3 classic)
     "en-US-AndrewMultilingualNeural": "Andrew (Male, natural)",
     "en-US-AvaMultilingualNeural": "Ava (Female, natural)",
     "en-US-BrianMultilingualNeural": "Brian (Male, warm)",
@@ -19,6 +20,24 @@ RECOMMENDED_VOICES = {
     "en-US-AriaNeural": "Aria (Female, classic)",
     "en-US-GuyNeural": "Guy (Male, classic)",
     "en-US-JennyNeural": "Jenny (Female, friendly)",
+    # English — AU / GB
+    "en-AU-WilliamMultilingualNeural": "William (Male, Australian)",
+    "en-GB-RyanNeural": "Ryan (Male, British)",
+    "en-GB-SoniaNeural": "Sonia (Female, British)",
+    # Multilingual-tier European voices
+    "fr-FR-VivienneMultilingualNeural": "Vivienne (Female, French)",
+    "fr-FR-RemyMultilingualNeural": "Remy (Male, French)",
+    "de-DE-SeraphinaMultilingualNeural": "Seraphina (Female, German)",
+    "de-DE-FlorianMultilingualNeural": "Florian (Male, German)",
+    "it-IT-GiuseppeMultilingualNeural": "Giuseppe (Male, Italian)",
+    "pt-BR-ThalitaMultilingualNeural": "Thalita (Female, Brazilian Portuguese)",
+    # Multilingual-tier Korean
+    "ko-KR-HyunsuMultilingualNeural": "Hyunsu (Male, Korean)",
+    # Major non-English markets without a Multilingual variant
+    "es-ES-XimenaNeural": "Ximena (Female, Spanish)",
+    "es-MX-DaliaNeural": "Dalia (Female, Mexican Spanish)",
+    "ja-JP-NanamiNeural": "Nanami (Female, Japanese)",
+    "zh-CN-XiaoxiaoNeural": "Xiaoxiao (Female, Mandarin)",
 }
 
 # Default voice — AndrewMultilingual is significantly more natural than AriaNeural
