@@ -286,7 +286,9 @@ def enrich_scout_results_with_outliers(
     import re
 
     for result in results:
-        author_url = result.get("author_url", "")
+        # `.get(key, "")` doesn't guard an EXPLICIT None value — ytdlp-fallback
+        # rows carry author_url=None, which reaches re.search and crashes.
+        author_url = result.get("author_url") or ""
         channel_id = None
 
         # Extract channel ID from URL

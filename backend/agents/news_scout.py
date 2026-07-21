@@ -106,21 +106,56 @@ class NewsScoutAgent:
             await update_job_status(job_id, "running", progress_pct=10,
                                     current_step=f"Scraping {len(sources) if sources else 12} news sources...")
 
-            # Scrape all queries in parallel
-            all_articles = []
-            scrape_tasks = [scrape_news(q, sources) for q in all_queries]
-            results = await asyncio.gather(*scrape_tasks, return_exceptions=True)
-            for r in results:
-                if isinstance(r, list):
-                    all_articles.extend(r)
-                elif isinstance(r, Exception):
-                    logger.warning("News scrape failed for a query: %s", r)
-
-            # Deduplicate across all queries
+            # Scrape all queries in parallel. Up to two passes — Google
+            # News RSS in particular hands back empty bodies under any
+            # mild rate-pressure; a 6s wait usually clears it. Without
+            # this retry, a 2-second 0-article "success" looks like an
+            # upstream code bug from the caller's vantage point. See
+            # 2026-05-16 incident where summit queries returned 0 in 2
+            # seconds twice while curl confirmed the upstreams were
+            # responding with empty payloads.
             from backend.services.news_scraper import _deduplicate
-            all_articles = _deduplicate(all_articles)
+
+            async def _scrape_pass() -> list[dict]:
+                tasks = [scrape_news(q, sources) for q in all_queries]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                out: list[dict] = []
+                for r in results:
+                    if isinstance(r, list):
+                        out.extend(r)
+                    elif isinstance(r, Exception):
+                        logger.warning("News scrape failed for a query: %s", r)
+                return _deduplicate(out)
+
+            all_articles = await _scrape_pass()
+            if not all_articles:
+                logger.info(
+                    "News scrape returned 0 articles for %r — retrying once after 6s "
+                    "(likely upstream RSS throttle)",
+                    query,
+                )
+                await update_job_status(
+                    job_id, "running", progress_pct=15,
+                    current_step="No articles on first pass — retrying...",
+                )
+                await asyncio.sleep(6)
+                all_articles = await _scrape_pass()
 
             if not all_articles:
+                # Surface as a constraint warning so the chat snackbar +
+                # any activity feed make clear it's upstream-empty, not a
+                # code failure. The job still completes "success" with 0
+                # results — the caller can branch on total_results.
+                await ws_manager.send_constraint_warning(
+                    constraint="news_sources_empty",
+                    message=(
+                        f"News sources returned 0 articles for {query!r} after one retry. "
+                        "Google News + Bing News RSS feeds occasionally throttle to empty "
+                        "bodies; try again in 5-10 minutes or with a different query."
+                    ),
+                    severity="warning",
+                    user_id=user_id,
+                )
                 await update_job_status(job_id, "success", progress_pct=100,
                                         current_step="No articles found",
                                         output_data={"total_results": 0})

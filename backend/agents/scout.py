@@ -8,7 +8,7 @@ If one platform fails, logs warning + continues with others.
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from backend.database import AsyncSessionLocal
@@ -43,6 +43,10 @@ YTDLP_SEARCH_PLATFORMS = {
 # because creators often cross-post or discuss other platforms' content
 FALLBACK_SEARCH_PREFIX = "ytsearch"
 
+# Hard cap on platforms per scout run — every entry costs a search (+ possible
+# AI retry). Six covers every legitimate combination in the UI.
+MAX_PLATFORMS_PER_SCOUT = 6
+
 
 def compute_virality_score(video: dict) -> float:
     """
@@ -57,7 +61,14 @@ def compute_virality_score(video: dict) -> float:
 
     upload_date = video.get("upload_date")
     if upload_date and isinstance(upload_date, datetime):
-        hours_old = max((datetime.utcnow() - upload_date).total_seconds() / 3600, 1)
+        # Normalise: many feeds pass naïve datetimes (assumed UTC).
+        # Using datetime.now(timezone.utc) on a naïve upload_date would
+        # raise TypeError — convert here so virality scoring tolerates
+        # either tz-aware or tz-naïve inputs.
+        if upload_date.tzinfo is None:
+            upload_date = upload_date.replace(tzinfo=timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        hours_old = max((now_utc - upload_date).total_seconds() / 3600, 1)
         days_old = max(hours_old / 24, 1)
     else:
         hours_old = 720  # assume 30 days
@@ -94,6 +105,10 @@ def compute_virality_score(video: dict) -> float:
 
 
 class ScoutAgent:
+    # Set by run() when it has already emitted ONE aggregated fallback notice —
+    # the per-platform warning in _scout_via_ytdlp_search then stays quiet.
+    _suppress_fallback_warning = False
+
     async def run(
         self,
         job_id: str,
@@ -103,6 +118,47 @@ class ScoutAgent:
     ):
         """Run scout across all specified platforms in parallel."""
         logger.info("SCOUT START | job=%s niche=%r platforms=%s", job_id[:8], niche, platforms)
+
+        # Hygiene on the platform list — it can arrive from the chat agent, MCP,
+        # or the UI. Dedupe (preserving order) and cap: an LLM once passed 34
+        # invented "platforms" in one call, which meant 34 searches + AI retries
+        # (a ~70s grind) and a warning toast per fallback platform.
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for p in platforms:
+            p = str(p).strip()
+            if p and p.lower() not in seen:
+                seen.add(p.lower())
+                cleaned.append(p)
+        if len(cleaned) > MAX_PLATFORMS_PER_SCOUT:
+            logger.warning("SCOUT platform list capped %d → %d (dropped: %s)",
+                           len(cleaned), MAX_PLATFORMS_PER_SCOUT,
+                           cleaned[MAX_PLATFORMS_PER_SCOUT:])
+            cleaned = cleaned[:MAX_PLATFORMS_PER_SCOUT]
+        platforms = cleaned or ["youtube"]
+
+        # One AGGREGATED fallback notice for all platforms without a native
+        # scout — the per-platform warning inside _scout_via_ytdlp_search
+        # became a toast storm when several were requested at once.
+        fallback_platforms = [
+            p for p in platforms
+            if p not in ("youtube", "tiktok", "douyin")
+            and p not in YTDLP_SEARCH_PLATFORMS
+        ]
+        if len(fallback_platforms) > 1:
+            try:
+                await ws_manager.send_constraint_warning(
+                    constraint="multi_platform_fallback",
+                    message=(f"No direct search for {', '.join(fallback_platforms[:6])}"
+                             f"{'…' if len(fallback_platforms) > 6 else ''} — "
+                             f"showing YouTube cross-posts about \"{niche}\" instead."),
+                    severity="warning",
+                    user_id=user_id,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            self._suppress_fallback_warning = True
+
         await update_job_status(job_id, "running", progress_pct=0, current_step="Starting scout...")
         await ws_manager.send_progress(job_id, 0, "Starting scout...", user_id)
 
@@ -117,7 +173,7 @@ class ScoutAgent:
         # Build platform tasks
         tasks = []
         for platform in platforms:
-            tasks.append(self._scout_platform(platform, niche, user_settings))
+            tasks.append(self._scout_platform(platform, niche, user_settings, user_id=user_id))
 
         # Run all in parallel
         platform_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -154,7 +210,7 @@ class ScoutAgent:
                     if refined_niche:
                         logger.info(f"Retrying {platform} scout with refined niche: '{refined_niche}'")
                         await ws_manager.send_progress(job_id, 0, f"Refining search for {platform}...", user_id)
-                        retry_result = await self._scout_platform(platform, refined_niche, user_settings)
+                        retry_result = await self._scout_platform(platform, refined_niche, user_settings, user_id=user_id)
                         if retry_result and not isinstance(retry_result, Exception):
                             result = retry_result
                             logger.info(f"AI-refined search found {len(result)} results on {platform}")
@@ -169,8 +225,14 @@ class ScoutAgent:
 
         logger.info("SCOUT collected %d raw results from %d platforms", len(all_results), len(platforms))
 
-        # Enrich YouTube results with real outlier detection (batch channel baselines)
-        await self._enrich_with_outlier_scores(all_results, platforms, user_settings)
+        # Enrich YouTube results with real outlier detection (batch channel
+        # baselines). Enrichment is a bonus, never a dependency — a bug here
+        # must not fail a scout that already collected results (rule #10; a
+        # None author_url did exactly that on 2026-07-19).
+        try:
+            await self._enrich_with_outlier_scores(all_results, platforms, user_settings)
+        except Exception as enrich_err:  # noqa: BLE001
+            logger.warning(f"Outlier enrichment skipped (non-fatal): {enrich_err}")
 
         # Score all results (now with real channel_avg_views populated)
         for r in all_results:
@@ -179,18 +241,26 @@ class ScoutAgent:
         # Sort by virality
         all_results.sort(key=lambda r: r["virality_score"], reverse=True)
 
-        # Save to DB
+        # Save to DB. Returns (display_rows, new_count) — display_rows
+        # includes EVERY result the user just scouted (new + previously-
+        # scouted duplicates with fresh stats). new_count is only the
+        # newly-inserted DB rows, used below for the status message.
         await ws_manager.send_progress(job_id, 90, "Saving results...", user_id)
-        saved_results = await self._save_results(all_results, job_id, niche, user_id)
+        results_to_send, new_count_from_save = await self._save_results(
+            all_results, job_id, niche, user_id,
+        )
 
-        # If all results were duplicates, fetch existing results for this niche to show the user
-        results_to_send = saved_results
-        if not saved_results and all_results:
-            results_to_send = await self._fetch_existing_results(niche, user_id, limit=50)
-
-        # Send results over WS grouped by platform
+        # Send results over WS grouped by platform — group by `requested_platform`
+        # so a "scout bilibili" request shows results under the bilibili tab even
+        # when the underlying URLs are YouTube cross-posts (fallback mode).
+        # `requested_platform` defaults to `platform` for native-search results
+        # where they're the same value, so this stays correct for soundcloud /
+        # niconico / youtube / tiktok / douyin paths.
         for platform in platforms:
-            platform_items = [r for r in results_to_send if r["platform"] == platform]
+            platform_items = [
+                r for r in results_to_send
+                if r.get("requested_platform", r["platform"]) == platform
+            ]
             if platform_items:
                 await ws_manager.send({
                     "type": "scout_results",
@@ -201,7 +271,7 @@ class ScoutAgent:
                 }, user_id)
 
         # Complete — report both total found and new (non-duplicate) count
-        new_count = len(saved_results)
+        new_count = new_count_from_save
         total_count = len(all_results)
         if new_count == total_count:
             step_msg = f"Found {total_count} results"
@@ -222,8 +292,11 @@ class ScoutAgent:
             "result": {"total_results": total_count, "new_results": new_count},
         }, user_id)
 
-    async def _scout_platform(self, platform: str, niche: str, user_settings) -> list[dict]:
-        """Scout a single platform. Keys are BYOK (per-user → .env fallback)."""
+    async def _scout_platform(self, platform: str, niche: str, user_settings, user_id: str = "local") -> list[dict]:
+        """Scout a single platform. Keys are BYOK (per-user → .env fallback).
+        `user_id` is threaded through so the ytdlp-fallback path can emit
+        constraint warnings on the user's WS channel.
+        """
         from backend.core.api_keys import get_youtube_api_key
         logger.info("SCOUT platform=%s | niche=%r", platform, niche)
         if platform == "youtube":
@@ -265,8 +338,10 @@ class ScoutAgent:
             return []
 
         else:
-            # Generic fallback: use yt-dlp search if the platform supports it
-            return await self._scout_via_ytdlp_search(platform, niche)
+            # Generic fallback: use yt-dlp search if the platform supports it.
+            # Pass user_id so the fallback can emit a constraint_warning when
+            # there's no native search for the requested platform.
+            return await self._scout_via_ytdlp_search(platform, niche, user_id=user_id)
 
     async def _ai_raw_search_fallback(self, platform: str, niche: str, user_settings) -> list[dict]:
         """
@@ -368,7 +443,10 @@ class ScoutAgent:
         import re
         channel_ids = set()
         for r in youtube_results:
-            match = re.search(r'/channel/(UC[\w-]+)', r.get("author_url", ""))
+            # `.get(key, "")` doesn't protect against an EXPLICIT None value —
+            # ytdlp-fallback rows carry author_url=None and crashed the whole
+            # scout here (2026-07-19), violating rule #10.
+            match = re.search(r'/channel/(UC[\w-]+)', r.get("author_url") or "")
             if match:
                 channel_ids.add(match.group(1))
 
@@ -391,40 +469,135 @@ class ScoutAgent:
         except Exception as e:
             logger.warning(f"Outlier enrichment failed (non-fatal): {e}")
 
-    async def _scout_via_ytdlp_search(self, platform: str, niche: str) -> list[dict]:
+    async def _scout_via_ytdlp_search(self, platform: str, niche: str, user_id: str = "local") -> list[dict]:
         """
         Generic scout using yt-dlp's built-in search extractors.
         Works for SoundCloud, Niconico natively.
         For all other platforms, searches YouTube for "{platform} {niche}" content
         which is surprisingly effective since creators cross-post and discuss content.
+
+        When in fallback mode, each result dict carries:
+          - `platform = "youtube"` (truth: the URL is YouTube — drives downloader,
+            outlier enrichment, dedup keys)
+          - `requested_platform = <original>` (what the user asked for — drives
+            UI grouping in the WS dispatch)
+        Plus a one-time constraint_warning so the user knows the request fell
+        back to a cross-post search rather than a native scout.
         """
         import asyncio
 
         search_prefix = YTDLP_SEARCH_PLATFORMS.get(platform)
-        if search_prefix:
+        is_fallback = search_prefix is None
+        if not is_fallback:
             search_niche = niche
         else:
             # Fallback: search YouTube for content about/from this platform
             search_prefix = FALLBACK_SEARCH_PREFIX
             search_niche = f"{platform} {niche}"
             logger.info(f"No native search for '{platform}' — searching YouTube for '{search_niche}'")
+            # Surface the fallback to the user — silent fallback was misleading
+            # them into thinking they were scouting Bilibili (etc.) when they
+            # were actually getting YouTube cross-posts. Per CLAUDE.md rule #14.
+            # Quiet when run() already sent ONE aggregated notice for several
+            # fallback platforms (a 34-platform LLM call once toasted 30+
+            # of these individually).
+            if not self._suppress_fallback_warning:
+                try:
+                    await ws_manager.send_constraint_warning(
+                        constraint=f"{platform}_no_native_search",
+                        message=f"No direct {platform} search available — showing YouTube cross-posts about \"{niche}\" instead.",
+                        severity="warning",
+                        user_id=user_id,
+                    )
+                except Exception as ws_err:
+                    logger.debug(f"constraint_warning emit failed (non-fatal): {ws_err}")
 
         limit = PLATFORM_LIMITS.get(platform, DEFAULT_SEARCH_LIMIT)
         search_query = f"{search_prefix}{limit}:{search_niche}"
 
         def _search():
             import yt_dlp
-            opts = {
+            base_opts = {
                 "quiet": True,
                 "no_warnings": True,
-                "extract_flat": True,
-                "socket_timeout": 20,
+                "socket_timeout": 30,
             }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(search_query, download=False)
+            # Apply the user's browser cookie jar (BYOK) — yt-dlp's HTTP layer
+            # scopes cookies by domain, so this is safe on every search backend
+            # (ytsearch, scsearch, bilisearch, nicosearch, etc.). For sites that
+            # need auth (Bilibili 412 without session cookies) the jar carries
+            # them automatically.
+            from backend.services.ytdlp_service import _get_cookie_file
+            cookie_file = _get_cookie_file()
+            if cookie_file:
+                base_opts["cookiefile"] = str(cookie_file)
 
+            # YouTube search (ytsearch) returns rich entries — title, views,
+            # thumbnail, uploader — even in flat mode, because YouTube exposes
+            # them on the search results page. Other search backends
+            # (bilisearch, scsearch, nicosearch) return *only* URL+id in flat
+            # mode → empty cards. So: flat for ytsearch fallback (fast, rich
+            # data); full extract for native non-YouTube searches.
+            if is_fallback:
+                with yt_dlp.YoutubeDL({**base_opts, "extract_flat": True}) as ydl:
+                    return ydl.extract_info(search_query, download=False)
+
+            # Native search path. Defenses against per-entry failures:
+            # - `ignoreerrors=True` — skip 412'd entries instead of aborting
+            # - `extractor_retries: 1` — fail fast (default would burn many
+            #   retries × yt-dlp HTTP backoff per failed video, turning a
+            #   bilibili WBI failure into a multi-minute hang)
+            # - `retries: 0` — same, suppress HTTP-layer retries during
+            #   search (we want to bail fast and fall back to flat mode)
+            full_opts = {
+                **base_opts,
+                "extract_flat": False,
+                "ignoreerrors": True,
+                "extractor_retries": 1,
+                "retries": 0,
+            }
+            with yt_dlp.YoutubeDL(full_opts) as ydl:
+                info = ydl.extract_info(search_query, download=False)
+
+            # If full extract gave us zero usable entries (every video errored,
+            # or the search-level auth itself failed), fall back to flat mode.
+            # Cards will be sparse (URL+id only) but the user gets *something*
+            # to click through rather than an empty result set + a warning.
+            usable_count = sum(1 for e in (info.get("entries") if info else []) or [] if e)
+            if usable_count == 0:
+                logger.info(
+                    f"{platform} full extract returned 0 usable entries "
+                    f"(likely auth/WBI failures) — retrying in flat mode"
+                )
+                with yt_dlp.YoutubeDL({**base_opts, "extract_flat": True}) as ydl:
+                    info = ydl.extract_info(search_query, download=False)
+            return info
+
+        # Hard ceiling on the whole search — yt-dlp's per-extractor retry
+        # logic can ignore our `retries`/`extractor_retries` settings on
+        # some platforms (Bilibili's WBI loop will keep hammering on 412
+        # for minutes if cookies are auth-incomplete). 60s is a generous
+        # cap for a healthy native search (~30s for full extract of 15
+        # entries) but lets us bail out fast on auth storms.
+        #
+        # On timeout / failure: log + return []. We DO NOT emit a WS
+        # constraint warning here — `run` will retry with an AI-refined
+        # niche, and the refined attempt often succeeds even when the
+        # original failed. Firing a warning here was producing
+        # contradictory UX: user gets the warning toast AND the result
+        # cards from the refined retry, both at once. If everything
+        # truly fails (refined retry also empty), the existing
+        # "0 results" UI is sufficient feedback.
+        SEARCH_HARD_TIMEOUT_S = 60
         try:
-            info = await asyncio.to_thread(_search)
+            info = await asyncio.wait_for(asyncio.to_thread(_search), timeout=SEARCH_HARD_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"yt-dlp search for {platform} ({search_prefix}) hit "
+                f"{SEARCH_HARD_TIMEOUT_S}s hard timeout — likely an auth-loop "
+                f"storm. Returning empty so caller can AI-refine."
+            )
+            return []
         except Exception as e:
             logger.warning(f"yt-dlp search failed for {platform} ({search_prefix}): {e}")
             return []
@@ -454,8 +627,15 @@ class ScoutAgent:
                 except ValueError:
                     pass
 
+            # In fallback mode the URL is actually YouTube (we used ytsearch:),
+            # so persist `platform="youtube"` — this drives the DB row, dedup
+            # key, outlier enrichment, and the downloader's extractor selection.
+            # `requested_platform` carries the user's original ask so the WS
+            # dispatch can still group these results under the requested tab.
+            actual_platform = "youtube" if is_fallback else platform
             results.append({
-                "platform": platform,
+                "platform": actual_platform,
+                "requested_platform": platform,
                 "video_id": video_id,
                 "video_url": video_url,
                 "title": entry.get("title", ""),
@@ -476,104 +656,124 @@ class ScoutAgent:
 
     async def _save_results(
         self, results: list[dict], job_id: str, niche: str, user_id: str
-    ) -> list[dict]:
-        """Save scout results to DB, skipping duplicates by video_id+platform."""
+    ) -> tuple[list[dict], int]:
+        """Persist new scout results AND return the full display payload.
+
+        Returns (display_rows, new_count):
+
+          - display_rows: one entry per input result. New rows get the
+            freshly-assigned DB id; previously-scouted duplicates carry
+            the EXISTING row's id but the FRESH stats from this run
+            (views/likes/virality drift over time, and the user just
+            paid for the fresh fetch — showing stale snapshot data
+            would feel broken).
+          - new_count: how many of those were net-new inserts.
+
+        Why we don't just dedupe out duplicates — that was the bug.
+        Display dedupe (drop duplicates from the WS payload) made
+        scout feel weak on a second-run of the same niche: 50 fresh
+        results came back, 45 were dupes, only 5 hit the UI. The DB
+        dedupe is a STORAGE optimization (don't write the same row
+        twice); the DISPLAY should still show every result the user
+        actually paid to scout. (Bug fix 2026-05-12.)
+
+        DB row stays as the original scout's snapshot — we do NOT
+        update existing rows with the fresh stats. Treating each
+        scout as immutable evidence keeps the data analytic-friendly;
+        a future explicit "refresh stats" action can update in-place.
+        """
         logger.debug("SCOUT saving %d results to DB (niche=%r)", len(results), niche)
-        saved = []
+        display_rows: list[dict] = []
+        new_count = 0
         async with AsyncSessionLocal() as db:
-            # Load existing video_ids to deduplicate
+            # Load existing rows as a key → id map. We need the id (not
+            # just the existence) so duplicates can still show up in the
+            # UI with a stable, clickable id (download, inspect, etc.).
             existing_result = await db.execute(
-                select(ScoutResult.video_id, ScoutResult.platform)
+                select(ScoutResult.id, ScoutResult.video_id, ScoutResult.platform)
                 .where(ScoutResult.user_id == user_id)
             )
-            existing = {(row[0], row[1]) for row in existing_result.fetchall()}
+            existing_id_by_key: dict[tuple[str, str], str] = {
+                (row[1], row[2]): row[0]
+                for row in existing_result.fetchall()
+            }
 
             for r in results:
                 key = (r["video_id"], r["platform"])
-                if key in existing:
-                    continue
-                existing.add(key)
-                sr = ScoutResult(
-                    user_id=user_id,
-                    job_id=job_id,
-                    platform=r["platform"],
-                    video_id=r["video_id"],
-                    video_url=r["video_url"],
-                    embed_url=r.get("embed_url"),
-                    title=r.get("title"),
-                    description=r.get("description"),
-                    author=r.get("author"),
-                    author_url=r.get("author_url"),
-                    thumbnail_url=r.get("thumbnail_url"),
-                    views=r.get("views", 0),
-                    likes=r.get("likes", 0),
-                    comments=r.get("comments", 0),
-                    shares=r.get("shares", 0),
-                    duration_seconds=r.get("duration_seconds"),
-                    upload_date=r.get("upload_date"),
-                    virality_score=r.get("virality_score", 0),
-                    views_per_hour=r.get("views_per_hour"),
-                    outlier_score=r.get("outlier_score"),
-                    subscriber_count=r.get("subscriber_count"),
-                    channel_avg_views=r.get("channel_avg_views"),
-                    niche=niche,
-                )
-                db.add(sr)
-                await db.flush()
-                saved.append({
-                    "id": sr.id,
-                    "platform": sr.platform,
-                    "video_id": sr.video_id,
-                    "video_url": sr.video_url,
-                    "embed_url": sr.embed_url,
-                    "title": sr.title,
-                    "author": sr.author,
-                    "author_url": sr.author_url,
-                    "thumbnail_url": sr.thumbnail_url,
-                    "views": sr.views,
-                    "likes": sr.likes,
-                    "comments": sr.comments,
-                    "shares": sr.shares,
-                    "duration_seconds": sr.duration_seconds,
-                    "upload_date": sr.upload_date.isoformat() if sr.upload_date else None,
-                    "virality_score": sr.virality_score,
-                    "views_per_hour": sr.views_per_hour,
-                    "outlier_score": sr.outlier_score,
+                if key in existing_id_by_key:
+                    # Duplicate — reuse the existing DB row's id. Don't
+                    # write the DB row again. UI still gets a full card
+                    # with the FRESH stats from this scout.
+                    existing_id = existing_id_by_key[key]
+                else:
+                    # Net-new — insert and remember the new id.
+                    sr = ScoutResult(
+                        user_id=user_id,
+                        job_id=job_id,
+                        platform=r["platform"],
+                        video_id=r["video_id"],
+                        video_url=r["video_url"],
+                        embed_url=r.get("embed_url"),
+                        title=r.get("title"),
+                        description=r.get("description"),
+                        author=r.get("author"),
+                        author_url=r.get("author_url"),
+                        thumbnail_url=r.get("thumbnail_url"),
+                        views=r.get("views", 0),
+                        likes=r.get("likes", 0),
+                        comments=r.get("comments", 0),
+                        shares=r.get("shares", 0),
+                        duration_seconds=r.get("duration_seconds"),
+                        upload_date=r.get("upload_date"),
+                        virality_score=r.get("virality_score", 0),
+                        views_per_hour=r.get("views_per_hour"),
+                        outlier_score=r.get("outlier_score"),
+                        subscriber_count=r.get("subscriber_count"),
+                        channel_avg_views=r.get("channel_avg_views"),
+                        niche=niche,
+                    )
+                    db.add(sr)
+                    await db.flush()
+                    existing_id_by_key[key] = sr.id
+                    existing_id = sr.id
+                    new_count += 1
+
+                # Build the display payload from `r` (FRESH data) plus
+                # the resolved id. Identical shape regardless of whether
+                # the row is new or a duplicate.
+                upload_date = r.get("upload_date")
+                if hasattr(upload_date, "isoformat"):
+                    upload_date_str = upload_date.isoformat()
+                else:
+                    upload_date_str = upload_date
+                display_rows.append({
+                    "id": existing_id,
+                    "platform": r["platform"],
+                    # Carry the user's originally-requested platform alongside
+                    # the URL-truthful `platform`. Used by run to group results
+                    # in the WS dispatch under the requested tab even when the
+                    # URL itself is a YouTube cross-post.
+                    "requested_platform": r.get("requested_platform", r["platform"]),
+                    "video_id": r["video_id"],
+                    "video_url": r["video_url"],
+                    "embed_url": r.get("embed_url"),
+                    "title": r.get("title"),
+                    "author": r.get("author"),
+                    "author_url": r.get("author_url"),
+                    "thumbnail_url": r.get("thumbnail_url"),
+                    "views": r.get("views", 0),
+                    "likes": r.get("likes", 0),
+                    "comments": r.get("comments", 0),
+                    "shares": r.get("shares", 0),
+                    "duration_seconds": r.get("duration_seconds"),
+                    "upload_date": upload_date_str,
+                    "virality_score": r.get("virality_score", 0),
+                    "views_per_hour": r.get("views_per_hour"),
+                    "outlier_score": r.get("outlier_score"),
                 })
             await db.commit()
-        logger.info("SCOUT saved %d new results (skipped %d duplicates)", len(saved), len(results) - len(saved))
-        return saved
-
-    async def _fetch_existing_results(self, niche: str, user_id: str, limit: int = 50) -> list[dict]:
-        """Fetch existing scout results for a niche (used when all new results are duplicates)."""
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(ScoutResult)
-                .where(ScoutResult.user_id == user_id, ScoutResult.niche == niche)
-                .order_by(ScoutResult.created_at.desc())
-                .limit(limit)
-            )
-            results = result.scalars().all()
-            return [
-                {
-                    "id": sr.id,
-                    "platform": sr.platform,
-                    "video_id": sr.video_id,
-                    "video_url": sr.video_url,
-                    "embed_url": sr.embed_url,
-                    "title": sr.title,
-                    "author": sr.author,
-                    "author_url": sr.author_url,
-                    "thumbnail_url": sr.thumbnail_url,
-                    "views": sr.views,
-                    "likes": sr.likes,
-                    "comments": sr.comments,
-                    "shares": sr.shares,
-                    "duration_seconds": sr.duration_seconds,
-                    "upload_date": sr.upload_date.isoformat() if sr.upload_date else None,
-                    "virality_score": sr.virality_score,
-                    "views_per_hour": sr.views_per_hour,
-                    "outlier_score": sr.outlier_score,
-                }
-                for sr in results
-            ]
+        logger.info(
+            "SCOUT processed %d results (%d new, %d previously-scouted)",
+            len(display_rows), new_count, len(display_rows) - new_count,
+        )
+        return display_rows, new_count
