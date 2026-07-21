@@ -906,3 +906,35 @@ def _format_srt_time(seconds: float) -> str:
     s = int(seconds % 60)
     ms = int((seconds % 1) * 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+async def has_audio_stream(media_path: Path) -> bool:
+    """Quick ffprobe check: does this file contain any audio stream?
+
+    Used by whisper_service to fail fast with a clear error when handed
+    a video-only file (e.g. a download that missed the audio track) —
+    faster-whisper's own error in that case is an opaque "tuple index
+    out of range" from deep inside its decoder.
+    """
+    media_path = Path(media_path)
+    if not media_path.exists():
+        return False
+
+    def _probe() -> bool:
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet",
+                 "-select_streams", "a",
+                 "-show_entries", "stream=index",
+                 "-of", "csv=p=0",
+                 str(media_path)],
+                capture_output=True, text=True, timeout=15,
+            )
+            return bool(result.stdout.strip())
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            # On probe failure, default to "yes" so we don't block transcription
+            # for files that might still work — whisper's own error path is
+            # the safety net.
+            return True
+
+    return await asyncio.to_thread(_probe)

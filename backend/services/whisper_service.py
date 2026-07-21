@@ -64,6 +64,15 @@ class WhisperService:
         Transcribe audio file. Returns:
         { "text": "...", "language": "en", "segments": [...] }
         """
+        # Pre-check: confirm the file actually has an audio stream before
+        # invoking whisper. Without this, faster-whisper crashes with a
+        # cryptic "tuple index out of range" when given a silent file
+        # (e.g. video-only mp4 from a downloader that missed the audio
+        # track).
+        from backend.services.ffmpeg_service import has_audio_stream
+        if not await has_audio_stream(Path(audio_path)):
+            raise ValueError(f"No audio stream found in {audio_path}")
+
         model = self.load()
 
         def _run():
