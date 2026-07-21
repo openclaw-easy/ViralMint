@@ -681,13 +681,10 @@ async def extract_clips(video_id: str, body: dict = None):
     if not video.video_path or not Path(video.video_path).exists():
         raise HTTPException(status_code=400, detail="Video file not found on disk")
 
-    # Clip extraction needs at least 30s of content
+    # Short videos are handled by the extractor's short-video fast-path
+    # (SHORT_VIDEO_THRESHOLD): a source under ~20s is emitted as a single
+    # captioned clip rather than rejected. No blanket "too short" floor here.
     duration = video.duration_seconds or 0
-    if duration > 0 and duration < 30:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Video is too short for clip extraction ({duration}s). Need at least 30 seconds of content.",
-        )
 
     # Auto-calculate max_clips from duration if not specified (~1 clip per 30s, min 3, max 99)
     if max_clips_input is not None:

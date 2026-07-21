@@ -101,6 +101,31 @@ Return ONLY valid JSON, no markdown fences:
 }}"""
 
 
+CLIP_METADATA_BATCH_PROMPT = """Generate platform metadata for {count} viral short clips. Each clip is independent — write metadata tailored to that clip's specific transcript and title.
+
+Clips:
+{clips_block}
+
+Return ONLY a valid JSON array with one object per clip (same order as input). Each object MUST include the `index` field matching the clip's number (0-based). No markdown fences.
+
+[
+  {{
+    "index": 0,
+    "youtube_title": "Catchy YouTube Shorts title (under 70 chars, front-load keywords, use power words)",
+    "youtube_description": "2-3 sentence description with relevant keywords for SEO",
+    "youtube_tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
+    "tiktok_title": "TikTok caption with hashtags (under 150 chars, hook-first)"
+  }},
+  ...
+]
+
+IMPORTANT:
+- Return exactly {count} objects, one per input clip
+- The `index` field MUST match the input clip number — do not reorder or skip
+- Each object MUST have ALL five fields (index + 4 metadata fields)
+- If a clip's transcript is empty, base the metadata on the title alone"""
+
+
 # ── Clip count estimation ──────────────────────────────────────────────────────
 
 def _has_cjk(text: str) -> bool:
@@ -218,46 +243,180 @@ async def extract_viral_clips(
         force_retranscribe=force_retranscribe, job_id=job_id, user_id=user_id,
     )
 
-    # Validate transcript quality
-    _validate_transcript(segments, video)
-
-    # Auto-scale max_clips based on actual content
     duration = video.duration_seconds or 0
-    effective_max = _estimate_realistic_clip_count(segments, duration, max_clips, min_duration=min_duration)
-    if effective_max < max_clips:
-        logger.info(f"Scaled max_clips from {max_clips} to {effective_max} based on content analysis")
 
-    # Step 2: AI selects best clip windows (15-30%)
-    if job_id:
-        await ws_manager.send_progress(job_id, 15, "AI analyzing transcript for viral moments...", user_id)
-
-    # Use chunk-based extraction for large requests
-    if effective_max > 8 and duration > 300:
-        clip_windows = await _chunked_clip_selection(
-            segments, video.title or "Untitled", duration,
-            effective_max, user_settings,
-            min_duration=min_duration, max_duration=max_duration,
-            job_id=job_id, user_id=user_id,
+    # ── Clip-window selection ──────────────────────────────────────────
+    # Two branches, in priority order:
+    #   1. Short-video    — emit the whole source as a single clip.
+    #   2. AI selection   — transcript-aware picker (or no-speech fallback).
+    #
+    # Each branch produces a `clip_windows` list that the shared
+    # _process_clips_parallel block below consumes.
+    #
+    # Short-video fast-path background: below SHORT_VIDEO_THRESHOLD the AI
+    # can't pick multiple non-overlapping clips, and users usually want the
+    # whole thing anyway. Saves an AI call and avoids the "3 clips from 25s
+    # = overlapping garbage" failure mode. Users sometimes want to repurpose
+    # a short clip they already have (TikTok B-roll, a reaction, a tight
+    # Reel) so this path carries them through to a captioned mp4.
+    SHORT_VIDEO_THRESHOLD = 20
+    if 0 < duration < SHORT_VIDEO_THRESHOLD:
+        logger.info(
+            f"Short video ({duration}s) — emitting single whole-video clip, skipping AI selection"
         )
+        if job_id:
+            await ws_manager.send_progress(
+                job_id, 15,
+                f"Short video ({int(duration)}s) — using as a single clip...",
+                user_id,
+            )
+        clip_windows = [{
+            "start": 0.0,
+            "end": float(duration),
+            "title": video.title or "Full clip",
+            "hook": "",
+            "reason": "Video is short; emitted as a single clip.",
+            "virality_score": 5.0,
+            "hook_score": 5.0,
+        }]
+        # Keep segments as-is so captions still render; _process_clips_parallel
+        # handles empty segments for silent inputs via the existing no-segments
+        # path in _burn_clip_captions.
     else:
-        clip_windows = await _select_clip_windows_with_retries(
-            segments, video.title or "Untitled", duration,
-            effective_max, user_settings,
-            min_duration=min_duration, max_duration=max_duration,
-            job_id=job_id, user_id=user_id,
-        )
+        # Check if the video has usable transcript. Whisper returns
+        # SUCCESSFULLY with an empty `segments` list (or almost no text) when
+        # the source is music/silence — that's the genuine no-speech case and
+        # routes to the duration-based fallback below. A Whisper *crash* never
+        # reaches here: `_load_or_transcribe_segments` re-raises it (Wave-1
+        # raise-on-crash), so the job fails loudly instead of silently
+        # downgrading to random time-cut clips.
+        has_transcript = bool(segments) and len(" ".join(s.get("text", "") for s in segments).strip()) >= 50
 
-    if not clip_windows:
-        seg_count = len(segments)
-        total_text = len(" ".join(s.get("text", "") for s in segments))
-        raise ValueError(
-            f"AI could not identify suitable clip segments after multiple attempts "
-            f"(video: {duration}s, {seg_count} segments, {total_text} chars of transcript). "
-            f"This can happen if the video has minimal speech, lacks distinct moments, "
-            f"or the transcript quality is poor. "
-            f"Try: (1) re-analyze with higher Whisper quality, (2) use a different video, "
-            f"or (3) set custom clip duration range."
-        )
+        if has_transcript:
+            # ── Normal path: AI-driven clip selection from transcript ──
+            # Auto-scale max_clips based on actual content.
+            effective_max = _estimate_realistic_clip_count(
+                segments, duration, max_clips, min_duration=min_duration,
+            )
+            if effective_max < max_clips:
+                logger.info(f"Scaled max_clips from {max_clips} to {effective_max} based on content analysis")
+
+            # Step 2: AI selects best clip windows (15-30%)
+            if job_id:
+                await ws_manager.send_progress(job_id, 15, "AI analyzing transcript for viral moments...", user_id)
+
+            # Use chunk-based extraction for large requests
+            if effective_max > 8 and duration > 300:
+                clip_windows = await _chunked_clip_selection(
+                    segments, video.title or "Untitled", duration,
+                    effective_max, user_settings,
+                    min_duration=min_duration, max_duration=max_duration,
+                    job_id=job_id, user_id=user_id,
+                )
+            else:
+                clip_windows = await _select_clip_windows_with_retries(
+                    segments, video.title or "Untitled", duration,
+                    effective_max, user_settings,
+                    min_duration=min_duration, max_duration=max_duration,
+                    job_id=job_id, user_id=user_id,
+                )
+
+            if not clip_windows:
+                # AI returned nothing after retries — either content too sparse,
+                # AI hit a refusal mood, or the user's range is genuinely too
+                # tight. Rather than failing the job, fall back to evenly-spaced
+                # duration-based clips so the user still gets a deliverable.
+                #
+                # Use the user's original `max_clips`, not the density-scaled
+                # `effective_max`: once we've decided to fall back, the
+                # estimator's content-density reasoning no longer applies —
+                # we're slicing time, not narrative.
+                #
+                # Captions are cleared (segments = []) because the AI's verdict
+                # is that there's no narrative worth tracking word-by-word.
+                logger.info(
+                    f"AI returned no clips for {video.id[:8]} after retries "
+                    f"(video: {duration}s, {len(segments)} segments) — "
+                    f"falling back to duration-based split "
+                    f"(range {min_duration or 'auto'}-{max_duration or 'auto'}s, "
+                    f"max={max_clips})"
+                )
+                if job_id:
+                    await ws_manager.send_progress(
+                        job_id, 28,
+                        "AI found no narrative clips — splitting by duration instead...",
+                        user_id,
+                    )
+                clip_windows = _generate_duration_based_clips(
+                    duration, max_clips,
+                    min_duration=min_duration, max_duration=max_duration,
+                    title=video.title or "Untitled",
+                )
+                segments = []
+                if not clip_windows:
+                    if min_duration is not None and max_duration is not None:
+                        raise ValueError(
+                            f"No clips fit your {min_duration}-{max_duration}s range "
+                            f"(video: {duration}s). "
+                            f"Try widening the duration range or lowering the min."
+                        )
+                    raise ValueError(
+                        f"Could not extract any clips from this video "
+                        f"(duration: {duration}s). "
+                        f"The source may be too short for the requested range — "
+                        f"try lowering the min duration or using a longer video."
+                    )
+            else:
+                # AI succeeded — apply the two refinements that only make sense
+                # when we have real narrative-aligned windows:
+                #
+                # 1. Sentence-snap. Whisper segments break at sentence-ish
+                #    utterances, so nudging each clip's start/end ±2s onto the
+                #    nearest segment edge fixes "cut mid-word / before the
+                #    punchline".
+                #
+                # 2. Silent-region backfill. Add un-spoken stretches of the
+                #    source up to the user's original `max_clips` cap so the
+                #    output covers more of the video. Additive only.
+                clip_windows = _snap_to_sentence_boundaries(clip_windows, segments)
+                if len(clip_windows) < max_clips:
+                    silent_windows = _find_silent_gaps(
+                        segments=segments,
+                        clip_windows=clip_windows,
+                        duration=duration,
+                        min_gap_duration=float(min_duration) if min_duration else 10.0,
+                        max_clip_duration=float(max_duration or 60),
+                        budget=max_clips - len(clip_windows),
+                    )
+                    if silent_windows:
+                        logger.info(
+                            f"Adding {len(silent_windows)} silent-region clip(s) "
+                            f"to AI's {len(clip_windows)} speech clips (max={max_clips})"
+                        )
+                        clip_windows = list(clip_windows) + silent_windows
+        else:
+            # ── No-speech fallback: split video into even duration-based clips ──
+            # This REPLACES the old hard-raise `_validate_transcript` for the
+            # genuine no-speech case (transcription succeeded but returned no
+            # usable speech). The user gets a deliverable instead of an error.
+            logger.info(f"No transcript for {video.id[:8]} — using duration-based clip splitting")
+            if job_id:
+                await ws_manager.send_progress(job_id, 15, "No speech detected — splitting by duration...", user_id)
+
+            clip_windows = _generate_duration_based_clips(
+                duration, max_clips,
+                min_duration=min_duration, max_duration=max_duration,
+                title=video.title or "Untitled",
+            )
+            # Clear segments so caption step is skipped for no-speech clips
+            segments = []
+            if not clip_windows:
+                raise ValueError(
+                    f"Could not extract any clips from this video "
+                    f"(duration: {duration}s, no usable speech). "
+                    f"The source may be too short for the requested range — "
+                    f"try lowering the min duration or using a longer video."
+                )
 
     logger.info(f"AI selected {len(clip_windows)} clip windows from {video.id[:8]}")
 
@@ -286,34 +445,148 @@ async def extract_viral_clips(
     return results
 
 
-def _validate_transcript(segments: list[dict], video) -> None:
-    """Validate transcript has enough speech content for clip extraction."""
-    if not segments:
-        raise ValueError(
-            "No transcript available for clip extraction. "
-            "The video may have no audio track or transcription failed. "
-            "Try re-analyzing the video first."
-        )
+def _generate_duration_based_clips(
+    duration: int,
+    max_clips: int,
+    min_duration: int = None,
+    max_duration: int = None,
+    title: str = "Untitled",
+) -> list[dict]:
+    """
+    Generate evenly-spaced clip windows for videos without speech.
+    Falls back to splitting by duration rather than transcript analysis.
+    """
+    clip_len = max_duration or 45
+    min_len = min_duration or 15
+    clip_len = max(min_len, min(clip_len, duration))
 
-    total_text = " ".join(s.get("text", "") for s in segments).strip()
-    if len(total_text) < 50:
-        raise ValueError(
-            f"Insufficient speech content for clip extraction "
-            f"(only {len(total_text)} characters of transcript found across {len(segments)} segments). "
-            f"This video may be mostly music/silence with very little speech. "
-            f"Try re-analyzing with a higher Whisper quality setting."
-        )
+    if duration <= clip_len:
+        # Whole video is one clip
+        return [{
+            "start": 0,
+            "end": duration,
+            "title": f"{title} — Full clip",
+            "hook": "",
+            "score": 5,
+        }]
 
-    # Check if segments cover enough of the video duration
-    duration = video.duration_seconds or 0
-    if duration > 0 and segments:
-        last_seg_end = max(s.get("end", 0) for s in segments)
-        coverage = last_seg_end / duration
-        if coverage < 0.1:
-            logger.warning(
-                f"Transcript covers only {coverage:.0%} of video duration. "
-                f"Clip selection may miss later segments."
-            )
+    # How many clips fit without overlap
+    possible = max(1, int(duration // clip_len))
+    num_clips = min(possible, max_clips)
+
+    # Space them evenly across the video
+    if num_clips == 1:
+        # Take from the start
+        return [{
+            "start": 0,
+            "end": clip_len,
+            "title": f"{title} — Clip 1",
+            "hook": "",
+            "score": 5,
+        }]
+
+    gap = (duration - num_clips * clip_len) / max(num_clips - 1, 1)
+    clips = []
+    pos = 0.0
+    for i in range(num_clips):
+        start = round(pos, 1)
+        end = round(min(start + clip_len, duration), 1)
+        if end - start < min_len:
+            break
+        clips.append({
+            "start": start,
+            "end": end,
+            "title": f"{title} — Clip {i + 1}",
+            "hook": "",
+            "score": 5,
+        })
+        pos = end + gap
+
+    logger.info(f"Generated {len(clips)} duration-based clips ({clip_len}s each) from {duration}s video")
+    return clips
+
+
+def _find_silent_gaps(
+    segments: list[dict],
+    clip_windows: list[dict],
+    duration: float,
+    min_gap_duration: float = 10.0,
+    max_clip_duration: float = 60.0,
+    budget: int | None = None,
+) -> list[dict]:
+    """
+    Return clip-window dicts covering stretches of the source video that have
+    no speech AND don't overlap any AI-selected clip.
+
+    Short silent pauses (< min_gap_duration) are left to be absorbed into
+    neighbouring speech clips. Long silent stretches are split into chunks of
+    at most max_clip_duration so individual clips stay playable. When budget
+    is given, emission stops once that many windows have been produced.
+    """
+    if duration <= 0:
+        return []
+
+    covered: list[tuple[float, float]] = []
+    for s in segments:
+        start = float(s.get("start", 0))
+        end = float(s.get("end", 0))
+        if end > start:
+            covered.append((start, end))
+    for w in clip_windows:
+        start = float(w.get("start", 0))
+        end = float(w.get("end", 0))
+        if end > start:
+            covered.append((start, end))
+
+    # Fully silent videos are handled upstream by _generate_duration_based_clips.
+    if not covered:
+        return []
+
+    covered.sort()
+    merged: list[list[float]] = [list(covered[0])]
+    for s, e in covered[1:]:
+        if s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+
+    gaps: list[tuple[float, float]] = []
+    prev_end = 0.0
+    for s, e in merged:
+        if s - prev_end >= min_gap_duration:
+            gaps.append((prev_end, s))
+        prev_end = e
+    if duration - prev_end >= min_gap_duration:
+        gaps.append((prev_end, duration))
+
+    if not gaps:
+        return []
+
+    result: list[dict] = []
+    for g_start, g_end in gaps:
+        gap_len = g_end - g_start
+        if gap_len <= max_clip_duration:
+            ranges = [(g_start, g_end)]
+        else:
+            n = math.ceil(gap_len / max_clip_duration)
+            chunk = gap_len / n
+            ranges = [(g_start + i * chunk, g_start + (i + 1) * chunk) for i in range(n)]
+        for r_start, r_end in ranges:
+            if r_end - r_start < min_gap_duration:
+                continue
+            result.append({
+                "start": round(r_start, 1),
+                "end": round(r_end, 1),
+                "title": f"Silent section {int(r_start)}s–{int(r_end)}s",
+                "hook": "",
+                "reason": "No-speech section of the source video",
+                "virality_score": 3.0,
+                "hook_score": 3.0,
+            })
+            if budget is not None and len(result) >= budget:
+                return result
+
+    return result
 
 
 async def _load_or_transcribe_segments(video, user_settings, whisper_quality: str = "balanced", force_retranscribe: bool = False, job_id: str = None, user_id: str = "local") -> list[dict]:
@@ -544,14 +817,85 @@ async def _chunked_clip_selection(
             job_id=job_id, user_id=user_id,
         )
 
-    # Remove overlapping clips (keep higher virality score)
+    # Remove overlapping clips (keep higher virality score), then dedupe
+    # near-duplicate beats by topic-keyword similarity. Both passes are
+    # cheap and additive — time-overlap catches "the AI gave me chunks 1
+    # and 2's adjacent picks"; topic-overlap catches "same story retold
+    # in chunk 4". Order matters: time-overlap first so we don't compare
+    # keyword sets across nearly-identical time windows.
     all_windows.sort(key=lambda w: w.get("virality_score", 0), reverse=True)
     deduped = _remove_overlapping_clips(all_windows)
+    deduped = _dedupe_clips_by_topic(deduped)
 
     # Return top clips by virality
     result = deduped[:max_clips]
     logger.info(f"Chunked extraction: {len(all_windows)} raw → {len(deduped)} deduped → {len(result)} final")
     return result
+
+
+# Max distance (seconds) we'll slide a clip's start/end to land on a natural
+# sentence boundary. ±2s is wide enough to catch the "cut mid-word" failure
+# mode the AI commonly produces, narrow enough that clip duration stays
+# within the user's requested min/max even after snapping both ends.
+_MAX_BOUNDARY_SLIDE_SEC = 2.0
+
+
+def _snap_to_sentence_boundaries(
+    windows: list[dict], segments: list[dict],
+) -> list[dict]:
+    """Nudge each clip's start/end onto the nearest Whisper segment edge if
+    one is within ±_MAX_BOUNDARY_SLIDE_SEC.
+
+    Whisper produces segments at sentence-like boundaries (utterance pauses,
+    punctuation), so snapping to a segment edge is equivalent to snapping
+    to a natural sentence boundary. We never extend past the slide budget,
+    so clips can't grow beyond the user's max_duration after snap.
+
+    Returns a NEW list — the input windows are not mutated.
+    """
+    if not segments or not windows:
+        return windows
+
+    # Pre-extract sorted boundary timestamps (start of each segment + end of
+    # the last one) so the snap is a search over a small fixed set.
+    starts = sorted({float(s.get("start", 0)) for s in segments if s.get("start") is not None})
+    ends = sorted({float(s.get("end", 0)) for s in segments if s.get("end") is not None})
+
+    def _nearest(target: float, candidates: list[float]) -> float | None:
+        if not candidates:
+            return None
+        # Linear is fine — segments are small (typically <500). Avoids a
+        # bisect import for a 30-line helper.
+        best = min(candidates, key=lambda c: abs(c - target))
+        return best if abs(best - target) <= _MAX_BOUNDARY_SLIDE_SEC else None
+
+    snapped = []
+    for w in windows:
+        try:
+            orig_start = float(w["start"])
+            orig_end = float(w["end"])
+        except (KeyError, TypeError, ValueError):
+            snapped.append(w)
+            continue
+
+        new_start = _nearest(orig_start, starts)
+        new_end = _nearest(orig_end, ends)
+
+        # Only commit the snap if the result still has positive duration.
+        # (Pathological inputs where start == end after snap are rare but
+        # cheap to defend against.)
+        nw = dict(w)
+        if new_start is not None:
+            nw["start"] = round(new_start, 1)
+        if new_end is not None:
+            nw["end"] = round(new_end, 1)
+        if nw["end"] - nw["start"] < 1.0:
+            # Snap would collapse the clip — keep the original.
+            snapped.append(w)
+            continue
+        snapped.append(nw)
+
+    return snapped
 
 
 def _remove_overlapping_clips(windows: list[dict]) -> list[dict]:
@@ -567,6 +911,109 @@ def _remove_overlapping_clips(windows: list[dict]) -> list[dict]:
         if not overlaps:
             kept.append(w)
     return kept
+
+
+# ── Topic dedup (cross-time-window near-duplicate detection) ────────────────
+#
+# The AI sometimes picks two clips that don't overlap in TIME but cover the
+# same TOPIC — a guest who re-tells a story at minute 5 and minute 25, or a
+# host who restates a punchline. _remove_overlapping_clips catches time
+# overlap; this catches topic overlap so the user gets distinct beats.
+#
+# Tactics:
+#   - Tokenize each clip's (title + hook + reason) — already-AI-written text
+#     that summarizes the clip in ~30 words. Compact and topic-rich.
+#   - Strip a small English stopword set. Tokens under 4 chars are also
+#     dropped. Non-English videos still get useful signal because content
+#     words are 4+ chars in most languages.
+#   - Jaccard similarity per pair; if >= TOPIC_DEDUP_THRESHOLD, drop the
+#     lower-virality clip from the pair.
+
+_TOPIC_STOPWORDS = frozenset({
+    "about", "after", "again", "against", "their", "there", "these", "those",
+    "which", "while", "would", "could", "should", "where", "every", "before",
+    "being", "doing", "down", "from", "have", "having", "into", "more", "most",
+    "much", "other", "over", "same", "such", "than", "that", "this", "very",
+    "well", "what", "when", "with", "your", "yours", "they", "them", "were",
+    "will", "just", "even", "also", "make", "made", "like", "many", "some",
+    "only", "first", "thing", "things", "really", "still", "back", "good",
+    "great", "right", "want", "need", "know", "going", "didnt", "doesnt",
+    "isnt", "wasnt", "didn", "weren", "video", "clip", "viral", "moment",
+    "segment", "audience", "viewer", "viewers",
+})
+
+TOPIC_DEDUP_THRESHOLD = 0.55
+
+
+def _topic_keywords(text: str) -> set[str]:
+    """Return the set of content tokens in *text* for Jaccard comparison.
+
+    Lowercased, alphabetic-only tokens of length ≥ 4 minus a small English
+    stopword set. Non-content words ("video", "clip", "moment") are filtered
+    too — they're high-frequency across the AI's reasoning text and would
+    inflate similarity between unrelated clips.
+    """
+    if not text:
+        return set()
+    tokens = re.findall(r"[a-z]{4,}", text.lower())
+    return {t for t in tokens if t not in _TOPIC_STOPWORDS}
+
+
+def _dedupe_clips_by_topic(
+    windows: list[dict],
+    threshold: float = TOPIC_DEDUP_THRESHOLD,
+) -> list[dict]:
+    """Drop near-duplicate clips by Jaccard similarity on AI-summarized text.
+
+    Input is assumed already sorted by virality_score desc — the function
+    walks top-down and drops anything that closely matches an already-kept
+    clip. Preserves the input order in the return value (the surviving
+    high-virality clips stay at the top).
+
+    Pure function; doesn't touch the network or the filesystem.
+    """
+    if len(windows) <= 1:
+        return list(windows)
+
+    # Pre-compute keyword sets once.
+    keywords = [
+        _topic_keywords(" ".join([
+            str(w.get("title") or ""),
+            str(w.get("hook") or ""),
+            str(w.get("reason") or ""),
+        ]))
+        for w in windows
+    ]
+
+    kept_indices: list[int] = []
+    for i, w in enumerate(windows):
+        kw_i = keywords[i]
+        if not kw_i:
+            # No usable keywords — keep it (can't compare). Rare; happens
+            # when title/hook/reason are all empty (legacy or malformed AI).
+            kept_indices.append(i)
+            continue
+        is_dup = False
+        for j in kept_indices:
+            kw_j = keywords[j]
+            if not kw_j:
+                continue
+            inter = len(kw_i & kw_j)
+            union = len(kw_i | kw_j)
+            sim = inter / union if union else 0.0
+            if sim >= threshold:
+                logger.info(
+                    f"Topic dedup: dropping clip {w.get('start',0):.0f}-{w.get('end',0):.0f}s "
+                    f"(virality {w.get('virality_score','?')}) — {sim:.0%} keyword overlap "
+                    f"with kept clip {windows[j].get('start',0):.0f}-{windows[j].get('end',0):.0f}s "
+                    f"(virality {windows[j].get('virality_score','?')})"
+                )
+                is_dup = True
+                break
+        if not is_dup:
+            kept_indices.append(i)
+
+    return [windows[i] for i in kept_indices]
 
 
 async def _select_clip_windows(
@@ -820,7 +1267,7 @@ async def _process_clips_parallel(
 
     results = []
     thumb_tasks = []
-    meta_tasks = []
+    meta_inputs: list[tuple[str, str]] = []  # (title, transcript_text) per kept clip
 
     for i, (cap_result, window) in enumerate(zip(caption_results, clip_windows)):
         if isinstance(cap_result, Exception):
@@ -847,10 +1294,7 @@ async def _process_clips_parallel(
         thumb_tasks.append(_ffmpeg_limited(extract_thumbnail(captioned_path, timestamp=thumb_ts)))
 
         transcript_text = " ".join(s["text"] for s in clip_segments)
-        meta_tasks.append(_generate_clip_metadata(
-            window.get("title", f"Clip {i+1}"),
-            transcript_text, user_settings,
-        ))
+        meta_inputs.append((window.get("title", f"Clip {i+1}"), transcript_text))
 
         results.append({
             "_index": i,
@@ -861,9 +1305,37 @@ async def _process_clips_parallel(
             "raw_clip_path": clip_paths[i] if not isinstance(clip_paths[i], Exception) else None,
         })
 
-    # Run thumbnail + metadata in parallel
+    # Metadata (one batched AI round-trip) and the thumbnail FFmpeg are
+    # independent — start the metadata call FIRST so its cloud latency overlaps
+    # the local thumbnail extraction instead of running strictly after it.
+    # The batch covers every kept clip instead of N parallel calls: one AI call
+    # for N clips. On hard failure (raised / parse failed / no usable entries)
+    # we fall back to the per-clip parallel path — same final shape, same
+    # per-clip `metadata_status` granularity.
+    meta_task = (
+        asyncio.create_task(_generate_clip_metadata_batch(meta_inputs, user_settings))
+        if meta_inputs else None
+    )
+
+    # Thumbnails run in parallel — local FFmpeg, no AI cost.
     all_thumbs = await asyncio.gather(*thumb_tasks, return_exceptions=True)
-    all_metas = await asyncio.gather(*meta_tasks, return_exceptions=True)
+
+    # Collect the metadata that's been generating concurrently.
+    all_metas: list = []
+    if meta_task is not None:
+        batched = await meta_task
+        if batched is not None and len(batched) == len(meta_inputs):
+            all_metas = batched
+        else:
+            logger.info(
+                f"Metadata batch unavailable, falling back to {len(meta_inputs)} "
+                f"per-clip calls."
+            )
+            fallback_tasks = [
+                _generate_clip_metadata(title, transcript_text, user_settings)
+                for title, transcript_text in meta_inputs
+            ]
+            all_metas = await asyncio.gather(*fallback_tasks, return_exceptions=True)
 
     # Phase 4: Assemble final results + cleanup
     if job_id:
@@ -1011,6 +1483,126 @@ async def _generate_clip_metadata(title: str, transcript_text: str, user_setting
         logger.warning(f"Clip metadata generation failed for '{title[:30]}': {e}")
 
     return defaults
+
+
+async def _generate_clip_metadata_batch(
+    clips: list[tuple[str, str]],
+    user_settings,
+) -> list[dict | None] | None:
+    """Generate metadata for N clips in ONE AI call.
+
+    Replaces the per-clip-call pattern (N calls for an N-clip extraction)
+    with a single batched call regardless of N.
+
+    Returns a list of length N (same order as `clips`) where each entry
+    is EITHER:
+      - dict: the AI-generated metadata for that clip (caller marks
+        `metadata_status="ai_generated"`)
+      - None: the AI response didn't include this clip's index (caller
+        treats it as a falsy value and marks `metadata_status="fallback"`
+        via its existing default-fallback path)
+
+    Returns `None` (the whole list, not a per-entry None) on a hard
+    failure: call raised, response not a list, or zero valid entries.
+    The caller falls back to N parallel per-clip calls so robustness is
+    preserved exactly.
+    """
+    if not clips:
+        return []
+
+    # Build per-clip input lines for the prompt. Cap each transcript at
+    # 1500 chars — N × 2000 starts to bloat the prompt for large jobs, and
+    # metadata generation only needs the gist of the clip's content. Empty
+    # transcripts are passed through as "(no speech)" so the AI leans on the
+    # title.
+    lines = []
+    for idx, (title, transcript_text) in enumerate(clips):
+        safe_title = (title or f"Clip {idx + 1}").strip()
+        safe_transcript = (transcript_text or "").strip()[:1500] or "(no speech)"
+        lines.append(
+            f"Clip {idx} | title: {safe_title}\nTranscript: {safe_transcript}"
+        )
+    clips_block = "\n\n".join(lines)
+
+    prompt = CLIP_METADATA_BATCH_PROMPT.format(
+        count=len(clips),
+        clips_block=clips_block,
+    )
+
+    # Token budget: ~200 output tokens per clip × N + 500 buffer, capped
+    # at 8000.
+    max_tokens = min(8000, max(2000, len(clips) * 200 + 500))
+
+    try:
+        from backend.core.ai_provider import get_ai_client
+        ai = get_ai_client(user_settings)
+        response = await ai.chat(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+        )
+        parsed = _parse_json_response(response)
+    except Exception as e:
+        logger.warning(
+            f"Batched clip metadata generation failed for {len(clips)} clips: {e} "
+            f"— caller will fall back to per-clip calls."
+        )
+        return None
+
+    # Accept the canonical array shape, plus two defensive shapes the
+    # model sometimes emits: {"clips": [...]} / {"metadata": [...]}.
+    if isinstance(parsed, dict):
+        for wrapper_key in ("clips", "metadata", "items", "results"):
+            if isinstance(parsed.get(wrapper_key), list):
+                parsed = parsed[wrapper_key]
+                break
+
+    if not isinstance(parsed, list) or not parsed:
+        logger.warning(
+            f"Batched clip metadata: parsed response is not a non-empty list "
+            f"(type={type(parsed).__name__}); falling back to per-clip calls."
+        )
+        return None
+
+    # Index the response by `index` field. Order may be wrong, items may
+    # be missing, indices may be out of range — handle each defensively.
+    by_index: dict[int, dict] = {}
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(clips):
+            by_index[idx] = item
+
+    # Hard failure: if the AI returned ZERO usable entries, return None
+    # so the caller falls back to per-clip parallel calls.
+    if not by_index:
+        logger.warning(
+            f"Batched clip metadata: no valid index-keyed entries in response "
+            f"(parsed {len(parsed)} items but none usable); falling back to "
+            f"per-clip calls."
+        )
+        return None
+
+    # Assemble the result list. Each entry is either the AI-generated
+    # dict OR None for missing/invalid indices. For PRESENT entries, merge
+    # over per-clip defaults so a partial AI response still has all four
+    # fields populated. Merge order: defaults first, AI on top.
+    result: list[dict | None] = []
+    for idx, (title, transcript_text) in enumerate(clips):
+        ai_entry = by_index.get(idx)
+        if ai_entry is None:
+            result.append(None)
+            continue
+        defaults = _default_metadata(title, transcript_text)
+        merged = {**defaults, **ai_entry}
+        # Strip the routing field — downstream consumers don't expect it.
+        merged.pop("index", None)
+        result.append(merged)
+
+    return result
 
 
 def _parse_json_response(text: str) -> any:
