@@ -53,14 +53,36 @@ PIXABAY_GENRE_QUERIES = {
 }
 
 
-async def select_music(genre: str = "lofi", duration: int = 60) -> Path | None:
+async def select_music(
+    genre: str = "lofi",
+    duration: int = 60,
+    track_filename: str | None = None,
+) -> Path | None:
     """
-    Select a background music track matching the genre.
-    1. Check bundled tracks in storage/music/
-    2. If none found, try downloading from Pixabay (free, no API key needed)
-    3. Returns None if nothing available (gracefully skipped by generator)
+    Select a background music track.
+
+    If `track_filename` is provided, loads that specific file from the user's
+    library (strict match, no fallback). Otherwise matches `genre` via the
+    existing glob, then falls back to any track, then the Pixabay stub.
+
+    Returns None if nothing available (gracefully skipped by generator).
     """
     MUSIC_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Explicit user-picked track overrides everything else.
+    if track_filename:
+        # Reject traversal / absolute paths — we only load from MUSIC_DIR.
+        if "/" in track_filename or "\\" in track_filename or ".." in track_filename:
+            logger.warning(f"Rejected unsafe track_filename: {track_filename!r}")
+            return None
+        candidate = (MUSIC_DIR / track_filename).resolve()
+        if not candidate.is_relative_to(MUSIC_DIR.resolve()):
+            logger.warning(f"Rejected track outside MUSIC_DIR: {track_filename!r}")
+            return None
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            logger.info(f"Selected user-picked track: {candidate.name}")
+            return candidate
+        logger.warning(f"track_filename {track_filename!r} not found on disk — falling back to genre")
 
     # Look for bundled tracks matching genre
     for ext in ("mp3", "wav", "ogg", "m4a"):
@@ -122,14 +144,20 @@ async def mix_audio(
         # Get voice duration
         voice_duration = probe_duration(voice_path, default=60.0)
 
-        # FFmpeg filter: lower music volume, fade in/out, mix with voice
+        # FFmpeg filter: lower music volume, fade in/out, mix with voice.
+        # normalize=0: amix's default normalize=1 divides every input by the
+        # active-input count, so a 2-input mix halves the VOICE (−6 dB) instead
+        # of laying the music underneath it. normalize=0 keeps the voice at its
+        # intended full level with the music as a true −20 dB bed; alimiter
+        # guards the summed peak against clipping.
         fade_out_start = max(voice_duration - 2.0, 0)
         filter_complex = (
             f"[1:a]volume={music_volume_db}dB,"
             f"afade=t=in:d=1,"
             f"afade=t=out:st={fade_out_start:.1f}:d=2"
             f"[bg];"
-            f"[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[out]"
+            f"[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixraw];"
+            f"[mixraw]alimiter=limit=0.95[out]"
         )
 
         cmd = [
