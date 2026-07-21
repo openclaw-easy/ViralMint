@@ -8,6 +8,7 @@ This is THE key visual feature for viral short-form content.
 import logging
 import re
 import subprocess
+import sys
 import asyncio
 from pathlib import Path
 
@@ -77,6 +78,20 @@ def insert_emojis_into_words(words: list[dict], style: str = "moderate") -> list
 
 # ── Caption Style Presets ──────────────────────────────────────────────────────
 
+# Caption styles. Note on positioning:
+# - `alignment` is ASS numpad: 1=bot-L, 2=bot-C, 3=bot-R, 5=mid-C, 8=top-C, etc.
+#   ALL "active" styles use alignment=2 (bottom-center) so margin_v actually
+#   pushes the text up from the bottom edge — that's how libass interprets it.
+#   alignment=5 (mid-center) ignores margin_v and pins to the literal center
+#   of the frame, which looked like a placement bug on every video.
+# - margin_v_portrait / margin_v_landscape — pixel offset from the BOTTOM edge,
+#   different per aspect ratio because absolute pixels don't translate. A
+#   1920-tall portrait at 480px-from-bottom puts text at ~75% screen height
+#   (the lower-third TikTok zone); the same 480px on a 1080-tall landscape
+#   would land in the upper half. _build_ass_header picks the right one.
+# - A single `margin_v` field is kept on every style as a fallback (and for
+#   custom styles loaded from the DB, which only ship that one field) — it's
+#   used when the dual portrait/landscape fields aren't set.
 CAPTION_STYLES = {
     "viral": {
         "font": "Arial Bold",
@@ -87,9 +102,11 @@ CAPTION_STYLES = {
         "outline_color": "&H00000000",       # black
         "outline_width": 3,
         "shadow_depth": 1,
-        "alignment": 5,                      # center-center (numpad position)
-        "margin_v": 80,                      # vertical margin from bottom
-        "words_per_group": 3,
+        "alignment": 2,                      # bottom-center (was 5 = literal middle, broken)
+        "margin_v": 80,                      # fallback for DB/custom styles
+        "margin_v_portrait": 480,            # text bottom ≈ 75% down on 1920px frame (lower-third)
+        "margin_v_landscape": 120,           # text bottom ≈ 89% down on 1080px frame
+        "words_per_group": 6,
     },
     "classic": {
         "font": "Arial",
@@ -102,6 +119,8 @@ CAPTION_STYLES = {
         "shadow_depth": 0,
         "alignment": 2,                      # bottom-center
         "margin_v": 40,
+        "margin_v_portrait": 100,            # near-bottom subtitle position
+        "margin_v_landscape": 50,
         "words_per_group": 8,
     },
     "bold": {
@@ -113,8 +132,29 @@ CAPTION_STYLES = {
         "outline_color": "&H00000000",
         "outline_width": 4,
         "shadow_depth": 2,
-        "alignment": 5,                      # center-center
+        "alignment": 2,                      # was 5 = literal middle, broken
         "margin_v": 60,
+        "margin_v_portrait": 460,            # lower-third for big animated callouts
+        "margin_v_landscape": 110,
+        "words_per_group": 4,
+    },
+    "brainrot": {
+        # Big, centered, 1–2 words at a time — the recognizable gameplay-overlay
+        # TikTok look. Bottom-anchored (alignment 2) with a large margin_v so the
+        # text sits near the vertical CENTER on a 1920px frame (alignment 5 is
+        # broken in our renderer, same as the other styles note).
+        "font": "Impact",
+        "font_size_portrait": 84,
+        "font_size_landscape": 60,
+        "primary_color": "&H00FFFFFF",       # white
+        "highlight_color": "&H0000FFFF",     # yellow (ASS BGR)
+        "outline_color": "&H00000000",       # black
+        "outline_width": 6,
+        "shadow_depth": 3,
+        "alignment": 2,
+        "margin_v": 300,
+        "margin_v_portrait": 840,            # ≈ vertical center on a 1920px frame
+        "margin_v_landscape": 300,
         "words_per_group": 2,
     },
     "neon": {
@@ -126,9 +166,11 @@ CAPTION_STYLES = {
         "outline_color": "&H00330033",       # dark purple outline
         "outline_width": 3,
         "shadow_depth": 2,
-        "alignment": 5,
+        "alignment": 2,                      # was 5 = literal middle, broken
         "margin_v": 70,
-        "words_per_group": 3,
+        "margin_v_portrait": 460,
+        "margin_v_landscape": 110,
+        "words_per_group": 6,
     },
     "minimal": {
         "font": "Arial",
@@ -141,6 +183,8 @@ CAPTION_STYLES = {
         "shadow_depth": 0,
         "alignment": 2,                      # bottom-center
         "margin_v": 30,
+        "margin_v_portrait": 80,             # very bottom — minimal is supposed to feel subtle
+        "margin_v_landscape": 40,
         "words_per_group": 10,               # long phrases
     },
     "karaoke": {
@@ -154,7 +198,9 @@ CAPTION_STYLES = {
         "shadow_depth": 1,
         "alignment": 2,                      # bottom-center
         "margin_v": 50,
-        "words_per_group": 5,
+        "margin_v_portrait": 140,
+        "margin_v_landscape": 70,
+        "words_per_group": 7,
     },
     "glow": {
         "font": "Arial Bold",
@@ -165,11 +211,147 @@ CAPTION_STYLES = {
         "outline_color": "&H000066CC",       # dark orange outline
         "outline_width": 4,
         "shadow_depth": 3,
-        "alignment": 5,
+        "alignment": 2,                      # was 5 = literal middle, broken
         "margin_v": 75,
+        "margin_v_portrait": 470,
+        "margin_v_landscape": 115,
+        "words_per_group": 6,
+    },
+    # ── Themed look pack ─────────────────────────────────────────────────────
+    # Named looks. Fonts stick to cross-platform system families (Arial Black /
+    # Georgia / Verdana ship on macOS + Windows; Linux resolves close metrics
+    # via fontconfig) — resolve_caption_font still swaps in script-aware fonts
+    # for CJK etc.
+    "urban": {
+        # Bold street look: heavy black-outlined white with a hot-orange pop.
+        "font": "Arial Black",
+        "font_size_portrait": 62,
+        "font_size_landscape": 46,
+        "primary_color": "&H00FFFFFF",       # white
+        "highlight_color": "&H00008CFF",     # hot orange (RGB 255,140,0)
+        "outline_color": "&H00000000",       # hard black
+        "outline_width": 5,
+        "shadow_depth": 0,
+        "alignment": 2,
+        "margin_v": 115,
+        "margin_v_portrait": 470,
+        "margin_v_landscape": 115,
         "words_per_group": 3,
     },
+    "warm": {
+        # Cozy lifestyle look: cream text, amber highlight, soft brown edge.
+        "font": "Georgia",
+        "font_size_portrait": 54,
+        "font_size_landscape": 40,
+        "primary_color": "&H00E1F5FF",       # cream (RGB 255,245,225)
+        "highlight_color": "&H0078C8FF",     # amber (RGB 255,200,120)
+        "outline_color": "&H000A1E3C",       # deep warm brown (RGB 60,30,10)
+        "outline_width": 3,
+        "shadow_depth": 2,
+        "alignment": 2,
+        "margin_v": 110,
+        "margin_v_portrait": 460,
+        "margin_v_landscape": 110,
+        "words_per_group": 5,
+    },
+    "mono": {
+        # Monochrome editorial look: zero saturation, thin edge, calm pacing.
+        "font": "Verdana",
+        "font_size_portrait": 50,
+        "font_size_landscape": 38,
+        "primary_color": "&H00FFFFFF",       # white
+        "highlight_color": "&H00C8C8C8",     # light gray (RGB 200,200,200)
+        "outline_color": "&H00141414",       # near-black
+        "outline_width": 2,
+        "shadow_depth": 1,
+        "alignment": 2,
+        "margin_v": 105,
+        "margin_v_portrait": 450,
+        "margin_v_landscape": 105,
+        "words_per_group": 5,
+    },
 }
+
+
+# ── Script-aware font fallback ────────────────────────────────────────────────
+#
+# Every built-in style pins a Latin display font (Arial Bold / Impact). libass
+# does NOT glyph-fallback per character the way a browser does, so any script
+# those fonts lack — Chinese/Japanese/Korean, Arabic, Thai, … — renders as
+# tofu boxes (□□□□) burned permanently into the video. When the caption text
+# contains such a script, swap the style's font for a platform system font that
+# covers it. These fonts also cover Latin, so mixed-language text stays
+# readable; pure-Latin (and Cyrillic/Greek, which Arial covers) keeps the
+# style's designed font.
+
+# Ordered — first match wins. Kana before Han (Japanese text contains Han, so
+# kana is the discriminator); Hangul before Han for the same reason.
+_SCRIPT_RANGES: list[tuple[str, tuple[tuple[int, int], ...]]] = [
+    ("kana", ((0x3040, 0x30FF), (0x31F0, 0x31FF))),
+    ("hangul", ((0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F))),
+    ("han", ((0x4E00, 0x9FFF), (0x3400, 0x4DBF), (0xF900, 0xFAFF))),
+    ("arabic", ((0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF))),
+    ("hebrew", ((0x0590, 0x05FF),)),
+    ("devanagari", ((0x0900, 0x097F),)),
+    ("thai", ((0x0E00, 0x0E7F),)),
+]
+
+# System fonts guaranteed (macOS/Windows) or conventional (Linux: Noto via
+# fonts-noto-cjk etc.) per platform. libass resolves the name via CoreText /
+# DirectWrite / fontconfig at burn time.
+_SCRIPT_FONTS: dict[str, dict[str, str]] = {
+    "darwin": {
+        "han": "PingFang SC", "kana": "Hiragino Sans", "hangul": "Apple SD Gothic Neo",
+        "arabic": "Geeza Pro", "hebrew": "Arial Hebrew",
+        "devanagari": "Kohinoor Devanagari", "thai": "Thonburi",
+    },
+    "win32": {
+        "han": "Microsoft YaHei", "kana": "Yu Gothic UI", "hangul": "Malgun Gothic",
+        "arabic": "Segoe UI", "hebrew": "Segoe UI",
+        "devanagari": "Nirmala UI", "thai": "Leelawadee UI",
+    },
+    "linux": {
+        "han": "Noto Sans CJK SC", "kana": "Noto Sans CJK JP", "hangul": "Noto Sans CJK KR",
+        "arabic": "Noto Sans Arabic", "hebrew": "Noto Sans Hebrew",
+        "devanagari": "Noto Sans Devanagari", "thai": "Noto Sans Thai",
+    },
+}
+
+
+def detect_non_latin_script(text: str) -> str | None:
+    """Return the first non-Latin script (per _SCRIPT_RANGES order) present in
+    `text`, or None when the default Latin fonts can render everything."""
+    if not text:
+        return None
+    present: set[str] = set()
+    for ch in text:
+        cp = ord(ch)
+        if cp < 0x0370:  # Latin / Latin-1 / extended — Arial territory
+            continue
+        for name, ranges in _SCRIPT_RANGES:
+            if any(lo <= cp <= hi for lo, hi in ranges):
+                present.add(name)
+                break
+    for name, _ in _SCRIPT_RANGES:  # honor priority order (kana > han, …)
+        if name in present:
+            return name
+    return None
+
+
+def resolve_caption_font(preferred_font: str, text: str) -> str:
+    """The style's designed font, unless `text` needs a script it can't render —
+    then a platform system font with coverage for that script."""
+    script = detect_non_latin_script(text)
+    if not script:
+        return preferred_font
+    platform = sys.platform if sys.platform in _SCRIPT_FONTS else "linux"
+    font = _SCRIPT_FONTS[platform].get(script, preferred_font)
+    if font != preferred_font:
+        logger.info(
+            "Caption text contains %s script — overriding font %r → %r",
+            script, preferred_font, font,
+        )
+    return font
 
 
 async def _load_custom_style(style_id: str) -> dict | None:
@@ -213,8 +395,16 @@ def _build_ass_header(style_config: dict, aspect_ratio: str, resolution: tuple[i
     """Build ASS file header with style definitions."""
     style = style_config
     width, height = resolution
+    is_portrait = aspect_ratio == "9:16"
 
-    font_size = style["font_size_portrait"] if aspect_ratio == "9:16" else style["font_size_landscape"]
+    font_size = style["font_size_portrait"] if is_portrait else style["font_size_landscape"]
+
+    # Pick portrait or landscape margin_v. Built-in styles (CAPTION_STYLES)
+    # ship with both; custom styles loaded from the DB only have a single
+    # `margin_v` — fall back to it. Final fallback (80) covers the unlikely
+    # case where a custom style is missing all three.
+    margin_v_key = "margin_v_portrait" if is_portrait else "margin_v_landscape"
+    margin_v = style.get(margin_v_key) or style.get("margin_v") or 80
 
     return f"""[Script Info]
 Title: ViralMint Captions
@@ -227,7 +417,7 @@ PlayResY: {height}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{style['font']},{font_size},{style['primary_color']},&H000000FF,{style['outline_color']},&H80000000,-1,0,0,0,100,100,0,0,1,{style['outline_width']},{style['shadow_depth']},{style['alignment']},20,20,{style['margin_v']},1
+Style: Default,{style['font']},{font_size},{style['primary_color']},&H000000FF,{style['outline_color']},&H80000000,-1,0,0,0,100,100,0,0,1,{style['outline_width']},{style['shadow_depth']},{style['alignment']},20,20,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -299,50 +489,137 @@ def _extract_word_timestamps(segments: list[dict]) -> list[dict]:
     return [w for w in words if w.get("text")]
 
 
+# Phrase-aware line building (caption overhaul).
+#
+# The old grouper cut every `words_per_group` words blind — mid-sentence,
+# mid-phrase — and each highlight event only spanned the active word's own
+# start→end. Whisper words have natural gaps (breaths, pauses), so the
+# caption VANISHED between words and between groups: the user saw 2-3-word
+# fragments flash on and off. Two rules fix it:
+#   1. Lines break at natural points (sentence punctuation, real speech
+#      pauses, a per-style word/char budget) instead of a blind count.
+#   2. Display is CONTINUOUS: each word's highlight event runs until the
+#      next word starts, and the line holds on screen until the next line
+#      appears (bounded by _LINE_HOLD_S so text doesn't linger through
+#      long silences).
+_SENTENCE_END = (".", "!", "?", "…", "。", "！", "？")
+_TRAILING_QUOTES = "\"'”’)»]"
+_PAUSE_BREAK_S = 0.6   # speech gap that forces a new line
+_LINE_HOLD_S = 1.0     # max linger after a line's last word before clearing
+
+
+def _max_chars_for(style: dict) -> int:
+    """Char budget per caption line, derived from the portrait font size so
+    bigger presets get shorter lines (ASS wraps overflow to a second visual
+    line; the budget keeps us at 1-2 wrapped lines max)."""
+    font_size = style.get("font_size_portrait") or 56
+    return max(12, int(2200 / max(int(font_size), 1)))
+
+
+def _group_words_into_lines(
+    words: list[dict], max_words: int, max_chars: int,
+) -> list[list[dict]]:
+    """Split timed words into caption lines at natural boundaries: sentence
+    punctuation, speech pauses > _PAUSE_BREAK_S, or the word/char budget."""
+    lines: list[list[dict]] = []
+    cur: list[dict] = []
+    cur_chars = 0
+    for w in words:
+        text = w["text"]
+        if cur:
+            prev = cur[-1]
+            gap = float(w["start"]) - float(prev["end"])
+            prev_token = prev["text"].rstrip(_TRAILING_QUOTES)
+            if (
+                len(cur) >= max_words
+                or cur_chars + 1 + len(text) > max_chars
+                or gap > _PAUSE_BREAK_S
+                or prev_token.endswith(_SENTENCE_END)
+            ):
+                lines.append(cur)
+                cur = []
+                cur_chars = 0
+        cur.append(w)
+        cur_chars += (1 if cur_chars else 0) + len(text)
+    if cur:
+        lines.append(cur)
+
+    # Orphan control: a 1-word line reads as a flash (the exact complaint
+    # this grouper fixes), so fold it back into the previous line when it
+    # continues that line's sentence — allowing the word budget to stretch
+    # by 2 for a complete phrase. Char budget still applies.
+    merged: list[list[dict]] = []
+    for line in lines:
+        if merged and len(line) == 1:
+            prev = merged[-1]
+            prev_token = prev[-1]["text"].rstrip(_TRAILING_QUOTES)
+            gap = float(line[0]["start"]) - float(prev[-1]["end"])
+            prev_chars = sum(len(w["text"]) for w in prev) + len(prev) - 1
+            if (
+                not prev_token.endswith(_SENTENCE_END)
+                and gap <= _PAUSE_BREAK_S
+                and len(prev) + 1 <= max_words + 2
+                and prev_chars + 1 + len(line[0]["text"]) <= max_chars
+            ):
+                prev.append(line[0])
+                continue
+        merged.append(line)
+    return merged
+
+
 def _generate_ass_events(words: list[dict], style: dict) -> str:
     """
-    Generate ASS dialogue events with word-by-word highlighting.
-    Groups words into display groups, highlights the active word.
+    Generate ASS dialogue events with word-by-word highlighting over
+    phrase-length lines. The full line stays on screen for its whole
+    duration; the highlight walks word to word with no display gaps.
     """
-    group_size = style.get("words_per_group", 3)
+    max_words = style.get("words_per_group", 6)
     highlight = style.get("highlight_color", "&H0000FFFF")
     primary = style.get("primary_color", "&H00FFFFFF")
+    lines = _group_words_into_lines(words, max_words, _max_chars_for(style))
     events = []
 
-    # Group words
-    groups = []
-    for i in range(0, len(words), group_size):
-        group = words[i:i + group_size]
-        groups.append(group)
+    for li, line in enumerate(lines):
+        line_start = float(line[0]["start"])
+        last_word_end = float(line[-1]["end"])
+        if li + 1 < len(lines):
+            next_start = float(lines[li + 1][0]["start"])
+            # Hold the line until the next one appears, unless the silence
+            # is long — then clear after a short linger.
+            line_end = (
+                next_start
+                if next_start - last_word_end <= _LINE_HOLD_S
+                else last_word_end + _LINE_HOLD_S * 0.6
+            )
+        else:
+            line_end = last_word_end + 0.5
+        if line_end <= line_start:
+            continue  # degenerate line
 
-    for group in groups:
-        if not group:
-            continue
-        group_start = group[0]["start"]
-        group_end = group[-1]["end"]
-        if group_end <= group_start:
-            continue  # skip degenerate groups
+        # Continuous per-word segments: word i is highlighted from its own
+        # start (or the line start, for word 0) until word i+1 starts (or
+        # the line end, for the last word). Pauses inside the line keep the
+        # previous word highlighted instead of blanking the caption.
+        bounds = [line_start]
+        for w in line[1:]:
+            bounds.append(max(float(w["start"]), bounds[-1]))
+        bounds.append(max(line_end, bounds[-1]))
 
-        # For each word in the group, create a dialogue line where THAT word is highlighted
-        for active_idx, active_word in enumerate(group):
-            word_start = active_word["start"]
-            word_end = active_word["end"]
-            if word_end <= word_start:
-                continue  # skip zero-duration words
+        for active_idx in range(len(line)):
+            seg_start, seg_end = bounds[active_idx], bounds[active_idx + 1]
+            if seg_end <= seg_start:
+                continue  # zero-length segment (stacked timestamps)
 
-            # Build text with override tags
             parts = []
-            for j, w in enumerate(group):
+            for j, w in enumerate(line):
                 if j == active_idx:
-                    # Highlighted word (active)
                     parts.append(f"{{\\1c{highlight}\\b1}}{w['text']}{{\\1c{primary}\\b0}}")
                 else:
                     parts.append(w["text"])
 
             text = " ".join(parts)
-            start_ts = _format_ass_time(word_start)
-            end_ts = _format_ass_time(word_end)
-
+            start_ts = _format_ass_time(seg_start)
+            end_ts = _format_ass_time(seg_end)
             events.append(f"Dialogue: 0,{start_ts},{end_ts},Default,,0,0,0,,{text}")
 
     return "\n".join(events)
@@ -362,7 +639,7 @@ async def generate_captions_ass(
         segments: Whisper segments with word timestamps.
                   Each: {"start": float, "end": float, "text": str, "words": [...]}
         style: Caption style preset name.
-        aspect_ratio: "9:16" or "16:9".
+        aspect_ratio: "9:16", "1:1" or "16:9".
         output_path: Where to write the ASS file.
         emoji_style: "none" | "minimal" | "moderate" | "heavy"
 
@@ -370,14 +647,17 @@ async def generate_captions_ass(
         Path to the generated ASS file.
     """
     if output_path is None:
-        output_path = settings.TMP_DIR / "captions.ass"
+        from uuid import uuid4
+        output_path = settings.TMP_DIR / f"captions_{uuid4().hex[:8]}.ass"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     style_config = CAPTION_STYLES.get(style) or await _load_custom_style(style) or CAPTION_STYLES["viral"]
 
     if aspect_ratio == "9:16":
         resolution = (1080, 1920)
-    else:
+    elif aspect_ratio == "1:1":
+        resolution = (1080, 1080)
+    else:  # 16:9
         resolution = (1920, 1080)
 
     # Extract word-level timestamps
@@ -390,6 +670,15 @@ async def generate_captions_ass(
     # Auto-insert emojis based on keyword matching
     words = insert_emojis_into_words(words, emoji_style)
 
+    # Script-aware font fallback: if the caption text needs a script the
+    # style's Latin display font can't render (CJK, Arabic, …), swap in a
+    # platform system font with coverage — otherwise libass burns tofu boxes.
+    # Copy-on-write: CAPTION_STYLES entries are shared module state.
+    full_text = " ".join(w["text"] for w in words)
+    fallback_font = resolve_caption_font(style_config["font"], full_text)
+    if fallback_font != style_config["font"]:
+        style_config = {**style_config, "font": fallback_font}
+
     # Build ASS file
     header = _build_ass_header(style_config, aspect_ratio, resolution)
     events = _generate_ass_events(words, style_config)
@@ -401,17 +690,47 @@ async def generate_captions_ass(
     return output_path
 
 
+def _check_ffmpeg_ass_support() -> bool:
+    """Check if FFmpeg was built with libass support (required for ASS captions)."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-filters"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "ass" in result.stdout and "libass" in result.stdout
+    except Exception:
+        return False
+
+
+# Cache the check — FFmpeg build doesn't change during runtime
+_ffmpeg_has_ass: bool | None = None
+
+
 async def burn_captions(
     video_path: Path,
     ass_path: Path,
     output_path: Path = None,
 ) -> Path:
-    """Burn ASS captions into video using FFmpeg."""
+    """Burn ASS captions into video using FFmpeg's libass filter."""
+    global _ffmpeg_has_ass
+
     if output_path is None:
         output_path = video_path.parent / f"{video_path.stem}_captioned.mp4"
 
     if not ass_path.exists() or ass_path.stat().st_size == 0:
         logger.warning("Empty or missing ASS file — returning original video")
+        return video_path
+
+    # Check libass support once
+    if _ffmpeg_has_ass is None:
+        _ffmpeg_has_ass = _check_ffmpeg_ass_support()
+
+    if not _ffmpeg_has_ass:
+        logger.error(
+            "FFmpeg is missing libass support — captions CANNOT be burned. "
+            "Install FFmpeg with libass: brew install homebrew-ffmpeg/ffmpeg/ffmpeg "
+            "(macOS) or sudo apt install ffmpeg libass-dev (Linux)"
+        )
         return video_path
 
     def _burn():
@@ -428,8 +747,9 @@ async def burn_captions(
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
-            logger.warning(f"ASS caption burn failed: {result.stderr[:400]}")
+            logger.error(f"ASS caption burn FFmpeg error: {result.stderr[:500]}")
             return video_path  # Return original on failure
+        logger.info(f"Captions burned successfully: {output_path}")
         return output_path
 
     return await asyncio.to_thread(_burn)
