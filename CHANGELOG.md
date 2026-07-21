@@ -7,6 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Added
+- **Clip Studio — structured scoring + control knobs ported from the hosted variant.**
+  Clips now get a hook score + hook type and a flow/value/trend/shareability
+  score breakdown (new `clip_hook_score` / `clip_hook_type` /
+  `clip_score_breakdown_json` columns, auto-migrated). The extract dialog gains
+  a free-form "describe the clips you want" query, target-platform and genre
+  bias, an emoji-style control, a remove-silence toggle, and a manual mode for
+  extracting explicit time ranges. Extraction options are consolidated into a
+  single `ExtractOptions` object; each clip gets a descriptive title and an
+  optional on-screen hook overlay.
+- **Chat — rich cards now persist across reloads.** The backend became the
+  single writer of rich cards (scout results, channel analysis, …) and
+  job-complete rows at WS-emit time, so they survive a page reload and are
+  saved even when a job finishes with no tab open (previously they were
+  in-memory only and lost).
+- **Chat — quick-reply chips** and a composer-lock fix: when the assistant asks
+  a follow-up question (e.g. "which platform?"), the input no longer stays
+  locked, and suggested answers render as clickable chips.
 - **Clip Studio — selection-quality improvements ported from the hosted variant.**
   Sentence-snap (clips no longer cut mid-word), silent-gap backfill, topic
   dedup (drops re-told stories), a short-video fast-path (sources under 20s
