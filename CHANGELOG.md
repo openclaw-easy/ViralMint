@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Security
+- **SPA path-traversal fix.** The frontend catch-all route served any file
+  resolved under the `dist` directory without a containment check, so a
+  `../`-laden request could read files outside the built bundle. The handler
+  now confirms the resolved path stays inside the bundle before serving.
+- **CSRF origin check.** Non-safe-method requests must now carry an
+  allowlisted `Origin`/`Referer` (no-Origin CLI/non-browser calls still pass),
+  hardening the loopback surface against a malicious page POSTing to
+  `127.0.0.1:16888`. Skipped when you opt into `HOST=0.0.0.0` LAN mode.
+- **Encryption-key validation.** A placeholder or malformed `ENCRYPTION_KEY`
+  used to slip through and crash every encrypt/decrypt at first use; it's now
+  validated (and regenerated if invalid) at startup.
+
+### Fixed
+- **Scout hardening ported from the hosted variant.** Fixes a timezone crash
+  in virality scoring (tz-aware feed dates), makes outlier enrichment
+  non-fatal with an `author_url` None-guard, shows every scouted result on a
+  repeat scout (not just net-new rows), adds a 60s ceiling + extract fallback
+  to the yt-dlp search path, retries empty news-RSS passes, caps/de-dupes the
+  platform list, and surfaces the cross-post fallback as a constraint warning.
+- **Static-asset caching + upgrade refresh.** Content-hashed assets are served
+  `immutable` (no revalidation) while `index.html` is `no-cache`, so normal
+  loads are fast and an app upgrade refreshes on first reload.
+- **Schema-drift warning.** Startup now logs a loud warning if a model column
+  is missing from the live DB, catching a forgotten migration early.
+- **`VIRALMINT_DATA_DIR`.** The DB, storage, and `.env` location now honor
+  `VIRALMINT_DATA_DIR` (falling back to the working directory when unset).
+
 ### Added
 - **Clip Studio — structured scoring + control knobs ported from the hosted variant.**
   Clips now get a hook score + hook type and a flow/value/trend/shareability
