@@ -2,10 +2,11 @@
 # Copyright (c) 2025-2026 ViralMint Contributors
 """FastAPI application factory."""
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 
 from backend.config import settings
@@ -137,6 +138,53 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # CSRF defense: reject state-changing requests whose Origin/Referer is not
+    # in the allowlist. Loopback-binding (HOST=127.0.0.1) blocks LAN attacks,
+    # but any site the user visits in a browser can still POST to 127.0.0.1
+    # with credentials — CORS hides the response on simple requests but the
+    # side effect has already happened. This middleware rejects them up front.
+    #
+    # LAN mode: OSS documents an optional HOST=0.0.0.0 so a phone on the same
+    # WiFi can drive the UI at http://<lan-ip>:16888. That legitimate traffic
+    # carries an Origin the loopback allowlist can't enumerate (the LAN IP is
+    # unknown ahead of time), so when the user has explicitly opted into LAN
+    # exposure we skip the strict origin check entirely. On the loopback
+    # default (127.0.0.1) we enforce it.
+    lan_mode = settings.HOST == "0.0.0.0"
+    allowed_origins = {
+        settings.FRONTEND_URL,
+        "http://localhost:5173",
+        "http://localhost:3000",
+        f"http://localhost:{settings.PORT}",
+        f"http://127.0.0.1:{settings.PORT}",
+    }
+    safe_methods = {"GET", "HEAD", "OPTIONS"}
+
+    def _origin_ok(header: str) -> bool:
+        if not header:
+            return False
+        try:
+            parsed = urlparse(header)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+        except Exception:
+            return False
+        return origin in allowed_origins
+
+    @app.middleware("http")
+    async def csrf_origin_check(request: Request, call_next):
+        if lan_mode or request.method in safe_methods:
+            return await call_next(request)
+        origin = request.headers.get("origin")
+        referer = request.headers.get("referer")
+        # No Origin AND no Referer → non-browser client (CLI, server) → allow.
+        # If either is present, at least one must be in the allowlist.
+        if origin or referer:
+            if not (_origin_ok(origin) or _origin_ok(referer)):
+                return JSONResponse(
+                    {"detail": "Forbidden: invalid origin"}, status_code=403
+                )
+        return await call_next(request)
+
     # Register API routers
     app.include_router(chat.router)
     app.include_router(jobs.router, prefix="/api")
@@ -171,18 +219,49 @@ def create_app() -> FastAPI:
     import os as _os
     dist = Path(_os.environ.get("VIRALMINT_FRONTEND_DIST", "frontend/dist"))
     if dist.exists():
-        # Serve static assets (js, css, images)
-        app.mount("/assets", StaticFiles(directory=str(dist / "assets")), name="static_assets")
+        # Serve static assets (js, css, images). Vite content-hashes every
+        # filename under /assets, so a given URL's bytes never change — mark them
+        # `immutable` + long max-age so the browser serves them straight from
+        # disk cache on every subsequent load WITHOUT a revalidation round-trip.
+        # Plain StaticFiles emits only etag/last-modified (no Cache-Control),
+        # forcing a conditional GET per asset on every load. Safe across updates:
+        # a content change means a new hashed filename, and the no-cache
+        # index.html shell (below) always points at the current set.
+        class _ImmutableStaticFiles(StaticFiles):
+            async def get_response(self, path, scope):
+                response = await super().get_response(path, scope)
+                if response.status_code == 200:
+                    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                return response
 
-        # SPA catch-all: any non-API route serves index.html
+        app.mount("/assets", _ImmutableStaticFiles(directory=str(dist / "assets")), name="static_assets")
+
+        # SPA catch-all: any non-API route serves index.html.
+        dist_root = dist.resolve()
+        index_file = dist / "index.html"
+
+        # The SPA shell must NEVER be heuristically cached. FileResponse sets
+        # last-modified + etag but no Cache-Control, so browsers heuristically
+        # cache index.html — which means that after an app UPDATE the browser
+        # keeps serving the OLD index.html (pointing at old hashed JS). `no-cache`
+        # forces revalidation on every load (cheap 304 when unchanged, fresh
+        # shell after an update). The /assets/* bundles are content-hashed and
+        # served `immutable` by the mount above, so they cache without revalidation.
+        shell_headers = {"Cache-Control": "no-cache"}
+
         @app.get("/{full_path:path}")
         async def serve_spa(request: Request, full_path: str):
-            # If the file exists in dist, serve it directly
-            file_path = dist / full_path
-            if full_path and file_path.is_file():
-                return FileResponse(file_path)
-            # Otherwise serve index.html for SPA routing
-            return FileResponse(dist / "index.html")
+            if not full_path:
+                return FileResponse(index_file, headers=shell_headers)
+            # Resolve path and confirm it lives inside dist_root before serving —
+            # prevents `GET /..%2F..%2Fetc%2Fpasswd` from escaping the SPA bundle.
+            try:
+                candidate = (dist / full_path).resolve()
+                if candidate.is_file() and candidate.is_relative_to(dist_root):
+                    return FileResponse(candidate)
+            except (OSError, ValueError):
+                pass
+            return FileResponse(index_file, headers=shell_headers)
 
     return app
 

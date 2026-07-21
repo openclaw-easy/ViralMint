@@ -85,8 +85,50 @@ async def init_db():
         await _add_column_if_missing(conn, "user_settings", "ai_api_key_encrypted", "TEXT")
         await _add_column_if_missing(conn, "user_settings", "youtube_api_key_encrypted", "TEXT")
 
+    # Drift sentinel — compare every model's columns against the live DB
+    # schema and log a loud warning for any column the model declares but
+    # the DB lacks. This converts a future "endpoint 500" silent regression
+    # (a model column added without a matching `_add_column_if_missing` line)
+    # into a clear startup log line. Runs once, after migrations, before
+    # zombie cleanup. Pure observability — never raises.
+    await _warn_on_schema_drift()
+
     # Clean up zombie jobs — any jobs stuck at "running"/"pending" from a previous crash
     await _cleanup_zombie_jobs()
+
+
+async def _warn_on_schema_drift():
+    """Compare model schema vs live DB; log WARN for missing columns.
+
+    Catches the class of regression where a column is added to a model
+    but the matching `_add_column_if_missing` call is forgotten in
+    init_db. Upgrade-install users hit a 500 on the first endpoint that
+    SELECTs the new column; fresh installs work because the table is
+    created from scratch. This sentinel makes the drift visible at
+    startup so the next regression is caught before users file tickets.
+    """
+    try:
+        async with engine.connect() as conn:
+            for table_name, mapper in Base.metadata.tables.items():
+                try:
+                    rows = await conn.exec_driver_sql(f"PRAGMA table_info({table_name})")
+                    db_cols = {r[1] for r in rows.fetchall()}
+                except Exception:
+                    # Table doesn't exist yet — create_all just made it, no drift possible.
+                    continue
+                if not db_cols:
+                    continue
+                model_cols = {c.name for c in mapper.columns}
+                missing = model_cols - db_cols
+                if missing:
+                    logger.warning(
+                        "Schema drift detected on table %r: model declares columns "
+                        "missing from DB: %s. Add `_add_column_if_missing(conn, %r, ...)` "
+                        "lines for each in backend/database.py init_db().",
+                        table_name, sorted(missing), table_name,
+                    )
+    except Exception as e:
+        logger.warning("Schema-drift sentinel failed (non-fatal): %s", e)
 
 
 async def _cleanup_zombie_jobs():
