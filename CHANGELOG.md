@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- **Clip Studio — selection-quality improvements ported from the hosted variant.**
+  Sentence-snap (clips no longer cut mid-word), silent-gap backfill, topic
+  dedup (drops re-told stories), a short-video fast-path (sources under 20s
+  emit the whole clip; the blanket <30s reject is gone), and batched clip
+  metadata (one AI call for N clips instead of N). No-speech sources now yield
+  duration-based clips instead of erroring.
+- **Captions — CJK homophone correction.** When the narration script is
+  CJK-dominant, the burned captions now use the true script text (keeping
+  Whisper's timings) instead of ASR homophone substitutions. Fail-open for
+  non-CJK content.
+
 ### Fixed
 - **Clip Studio — extraction hardening ported from the hosted variant (7 bugfixes).**
   Fixes a `time_offset` double-count that silently dropped almost every clip
