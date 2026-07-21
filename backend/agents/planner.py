@@ -612,10 +612,13 @@ class PlannerAgent:
 
         # Strip <quick_replies> markup too — messaging channels don't render
         # chips, so the block would otherwise leak into the plain-text reply.
+        quick_replies = _parse_quick_replies(full_response)
         qr_stripped = QUICK_REPLIES_PATTERN.sub("", full_response)
         clean_response = ACTION_PATTERN.sub("", qr_stripped).strip()
         actions = ACTION_PATTERN.findall(qr_stripped)
-        if not actions:
+        # Mirror the web path: a deliberate clarifying-question turn (chips, no
+        # action block) must NOT get a premature action keyword-inferred.
+        if not actions and not quick_replies:
             actions = self._infer_missing_action(message, qr_stripped)
 
         # Capture dispatch-time follow-ups via the sink. There's no live WS on

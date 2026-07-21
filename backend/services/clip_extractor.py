@@ -828,7 +828,7 @@ def _generate_duration_based_clips(
             "end": duration,
             "title": f"{title} — Full clip",
             "hook": "",
-            "score": 5,
+            "virality_score": 5.0,
         }]
 
     # How many clips fit without overlap
@@ -843,7 +843,7 @@ def _generate_duration_based_clips(
             "end": clip_len,
             "title": f"{title} — Clip 1",
             "hook": "",
-            "score": 5,
+            "virality_score": 5.0,
         }]
 
     gap = (duration - num_clips * clip_len) / max(num_clips - 1, 1)
@@ -859,7 +859,7 @@ def _generate_duration_based_clips(
             "end": end,
             "title": f"{title} — Clip {i + 1}",
             "hook": "",
-            "score": 5,
+            "virality_score": 5.0,
         })
         pos = end + gap
 
@@ -2129,21 +2129,26 @@ async def _burn_clip_captions(
     try:
         from backend.services.caption_service import generate_captions_ass, burn_captions
         # Auto-detect aspect ratio from the clip file so landscape sources
-        # (force_vertical off) still get correctly-placed captions.
+        # (force_vertical off) still get correctly-placed captions. Run the
+        # ffprobe off the event loop — this runs inside the parallel caption
+        # fan-out, so a blocking subprocess.run would stall every other clip's
+        # coroutine and WS/DB traffic (see _ffmpeg_semaphore rationale).
         import subprocess
-        aspect = "9:16"
-        try:
-            probe = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height",
-                 "-of", "csv=p=0", str(clip_path)],
-                capture_output=True, text=True, timeout=10,
-            )
-            w, h = map(int, probe.stdout.strip().split(","))
-            if w > h:
-                aspect = "16:9"
-        except Exception:
-            pass
+
+        def _probe_aspect() -> str:
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+                     "-show_entries", "stream=width,height",
+                     "-of", "csv=p=0", str(clip_path)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                w, h = map(int, probe.stdout.strip().split(","))
+                return "16:9" if w > h else "9:16"
+            except Exception:
+                return "9:16"
+
+        aspect = await asyncio.to_thread(_probe_aspect)
         ass_path = await generate_captions_ass(
             segments, style=style, aspect_ratio=aspect,
             hook_text=hook_text or None, emoji_style=emoji_style,
