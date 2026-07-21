@@ -60,7 +60,28 @@ export default function useWebSocket() {
       }),
 
       ws.on("chat_done", (msg) => {
-        finalizeStream(msg.full_response)
+        // quick_replies is an optional list emitted when the AI included a
+        // <quick_replies> block. Bundling it onto chat_done keeps the chips
+        // attached atomically to the message that just finished — no race
+        // where the bubble renders before its chips arrive.
+        finalizeStream(msg.full_response, msg.quick_replies)
+      }),
+
+      // Dispatch-time follow-up from the planner (a clarifying question, a
+      // no-op note) — sent AFTER chat_done. Render it as a normal assistant
+      // bubble with optional quick-reply chips. Crucially it does NOT call
+      // setStreaming: the old path emitted these as chat_token, which flipped
+      // isStreaming=true with no matching chat_done and locked the composer
+      // forever ("which platform?" → user can't answer). Not persisted here —
+      // the backend folds the text into the turn's assistant message.
+      ws.on("assistant_message", (msg) => {
+        const content = (msg.content || "").trim()
+        if (!content) return
+        const m = { role: "assistant", content }
+        if (Array.isArray(msg.quick_replies) && msg.quick_replies.length > 0) {
+          m.quickReplies = msg.quick_replies
+        }
+        addMessage(m)
       }),
 
       ws.on("chat_error", (msg) => {

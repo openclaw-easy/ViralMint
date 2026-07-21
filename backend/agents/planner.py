@@ -12,6 +12,7 @@ Agent 1: Smart Chat/Planner
 import re
 import json
 import logging
+import contextvars
 from backend.core.ai_provider import get_ai_client
 from backend.core.user_intelligence import UserIntelligence
 from backend.core.setup_wizard import WIZARDS
@@ -128,6 +129,15 @@ Before sending your response, verify: "Did I include an <action> block?" If the 
 - After generation: "Video is ready! Upload to YouTube now, or want to generate another variation?"
 - Periodically: "Have you considered exploring [related niche]? It's trending right now."
 
+### Optional: Quick-Reply Chips
+- When it helps the user pick a next step, you MAY append a single `<quick_replies>` block containing a JSON array of up to 6 short reply strings (each under ~80 chars). Each becomes a tappable chip; clicking one sends that exact text back as the user's next message.
+- Put it at the very END of your response (after any `<action>` block). Keep labels short and phrased as things the user would say.
+- Especially useful right after you ASK a clarifying question (e.g. "which platform?") — offer the likely answers as chips instead of leaving the user to type.
+- Example:
+```
+<quick_replies>["Scout YouTube", "Scout TikTok", "Both"]</quick_replies>
+```
+
 ## Available Actions
 
 Output these JSON blocks at the END of your response to trigger actions:
@@ -230,10 +240,115 @@ Note: Scouting credentials (YouTube API key, TikHub token, Pexels) are configure
 
 ACTION_PATTERN = re.compile(r"<action>(.*?)</action>", re.DOTALL)
 
+# Quick-reply chips — the AI optionally appends a JSON array of short reply
+# strings inside <quick_replies>...</quick_replies>. Each becomes a clickable
+# chip below the assistant's bubble; clicking a chip submits the same text as a
+# normal user message (no special dispatch). Chips are parsed AFTER the response
+# streams so we can bundle them onto chat_done atomically — avoiding the race
+# where the message renders before its chips arrive.
+QUICK_REPLIES_PATTERN = re.compile(r"<quick_replies>(.*?)</quick_replies>", re.DOTALL)
+_MAX_QUICK_REPLIES = 6
+_MAX_QUICK_REPLY_LEN = 80
+
+
+def _parse_quick_replies(full_response: str) -> list[str]:
+    """Extract and sanitize the AI's <quick_replies> JSON array.
+
+    Returns [] on any failure (missing block, malformed JSON, wrong shape) —
+    quick replies are pure UX sugar; never block the response on parse errors.
+    """
+    match = QUICK_REPLIES_PATTERN.search(full_response)
+    if not match:
+        return []
+    try:
+        parsed = json.loads(match.group(1).strip())
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out: list[str] = []
+    for item in parsed:
+        if isinstance(item, str):
+            s = item.strip()
+            if s:
+                out.append(s[:_MAX_QUICK_REPLY_LEN])
+        if len(out) >= _MAX_QUICK_REPLIES:
+            break
+    return out
+
+
+# Dispatch-time follow-up sink. When an action handler needs to say something to
+# the user AFTER chat_done has fired (ask a clarifying question, report a no-op,
+# note a skipped platform), it must NOT emit a bare `chat_token`: on the web
+# client a chat_token flips isStreaming=true and, with no matching chat_done, the
+# composer stays locked forever — the bot asks "which platform?" and the user
+# can't answer. `_followup` instead emits a self-contained `assistant_message`
+# WS event (rendered as a normal assistant bubble, optionally with quick-reply
+# chips) AND appends the text to this contextvar sink so the caller can fold it
+# into the persisted assistant turn — otherwise the model has no record it asked,
+# and the user's next reply lands with no context. The messaging path (no live
+# WS) relies on the sink alone: the follow-up text is appended to the returned
+# reply.
+_followup_sink: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "planner_followup_sink", default=None,
+)
+
 
 class PlannerAgent:
     def __init__(self):
         self.intelligence = UserIntelligence()
+
+    async def _followup(self, user_id: str, text: str, quick_replies: list[str] | None = None):
+        """Send a dispatch-time message to the user as a real assistant turn
+        (never a bare chat_token — see the sink comment above). Also records it
+        so the caller can persist it into the turn's assistant message."""
+        text = (text or "").strip()
+        if not text:
+            return
+        await ws_manager.send({
+            "type": "assistant_message",
+            "content": text,
+            "quick_replies": quick_replies or [],
+        }, user_id)
+        sink = _followup_sink.get()
+        if sink is not None:
+            sink.append(text)
+
+    async def _gather_common_context(self, user_settings, user_id: str) -> dict:
+        """Fetch the context pieces shared by BOTH the streaming WS path
+        (handle_message) and the messaging path (handle_message_text).
+
+        Centralizing these kills the drift that used to bite when a shared piece
+        was added: the user-intel summary, smart suggestions, credential map,
+        profile, recent-failures, performance insights, news context, and live
+        funnel state were hand-duplicated in both handlers and could silently
+        diverge. The path-specific RENDERING (profile dump vs one-line, indent
+        style, cookie-age warnings on the web credential block, previous-session
+        text) stays in each handler, where it legitimately differs.
+
+        Returns the raw fetched pieces; each caller formats them as it needs.
+        """
+        ctx = await self.intelligence.get_context_summary(user_id)
+        suggestions = await self.intelligence.get_smart_suggestions(user_id)
+        cred_status = await self.intelligence.get_credential_status(user_settings, user_id)
+        user_profile = await self.intelligence.get_user_profile(user_id)
+        recent_failures = await self.intelligence.get_recent_failures(user_id)
+        perf_insights = await self.intelligence.get_performance_insights(user_id)
+        news_ctx = await self.intelligence.get_news_context(user_id)
+        pipeline = await self.intelligence.get_pipeline_state(user_id)
+
+        failures_text = "\n".join(f"  - {f}" for f in recent_failures) if recent_failures else "None"
+
+        return {
+            "ctx": ctx,
+            "suggestions": suggestions,
+            "cred_status": cred_status,
+            "user_profile": user_profile,
+            "failures_text": failures_text,
+            "perf_insights": perf_insights,
+            "news_ctx": news_ctx,
+            "pipeline": pipeline,
+        }
 
     async def handle_message(
         self,
@@ -250,14 +365,22 @@ class PlannerAgent:
         """
         logger.info("PLANNER handle_message | user=%s | msg=%s", user_id, message[:100])
 
-        # Build context
-        ctx = await self.intelligence.get_context_summary(user_id)
-        suggestions = await self.intelligence.get_smart_suggestions(user_id)
-        cred_status = await self.intelligence.get_credential_status(user_settings, user_id)
-        user_profile = await self.intelligence.get_user_profile(user_id)
-        recent_failures = await self.intelligence.get_recent_failures(user_id)
+        # Shared fetches (user-intel summary, suggestions, credential map,
+        # profile, recent failures, perf, news, funnel state) — built once in a
+        # helper so the WS and messaging paths can't drift on what they read.
+        # Path-specific RENDERING (cookie-age warnings, full JSON dumps,
+        # previous-session text) stays below, where it legitimately differs.
+        common = await self._gather_common_context(user_settings, user_id)
+        ctx = common["ctx"]
+        suggestions = common["suggestions"]
+        cred_status = common["cred_status"]
+        user_profile = common["user_profile"]
+        failures_text = common["failures_text"]
+        perf_insights = common["perf_insights"]
+        news_ctx = common["news_ctx"]
+        pipeline = common["pipeline"]
 
-        # Format credential status with health warnings
+        # Format credential status with health warnings (web-only enrichment)
         cred_lines = []
         cred_warnings = []
         for service, info in cred_status.items():
@@ -288,19 +411,12 @@ class PlannerAgent:
                 prev_lines.append(f"  {role}: {m['content']}")
             prev_session_text = "\n".join(prev_lines)
 
-        # Format recent failures
-        failures_text = "None"
-        if recent_failures:
-            failures_text = "\n".join(f"  - {f}" for f in recent_failures)
-
         # Format performance insights
-        perf_insights = await self.intelligence.get_performance_insights(user_id)
         perf_text = "No performance data yet — user hasn't uploaded enough videos."
         if perf_insights:
             perf_text = json.dumps(perf_insights, indent=2)
 
         # Build news memory context
-        news_ctx = await self.intelligence.get_news_context(user_id)
         news_text = "No news scouting history yet."
         if news_ctx and news_ctx.get("total_news_scouts", 0) > 0:
             news_text = json.dumps(news_ctx, indent=2, ensure_ascii=False)
@@ -308,7 +424,6 @@ class PlannerAgent:
         # Live funnel state — where the user is right now (downloaded-not-generated,
         # generated-not-uploaded, etc.) + the single highest-value next step. This
         # is what makes the planner proactive instead of purely reactive.
-        pipeline = await self.intelligence.get_pipeline_state(user_id)
         pipeline_text = json.dumps(pipeline, indent=2, ensure_ascii=False) if pipeline else "Unknown."
 
         system = SYSTEM_PROMPT.format(
@@ -346,35 +461,62 @@ class PlannerAgent:
             full_response += token
             await ws_manager.send({"type": "chat_token", "token": token}, user_id)
 
-        # Signal completion
-        clean_response = ACTION_PATTERN.sub("", full_response).strip()
-        await ws_manager.send({"type": "chat_done", "full_response": clean_response}, user_id)
+        # Signal completion. Strip both <action> and <quick_replies> markers from
+        # the user-visible text; the chips ride on chat_done as a structured
+        # field so the frontend renders them as buttons, not raw markdown.
+        # qr_stripped is the single source of truth for "response minus chip
+        # markup" — action parsing + the safety net + clean_response all derive
+        # from it, so an <action> substring inside a chip label can't dispatch.
+        quick_replies = _parse_quick_replies(full_response)
+        qr_stripped = QUICK_REPLIES_PATTERN.sub("", full_response)
+        clean_response = ACTION_PATTERN.sub("", qr_stripped).strip()
+        await ws_manager.send({
+            "type": "chat_done",
+            "full_response": clean_response,
+            "quick_replies": quick_replies,
+        }, user_id)
 
-        # Parse and dispatch action blocks
-        actions = ACTION_PATTERN.findall(full_response)
+        # Parse and dispatch action blocks (from the qr-stripped response, so
+        # chip labels can never spawn phantom actions).
+        actions = ACTION_PATTERN.findall(qr_stripped)
         logger.debug("PLANNER parsed %d action block(s) from AI response", len(actions))
 
-        # Safety net: if AI talked about scouting but forgot the action block, auto-trigger
-        if not actions:
-            actions = self._infer_missing_action(message, full_response)
+        # Safety net: if AI talked about scouting but forgot the action block,
+        # auto-trigger — UNLESS it deliberately offered quick replies (a
+        # clarifying question is an intentional no-action turn; inferring one
+        # here would clobber it).
+        if not actions and not quick_replies:
+            actions = self._infer_missing_action(message, qr_stripped)
             if actions:
                 logger.info("PLANNER safety-net inferred action: %s", actions)
 
-        for action_json in actions:
-            try:
-                action = json.loads(action_json.strip())
-                await self._dispatch_action(action, user_settings, user_id)
-            except json.JSONDecodeError as e:
-                logger.warning(f"Malformed action JSON, attempting AI repair: {action_json!r}")
+        # Collect any dispatch-time follow-ups (clarifying questions, no-op
+        # notes) so they're folded into the persisted assistant turn — otherwise
+        # the model has no memory it asked and the user's reply arrives context-less.
+        followups: list[str] = []
+        sink_token = _followup_sink.set(followups)
+        try:
+            for action_json in actions:
                 try:
-                    from backend.core.ai_retry import ai_fix_action
-                    repaired = await ai_fix_action(action_json, str(e), user_settings)
-                    if repaired:
-                        await self._dispatch_action(repaired, user_settings, user_id)
-                    else:
-                        logger.error(f"AI could not repair action JSON: {action_json!r}")
-                except Exception as repair_err:
-                    logger.error(f"Action repair failed: {repair_err}")
+                    action = json.loads(action_json.strip())
+                    await self._dispatch_action(action, user_settings, user_id)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Malformed action JSON, attempting AI repair: {action_json!r}")
+                    try:
+                        from backend.core.ai_retry import ai_fix_action
+                        repaired = await ai_fix_action(action_json, str(e), user_settings)
+                        if repaired:
+                            await self._dispatch_action(repaired, user_settings, user_id)
+                        else:
+                            logger.error(f"AI could not repair action JSON: {action_json!r}")
+                    except Exception as repair_err:
+                        logger.error(f"Action repair failed: {repair_err}")
+        finally:
+            _followup_sink.reset(sink_token)
+
+        if followups:
+            joined = "\n".join(followups)
+            clean_response = f"{clean_response}\n\n{joined}".strip() if clean_response else joined
 
         # Record conversation event
         await self.intelligence.record_event("chat_message", {
@@ -398,12 +540,19 @@ class PlannerAgent:
         """
         logger.info("PLANNER handle_message_text | user=%s | msg=%s", user_id, message[:100])
 
-        # Same context-building as handle_message
-        ctx = await self.intelligence.get_context_summary(user_id)
-        suggestions = await self.intelligence.get_smart_suggestions(user_id)
-        cred_status = await self.intelligence.get_credential_status(user_settings, user_id)
-        user_profile = await self.intelligence.get_user_profile(user_id)
-        recent_failures = await self.intelligence.get_recent_failures(user_id)
+        # Same shared fetches as handle_message (via the common helper so the
+        # two surfaces can't drift). Messaging then renders the lean variants of
+        # the divergent blocks (no cookie-age warnings, one-line-free profile,
+        # un-indented funnel state).
+        common = await self._gather_common_context(user_settings, user_id)
+        ctx = common["ctx"]
+        suggestions = common["suggestions"]
+        cred_status = common["cred_status"]
+        user_profile = common["user_profile"]
+        failures_text = common["failures_text"]
+        perf_insights = common["perf_insights"]
+        news_ctx = common["news_ctx"]
+        pipeline = common["pipeline"]
 
         cred_lines = []
         for service, info in cred_status.items():
@@ -418,12 +567,9 @@ class PlannerAgent:
             json.dumps(user_profile, indent=2, ensure_ascii=False)
             if user_profile else "No profile yet."
         )
-        failures_text = "\n".join(f"  - {f}" for f in recent_failures) if recent_failures else "None"
 
-        perf_insights = await self.intelligence.get_performance_insights(user_id)
         perf_text = json.dumps(perf_insights, indent=2) if perf_insights else "No performance data yet."
 
-        news_ctx = await self.intelligence.get_news_context(user_id)
         news_text = (
             json.dumps(news_ctx, indent=2, ensure_ascii=False)
             if news_ctx and news_ctx.get("total_news_scouts", 0) > 0
@@ -432,7 +578,6 @@ class PlannerAgent:
 
         # Live funnel state — cheap (indexed counts) and high-value even for
         # messaging: it's how the bot proactively nudges the next step.
-        pipeline = await self.intelligence.get_pipeline_state(user_id)
         pipeline_text = json.dumps(pipeline, ensure_ascii=False) if pipeline else "Unknown."
 
         system = SYSTEM_PROMPT.format(
@@ -465,19 +610,34 @@ class PlannerAgent:
             logger.exception("PLANNER text chat failed: %s", e)
             return "Sorry — I couldn't reach the AI backend just now. Try again in a moment."
 
-        clean_response = ACTION_PATTERN.sub("", full_response).strip()
-        actions = ACTION_PATTERN.findall(full_response)
+        # Strip <quick_replies> markup too — messaging channels don't render
+        # chips, so the block would otherwise leak into the plain-text reply.
+        qr_stripped = QUICK_REPLIES_PATTERN.sub("", full_response)
+        clean_response = ACTION_PATTERN.sub("", qr_stripped).strip()
+        actions = ACTION_PATTERN.findall(qr_stripped)
         if not actions:
-            actions = self._infer_missing_action(message, full_response)
+            actions = self._infer_missing_action(message, qr_stripped)
 
-        for action_json in actions:
-            try:
-                action = json.loads(action_json.strip())
-                await self._dispatch_action(action, user_settings, user_id)
-            except json.JSONDecodeError:
-                logger.warning("Malformed action JSON in text path: %r", action_json)
-            except Exception as e:
-                logger.exception("Action dispatch failed in text path: %s", e)
+        # Capture dispatch-time follow-ups via the sink. There's no live WS on
+        # the messaging path, so the follow-up text is appended to the returned
+        # reply (that's the whole point of the sink here).
+        followups: list[str] = []
+        sink_token = _followup_sink.set(followups)
+        try:
+            for action_json in actions:
+                try:
+                    action = json.loads(action_json.strip())
+                    await self._dispatch_action(action, user_settings, user_id)
+                except json.JSONDecodeError:
+                    logger.warning("Malformed action JSON in text path: %r", action_json)
+                except Exception as e:
+                    logger.exception("Action dispatch failed in text path: %s", e)
+        finally:
+            _followup_sink.reset(sink_token)
+
+        if followups:
+            joined = "\n".join(followups)
+            clean_response = f"{clean_response}\n\n{joined}".strip() if clean_response else joined
 
         await self.intelligence.record_event(
             "chat_message",
@@ -569,10 +729,10 @@ class PlannerAgent:
                     "calendar": calendar,
                 }, user_id)
             else:
-                await ws_manager.send({
-                    "type": "chat_token",
-                    "token": "\n\nI need more data to generate a personalized content calendar. Try uploading a few videos first so I can learn what works for your audience.",
-                }, user_id)
+                await self._followup(
+                    user_id,
+                    "I need more data to generate a personalized content calendar. Try uploading a few videos first so I can learn what works for your audience.",
+                )
 
         elif action_type == "start_news_scout":
             await self._start_news_scout(action, user_id)
@@ -682,10 +842,7 @@ class PlannerAgent:
             results = result.scalars().all()
 
         if not results:
-            await ws_manager.send({
-                "type": "chat_token",
-                "token": "\n\nNo scout results found yet. Try scouting a niche first!",
-            }, user_id)
+            await self._followup(user_id, "No scout results found yet. Try scouting a niche first!")
             return
 
         # Group by platform and send
@@ -746,10 +903,10 @@ class PlannerAgent:
                     scouts_map[s.id] = s
 
         if not downloads:
-            await ws_manager.send({
-                "type": "chat_token",
-                "token": "\n\nNo downloaded videos yet. Try scouting a niche and downloading some videos first!",
-            }, user_id)
+            await self._followup(
+                user_id,
+                "No downloaded videos yet. Try scouting a niche and downloading some videos first!",
+            )
             return
 
         items = []
@@ -881,18 +1038,18 @@ class PlannerAgent:
                 ready_platforms.append(platform)
 
         if not ready_platforms:
-            await ws_manager.send({
-                "type": "chat_token",
-                "token": "\n\nNo platforms available for scouting — please configure API keys in Settings.",
-            }, user_id)
+            await self._followup(
+                user_id,
+                "No platforms available for scouting — please configure API keys in Settings.",
+            )
             return
 
         if skipped:
-            await ws_manager.send({
-                "type": "chat_token",
-                "token": f"\n\nNote: {', '.join(skipped)} unavailable (no API key configured) — "
-                         f"scouting on {', '.join(ready_platforms)} only.",
-            }, user_id)
+            await self._followup(
+                user_id,
+                f"Note: {', '.join(skipped)} unavailable (no API key configured) — "
+                f"scouting on {', '.join(ready_platforms)} only.",
+            )
 
         # Kick off scout
         from backend.agents.job_helper import create_job

@@ -23,6 +23,7 @@ import { ws } from "../api/websocket"
 import http from "../api/http"
 import useAppStore from "../store/appStore"
 import ChatMessage from "../components/chat/ChatMessage"
+import QuickReplyChips from "../components/chat/QuickReplyChips"
 import ChatInput from "../components/chat/ChatInput"
 import SetupWizard from "../components/wizard/SetupWizard"
 import ScoutResultsCard from "../components/chat/ScoutResultsCard"
@@ -418,11 +419,19 @@ export default function Chat() {
             </Box>
           )}
 
-          {messages.map((msg, i) => (
-            msg.role === "rich"
-              ? <RichMessage key={i} msg={msg} />
-              : <ChatMessage key={i} role={msg.role} content={msg.content} />
-          ))}
+          {messages.map((msg, i) => {
+            if (msg.role === "rich") return <RichMessage key={i} msg={msg} />
+            return (
+              <Box key={i}>
+                <ChatMessage role={msg.role} content={msg.content} />
+                {msg.quickReplies?.length > 0 && (
+                  <Box sx={{ maxWidth: 900, mx: "auto", width: "100%", px: 1, pl: { xs: 1, sm: 6.5 } }}>
+                    <QuickReplyChips suggestions={msg.quickReplies} onSelect={handleSend} />
+                  </Box>
+                )}
+              </Box>
+            )
+          })}
 
           {isStreaming && streamingText && (
             <ChatMessage role="assistant" content={streamingText} />
