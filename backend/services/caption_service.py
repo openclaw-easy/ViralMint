@@ -517,8 +517,17 @@ def _format_ass_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def _build_ass_header(style_config: dict, aspect_ratio: str, resolution: tuple[int, int]) -> str:
-    """Build ASS file header with style definitions."""
+def _build_ass_header(
+    style_config: dict,
+    aspect_ratio: str,
+    resolution: tuple[int, int],
+    include_hook_style: bool = False,
+) -> str:
+    """Build ASS file header with style definitions.
+
+    When include_hook_style is True, appends a `Style: Hook` entry used by
+    the hook-line overlay (see `_build_hook_event`).
+    """
     style = style_config
     width, height = resolution
     is_portrait = aspect_ratio == "9:16"
@@ -532,6 +541,16 @@ def _build_ass_header(style_config: dict, aspect_ratio: str, resolution: tuple[i
     margin_v_key = "margin_v_portrait" if is_portrait else "margin_v_landscape"
     margin_v = style.get(margin_v_key) or style.get("margin_v") or 80
 
+    # Hook style: top-center, bold, big, white with thick black outline. Sized
+    # ~2.2x caption font so it reads as the scroll-stopper even on bright
+    # backgrounds. Alignment=8 is top-center in ASS numbering.
+    hook_font_size = int(font_size * 2.2)
+    hook_margin_v = 200 if aspect_ratio == "9:16" else 80
+    hook_style_line = (
+        f"Style: Hook,{style['font']},{hook_font_size},&H00FFFFFF,&H000000FF,"
+        f"&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,8,40,40,{hook_margin_v},1\n"
+    ) if include_hook_style else ""
+
     return f"""[Script Info]
 Title: ViralMint Captions
 ScriptType: v4.00+
@@ -544,10 +563,44 @@ PlayResY: {height}
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,{style['font']},{font_size},{style['primary_color']},&H000000FF,{style['outline_color']},&H80000000,-1,0,0,0,100,100,0,0,1,{style['outline_width']},{style['shadow_depth']},{style['alignment']},20,20,{margin_v},1
-
+{hook_style_line}
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+
+_HOOK_MAX_CHARS = 80
+
+
+def _sanitize_hook_text(raw: str) -> str:
+    """Prepare hook text for safe ASS embedding: escape braces, collapse
+    whitespace, truncate at the last word boundary with ellipsis when over
+    the cap."""
+    if not raw:
+        return ""
+    text = raw.strip().replace("{", "(").replace("}", ")")
+    text = " ".join(text.split())  # collapse whitespace, including newlines
+    if len(text) <= _HOOK_MAX_CHARS:
+        return text
+    cap = _HOOK_MAX_CHARS - 1  # leave room for ellipsis
+    cut = text.rfind(" ", 0, cap)
+    if cut < int(cap * 0.6):  # no reasonable word boundary — hard-cut
+        cut = cap
+    return text[:cut].rstrip(" ,;:.") + "…"
+
+
+def _build_hook_event(hook_text: str, hook_duration: float) -> str:
+    """Return a single ASS Dialogue line rendering the hook at top-center
+    with fade-in/fade-out. Returns empty string if hook_text is blank."""
+    clean = _sanitize_hook_text(hook_text)
+    if not clean:
+        return ""
+    end_s = max(0.5, min(10.0, hook_duration))
+    # Format seconds as H:MM:SS.cc (centiseconds)
+    centis = int(round(end_s * 100))
+    end_ts = f"0:00:{centis // 100:02d}.{centis % 100:02d}"
+    # \fad(in_ms, out_ms) is native ASS fade animation — no FFmpeg filter needed.
+    return f"Dialogue: 0,0:00:00.00,{end_ts},Hook,,0,0,0,,{{\\fad(300,500)}}{clean}\n"
 
 
 def _extract_word_timestamps(segments: list[dict]) -> list[dict]:
@@ -757,6 +810,8 @@ async def generate_captions_ass(
     aspect_ratio: str = "9:16",
     output_path: Path = None,
     emoji_style: str = "moderate",
+    hook_text: str | None = None,
+    hook_duration: float = 2.5,
 ) -> Path:
     """
     Generate ASS subtitle file with word-by-word animation.
@@ -768,6 +823,11 @@ async def generate_captions_ass(
         aspect_ratio: "9:16", "1:1" or "16:9".
         output_path: Where to write the ASS file.
         emoji_style: "none" | "minimal" | "moderate" | "heavy"
+        hook_text: If set and non-empty, a top-center big-text "hook" event
+                   is rendered from 0s to hook_duration with fade-in/out.
+                   Used to surface clip_extractor's `hook` field as a
+                   scroll-stopper overlay.
+        hook_duration: Seconds the hook stays on screen.
 
     Returns:
         Path to the generated ASS file.
@@ -786,33 +846,38 @@ async def generate_captions_ass(
     else:  # 16:9
         resolution = (1920, 1080)
 
+    hook_event = _build_hook_event(hook_text, hook_duration) if hook_text else ""
+
     # Extract word-level timestamps
     words = _extract_word_timestamps(segments)
-    if not words:
+    if not words and not hook_event:
         logger.warning("No words found in segments — generating empty caption file")
         output_path.write_text("")
         return output_path
 
     # Auto-insert emojis based on keyword matching
-    words = insert_emojis_into_words(words, emoji_style)
+    words = insert_emojis_into_words(words, emoji_style) if words else []
 
-    # Script-aware font fallback: if the caption text needs a script the
+    # Script-aware font fallback: if the caption/hook text needs a script the
     # style's Latin display font can't render (CJK, Arabic, …), swap in a
     # platform system font with coverage — otherwise libass burns tofu boxes.
     # Copy-on-write: CAPTION_STYLES entries are shared module state.
-    full_text = " ".join(w["text"] for w in words)
+    full_text = " ".join(w["text"] for w in words) + " " + (hook_text or "")
     fallback_font = resolve_caption_font(style_config["font"], full_text)
     if fallback_font != style_config["font"]:
         style_config = {**style_config, "font": fallback_font}
 
-    # Build ASS file
-    header = _build_ass_header(style_config, aspect_ratio, resolution)
-    events = _generate_ass_events(words, style_config)
+    # Build ASS file. include_hook_style only when we'll actually emit a hook event.
+    header = _build_ass_header(style_config, aspect_ratio, resolution, include_hook_style=bool(hook_event))
+    events = _generate_ass_events(words, style_config) if words else ""
 
-    content = header + events + "\n"
+    content = header + hook_event + events + "\n"
     output_path.write_text(content, encoding="utf-8")
 
-    logger.info(f"ASS captions generated: {output_path} ({len(words)} words, style={style}, emoji={emoji_style})")
+    logger.info(
+        f"ASS captions generated: {output_path} ({len(words)} words, "
+        f"style={style}, emoji={emoji_style}, hook={'yes' if hook_event else 'no'})"
+    )
     return output_path
 
 

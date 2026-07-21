@@ -24,8 +24,20 @@ from uuid import uuid4
 from backend.config import settings
 from backend.core.concurrency import _ffmpeg_semaphore
 from backend.core.ws_manager import ws_manager
+from backend.services.clip_options import ExtractOptions
 
 logger = logging.getLogger(__name__)
+
+
+# Closed set of hook categorizations the picker prompt asks for. Kept in sync
+# with the JSON schema in CLIP_SELECTION_PROMPT — the validator collapses any
+# off-list value (or missing field) to "general" so the UI's color map can't
+# silently break on novel labels.
+_ALLOWED_HOOK_TYPES = frozenset({
+    "curiosity_gap", "contrarian", "emotional_peak", "question",
+    "number_promise", "story_loop", "actionable_tip", "shocking_claim",
+    "general",
+})
 
 
 async def _ffmpeg_limited(coro):
@@ -44,12 +56,12 @@ async def _ffmpeg_limited(coro):
 CLIP_SELECTION_PROMPT = """You are an expert viral short-form video editor who has produced thousands of clips with millions of views.
 
 Your job: identify the best non-overlapping segments ({min_clip}–{max_clip} seconds each) from this transcript. Find up to {max_clips} quality clips. Only include segments that genuinely meet the criteria below — never pad with weak content.
-
+{user_query_block}{platform_bias_block}{genre_bias_block}
 SELECTION CRITERIA (in priority order):
 1. HOOK STRENGTH: The first 2-3 seconds of the segment must grab attention immediately. Look for: surprising statements, bold claims, questions, emotional peaks, "did you know" moments.
 2. STANDALONE VALUE: Each segment must make complete sense without the rest of the video. No dangling references, no "as I mentioned earlier".
 3. INFORMATION DENSITY: Every 10 seconds should advance the narrative. Cut segments that meander or repeat.
-4. CLEAN BOUNDARIES: Start at natural sentence beginnings (not mid-word). End at natural conclusions (not cliffhangers that need the next sentence).
+4. CLEAN BOUNDARIES: Start at natural sentence beginnings (not mid-word). End at natural conclusions (not cliffhangers that need the next sentence). Prefer segment timestamps from the transcript over arbitrary times — the system will snap your start/end to the nearest sentence boundary, but the closer you start, the better.
 5. EMOTIONAL ARC: Prefer segments with a clear setup → payoff structure. "Aha moments", revelations, or actionable advice.
 6. QUOTABILITY: Would someone share this clip? Would it spark comments or debates?
 
@@ -74,13 +86,28 @@ Return ONLY valid JSON array, no markdown fences:
     "end": 102.8,
     "title": "Short punchy title for this clip (5-8 words)",
     "hook": "The exact first sentence that grabs attention",
-    "reason": "Why this segment works as a viral clip (be specific)",
-    "virality_score": 8.5
+    "hook_score": 9,
+    "hook_type": "curiosity_gap",
+    "reason": "Why this segment works as a viral clip (be specific, 1-2 sentences)",
+    "virality_score": 8.5,
+    "score_breakdown": {{
+      "flow": 8,
+      "value": 9,
+      "trend": 7,
+      "shareability": 8
+    }}
   }}
 ]
 
 IMPORTANT:
-- virality_score must be 1-10 (10 = guaranteed viral, 1 = boring)
+- virality_score must be 1-10 (10 = guaranteed viral, 1 = boring) — it's your overall judgment; the sub-scores are the rubric behind it.
+- hook_score must be 1-10 (10 = irresistible hook, stops the scroll; 1 = weak/boring opening). Score ONLY the first 2-3 seconds of the segment.
+- hook_type must be ONE of: curiosity_gap | contrarian | emotional_peak | question | number_promise | story_loop | actionable_tip | shocking_claim | general
+- score_breakdown sub-scores each 1-10:
+    flow         — narrative arc + satisfying close (no dangling thoughts, no cliffhanger that needs context)
+    value        — emotional / practical resonance ("did you know" payoff, actionable takeaway, gut reaction)
+    trend        — alignment with what audiences are clicking on right now in this niche
+    shareability — would a viewer quote, screenshot, or send this to a friend
 - Each segment MUST be between {min_clip} and {max_clip} seconds
 - Segments must NOT overlap
 - Order by virality_score descending (best clip first)
@@ -124,6 +151,282 @@ IMPORTANT:
 - The `index` field MUST match the input clip number — do not reorder or skip
 - Each object MUST have ALL five fields (index + 4 metadata fields)
 - If a clip's transcript is empty, base the metadata on the title alone"""
+
+
+# ── Platform-bias prompt block ───────────────────────────────────────────────
+# Each platform's algorithm rewards different hook types — TikTok loves
+# shock + emotion, LinkedIn wants actionable expertise, YouTube Shorts
+# splits the difference. When `target_platform` is set on extraction,
+# we inject a 1-2 sentence bias into the AI selection prompt so the
+# ranker can prefer hooks that fit. User's `min_duration` / `max_duration`
+# always win — this only affects hook-type ranking, not clip length.
+#
+# Lowercase keys; unknown / None platforms get no bias (vanilla virality
+# ranking). Adding a platform = one entry in this dict; the helper +
+# threading handle the rest.
+_PLATFORM_BIAS: dict[str, str] = {
+    "tiktok": (
+        "TARGET PLATFORM: TikTok. Bias selection toward shocking_claim, "
+        "emotional_peak, and contrarian hook types. The first 1-2 seconds "
+        "MUST stop the scroll — punchy, declarative, high-energy openings. "
+        "Prefer the shorter end of the allowed clip range."
+    ),
+    "youtube_shorts": (
+        "TARGET PLATFORM: YouTube Shorts. Bias toward curiosity_gap, "
+        "number_promise, and story_loop hook types. Slightly more "
+        "informational/educational tone than TikTok — viewers expect a "
+        "payoff for the click."
+    ),
+    "reels": (
+        "TARGET PLATFORM: Instagram Reels. Bias toward emotional_peak, "
+        "story_loop, and curiosity_gap hook types. Lifestyle / visual "
+        "storytelling tone — moments that feel cinematic or aspirational."
+    ),
+    "linkedin": (
+        "TARGET PLATFORM: LinkedIn. Bias toward actionable_tip, "
+        "number_promise, and contrarian (business-framed) hook types. "
+        "Professional tone — avoid clickbait/shock. When credentials or "
+        "data are present, foreground them. Prefer the longer end of "
+        "the allowed clip range; LinkedIn viewers watch longer."
+    ),
+    "twitter": (
+        "TARGET PLATFORM: Twitter / X. Bias toward shocking_claim, "
+        "contrarian, and question hook types. Punchy, debate-starting "
+        "takes — the best clips are the ones that make people want to "
+        "quote-tweet them."
+    ),
+}
+
+# Accept common aliases so callers don't have to remember the canonical key.
+_PLATFORM_ALIASES: dict[str, str] = {
+    "youtube": "youtube_shorts",
+    "shorts": "youtube_shorts",
+    "instagram_reels": "reels",
+    "instagram": "reels",
+    "x": "twitter",
+}
+
+
+def _build_platform_bias_block(target_platform: str | None) -> str:
+    """Return the platform-bias text to inject into CLIP_SELECTION_PROMPT.
+
+    Returns "" when:
+      - target_platform is None / empty / whitespace
+      - target_platform doesn't match a known key or alias
+
+    The empty-string fallback keeps the prompt format-string happy
+    (`{platform_bias_block}` resolves to nothing) and means callers can
+    always pass a target_platform value through without first checking
+    whether it's known — unknown ones quietly degrade to vanilla
+    virality ranking rather than raising.
+    """
+    if not target_platform:
+        return ""
+    key = target_platform.strip().lower()
+    if not key:
+        return ""
+    # Resolve aliases first ("youtube" → "youtube_shorts").
+    key = _PLATFORM_ALIASES.get(key, key)
+    bias = _PLATFORM_BIAS.get(key)
+    if not bias:
+        return ""
+    # Leading newline so it stays clearly separated from user_query_block
+    # when both are present.
+    return f"\n{bias}\n"
+
+
+# ── Genre-bias prompt block ─────────────────────────────────────────────────
+# Different content types reward different clip-picking heuristics. A podcast
+# clip is good when the guest lands a one-line insight; a tutorial clip is
+# good when it stands alone as a how-to step; a Q&A clip works when the
+# question and answer fit in a single beat. Same idea, free for us to inject
+# as a 1-2 sentence guidance block.
+#
+# Lowercase keys; unknown / None genres get no bias (the platform-bias and
+# default selection criteria do the work alone). Pairs cleanly with
+# target_platform: a "podcast" video tagged "tiktok" will get both blocks.
+
+_GENRE_BIAS: dict[str, str] = {
+    "podcast": (
+        "GENRE: Podcast. Bias selection toward moments where the guest "
+        "(not the host) lands a memorable one-liner, an unexpected take, "
+        "or a vulnerable confession. Avoid generic intros, sponsor reads, "
+        "and pleasantries. Prefer segments that work standalone without "
+        "host context."
+    ),
+    "interview": (
+        "GENRE: Interview. Bias toward the interviewee's most quotable "
+        "answers, especially ones that reveal new information or contradict "
+        "expectations. The interviewer's question can be included if it sets "
+        "up the answer, but the punch should be the answer itself."
+    ),
+    "qa": (
+        "GENRE: Q&A. Each clip should pair a single question with its "
+        "answer in one beat. Skip standalone questions (no payoff) and "
+        "standalone answers (no setup). Look for question-answer pairs "
+        "that resolve in 20-60 seconds."
+    ),
+    "vlog": (
+        "GENRE: Vlog. Bias toward moments of genuine reaction, surprise, "
+        "or storytelling beats with a clear setup → payoff. Skip travel "
+        "B-roll narration and filler ('so anyway', 'and then we…'). "
+        "Prefer the creator's most expressive, on-camera moments."
+    ),
+    "tutorial": (
+        "GENRE: Tutorial / how-to. Bias toward single complete tips that "
+        "work standalone: a problem statement plus the fix in one segment. "
+        "Skip preambles ('today I'll show you'), tool intros, and "
+        "summaries. The viewer should be able to apply the tip immediately."
+    ),
+    "gaming": (
+        "GENRE: Gaming. Bias toward big moments: clutch plays, fails, "
+        "reactions, hype peaks, surprising mechanics. Look for "
+        "before-after structure (setup → payoff). Commentary that reacts "
+        "to the on-screen action beats explanatory commentary."
+    ),
+    "reaction": (
+        "GENRE: Reaction. Bias toward the strongest emotional peaks — "
+        "laughter, shock, disbelief, vindication. Skip the setup of what "
+        "they're reacting to (audience will infer); foreground the "
+        "reaction itself. Short and punchy beats long and explanatory."
+    ),
+    "lecture": (
+        "GENRE: Lecture / educational. Bias toward standalone insights "
+        "that don't require the prior 20 minutes of context — a definition, "
+        "a counterintuitive fact, a one-paragraph explanation of a concept. "
+        "Prefer the longer end of the clip range; educational viewers tolerate "
+        "more depth."
+    ),
+}
+
+# Aliases mirror the alias-resolution pattern in _PLATFORM_ALIASES so callers
+# can pass common synonyms without us shipping them into every endpoint doc.
+_GENRE_ALIASES: dict[str, str] = {
+    "q&a": "qa",
+    "qanda": "qa",
+    "ama": "qa",
+    "how_to": "tutorial",
+    "howto": "tutorial",
+    "education": "lecture",
+    "educational": "lecture",
+    "talk": "lecture",
+    "react": "reaction",
+    "gameplay": "gaming",
+    "let's_play": "gaming",
+    "lets_play": "gaming",
+}
+
+
+def _build_genre_bias_block(genre: str | None) -> str:
+    """Return the genre-bias text to inject into CLIP_SELECTION_PROMPT.
+
+    Same fallback semantics as `_build_platform_bias_block`: unknown /
+    None values return "" so callers don't need to validate first.
+    """
+    if not genre:
+        return ""
+    key = genre.strip().lower()
+    if not key:
+        return ""
+    key = _GENRE_ALIASES.get(key, key)
+    bias = _GENRE_BIAS.get(key)
+    if not bias:
+        return ""
+    return f"\n{bias}\n"
+
+
+# ── Manual-mode helpers ──────────────────────────────────────────────────────
+
+def _parse_timestamp(value) -> float:
+    """Parse a flexible timestamp string into seconds.
+
+    Accepts:
+      - numeric input          (45, 45.5 → 45.0, 45.5)
+      - "SS" / "SS.fff"        ("18" → 18.0, "18.5" → 18.5)
+      - "MM:SS" / "MM:SS.fff"  ("10:38" → 638.0)
+      - "HH:MM:SS"             ("1:02:15" → 3735.0)
+
+    Raises ValueError with a user-readable message on bad input. The
+    API layer catches and surfaces as a 400 with the original message
+    so the user knows which range failed.
+    """
+    if value is None:
+        raise ValueError("empty timestamp")
+    if isinstance(value, (int, float)):
+        out = float(value)
+        if out < 0:
+            raise ValueError(f"negative timestamp: {value}")
+        return out
+    s = str(value).strip()
+    if not s:
+        raise ValueError("empty timestamp")
+    parts = s.split(":")
+    if len(parts) > 3:
+        raise ValueError(
+            f"too many ':' in timestamp '{s}' "
+            f"(expected SS, MM:SS, or HH:MM:SS)"
+        )
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError:
+        raise ValueError(
+            f"non-numeric component in timestamp '{s}' "
+            f"(expected digits and optional '.fff')"
+        )
+    if any(n < 0 for n in nums):
+        raise ValueError(f"negative component in timestamp '{s}'")
+    # MM and SS must be < 60 in the multi-part forms; reject "70:00" rather
+    # than silently converting to 70 minutes (which is what a naive
+    # implementation would do but is almost always a user typo).
+    if len(nums) >= 2 and nums[-1] >= 60:
+        raise ValueError(f"seconds field ≥ 60 in '{s}'")
+    if len(nums) == 3 and nums[1] >= 60:
+        raise ValueError(f"minutes field ≥ 60 in '{s}'")
+    if len(nums) == 1:
+        return nums[0]
+    if len(nums) == 2:
+        return nums[0] * 60 + nums[1]
+    return nums[0] * 3600 + nums[1] * 60 + nums[2]
+
+
+def _build_manual_clip_windows(
+    time_ranges: list[dict],
+    duration: float,
+    title: str = "Untitled",
+) -> list[dict]:
+    """Convert validated time ranges into clip_windows for _process_clips_parallel.
+
+    `time_ranges` is `[{"start": float, "end": float}, ...]` — already
+    parsed + validated by the API layer (so we don't re-validate here;
+    just defensively clamp `end` to source duration in case the row's
+    cached duration drifted from the actual file).
+
+    Skips virality / hook fields — manual mode has no AI judgment to
+    inject. Each window gets a generic title; task_runner's
+    `_clip_title` overrides this with the AI-batch's `youtube_title`
+    when batched metadata generation succeeds, otherwise falls back to
+    "{source} — clip N" via its existing fallback chain. The
+    `clip_virality_score` / `clip_hook_score` / `clip_hook_type`
+    columns persist as NULL for manual clips.
+    """
+    windows = []
+    for i, r in enumerate(time_ranges):
+        start = float(r["start"])
+        end = float(r["end"])
+        if duration and end > duration:
+            end = duration
+        windows.append({
+            "start": round(start, 1),
+            "end": round(end, 1),
+            "title": f"{title} — clip {i + 1}",
+            "hook": "",
+            "reason": "",  # explicitly empty so task_runner's _clip_title
+                          # falls through to the "clip N" branch when batched
+                          # AI metadata fails.
+            # virality_score / hook_score deliberately omitted — they default
+            # to None downstream, which the persistence layer stores as NULL.
+        })
+    return windows
 
 
 # ── Clip count estimation ──────────────────────────────────────────────────────
@@ -222,20 +525,47 @@ def _estimate_realistic_clip_count(
 async def extract_viral_clips(
     video,
     user_settings,
-    max_clips: int = 3,
-    caption_style: str = "viral",
-    whisper_quality: str = "balanced",
-    force_retranscribe: bool = False,
+    opts: ExtractOptions,
+    *,
     job_id: str = None,
     user_id: str = "local",
-    min_duration: int = None,
-    max_duration: int = None,
 ) -> list[dict]:
     """
     Full clip extraction pipeline.
     Returns list of dicts with video_path, title, metadata, status flags, etc.
+
+    All run options come in via `opts` (ExtractOptions) — the single source of
+    truth for defaults, built once in the API layer. Unpacked into locals at the
+    top so the rest of this pipeline is unchanged.
+
+    `opts.mode` selects which clip-selection strategy to use:
+      - "ai" (default) — Whisper + AI viral-clip picker (legacy behavior)
+      - "manual"       — user-supplied `opts.time_ranges` are cut verbatim;
+                          AI selection / virality scoring / short-video
+                          fast-path / silent-gap backfill / sentence-snap
+                          are ALL skipped. Captions + thumbnail + batched AI
+                          metadata still run so manual clips ship with the
+                          same polish as AI-picked ones.
     """
-    # Step 1: Load or transcribe segments (10%)
+    # Unpack options into locals — the rest of the pipeline below is unchanged.
+    max_clips = opts.max_clips
+    caption_style = opts.caption_style
+    whisper_quality = opts.whisper_quality
+    force_retranscribe = opts.force_retranscribe
+    min_duration = opts.min_duration
+    max_duration = opts.max_duration
+    remove_silence = opts.remove_silence
+    force_vertical = opts.force_vertical
+    user_query = opts.user_query
+    target_platform = opts.target_platform
+    emoji_style = opts.emoji_style
+    genre = opts.genre
+    mode = opts.mode
+    time_ranges = opts.time_ranges
+
+    # Step 1: Load or transcribe segments (10%). Manual mode still loads the
+    # transcript — captions rely on word-level timestamps from the segment
+    # subset that overlaps each user-picked window.
     if job_id:
         await ws_manager.send_progress(job_id, 5, "Loading transcript...", user_id)
     segments = await _load_or_transcribe_segments(
@@ -260,7 +590,29 @@ async def extract_viral_clips(
     # a short clip they already have (TikTok B-roll, a reaction, a tight
     # Reel) so this path carries them through to a captioned mp4.
     SHORT_VIDEO_THRESHOLD = 20
-    if 0 < duration < SHORT_VIDEO_THRESHOLD:
+    if mode == "manual":
+        # User explicitly picked the ranges in the UI; there's nothing for
+        # the AI to second-guess. Build the windows and fall through to
+        # _process_clips_parallel.
+        if not time_ranges:
+            raise ValueError(
+                "Manual mode requires `time_ranges`. Did the API layer "
+                "validate the request shape before dispatching?"
+            )
+        if job_id:
+            await ws_manager.send_progress(
+                job_id, 20,
+                f"Cutting {len(time_ranges)} user-specified clip(s)...",
+                user_id,
+            )
+        clip_windows = _build_manual_clip_windows(
+            time_ranges, duration, title=video.title or "Untitled",
+        )
+        logger.info(
+            f"Manual mode: built {len(clip_windows)} clip windows "
+            f"from user-supplied ranges on {video.id[:8]}"
+        )
+    elif 0 < duration < SHORT_VIDEO_THRESHOLD:
         logger.info(
             f"Short video ({duration}s) — emitting single whole-video clip, skipping AI selection"
         )
@@ -312,6 +664,9 @@ async def extract_viral_clips(
                     effective_max, user_settings,
                     min_duration=min_duration, max_duration=max_duration,
                     job_id=job_id, user_id=user_id,
+                    user_query=user_query,
+                    target_platform=target_platform,
+                    genre=genre,
                 )
             else:
                 clip_windows = await _select_clip_windows_with_retries(
@@ -319,6 +674,9 @@ async def extract_viral_clips(
                     effective_max, user_settings,
                     min_duration=min_duration, max_duration=max_duration,
                     job_id=job_id, user_id=user_id,
+                    user_query=user_query,
+                    target_platform=target_platform,
+                    genre=genre,
                 )
 
             if not clip_windows:
@@ -432,6 +790,9 @@ async def extract_viral_clips(
         user_settings=user_settings,
         job_id=job_id,
         user_id=user_id,
+        remove_silence=remove_silence,
+        force_vertical=force_vertical,
+        emoji_style=emoji_style,
     )
 
     if not results:
@@ -670,6 +1031,9 @@ async def _load_or_transcribe_segments(video, user_settings, whisper_quality: st
 async def _select_clip_windows_with_retries(
     segments, title, duration, max_clips, user_settings,
     min_duration=None, max_duration=None, job_id=None, user_id="local",
+    user_query: str = None,
+    target_platform: str = None,
+    genre: str = None,
 ) -> list[dict]:
     """Try clip selection with progressively relaxed constraints.
 
@@ -686,6 +1050,9 @@ async def _select_clip_windows_with_retries(
     clip_windows = await _select_clip_windows(
         segments, title, duration, max_clips, user_settings,
         min_duration=min_duration, max_duration=max_duration,
+        user_query=user_query,
+        target_platform=target_platform,
+        genre=genre,
     )
     if clip_windows:
         return clip_windows
@@ -712,6 +1079,9 @@ async def _select_clip_windows_with_retries(
     clip_windows = await _select_clip_windows(
         segments, title, duration, max_clips, user_settings,
         min_duration=relax_min, max_duration=relax_max,
+        user_query=user_query,
+        target_platform=target_platform,
+        genre=genre,
     )
     if clip_windows:
         return clip_windows
@@ -729,6 +1099,9 @@ async def _select_clip_windows_with_retries(
     clip_windows = await _select_clip_windows(
         segments, title, duration, reduced_clips, user_settings,
         min_duration=perm_min, max_duration=perm_max,
+        user_query=user_query,
+        target_platform=target_platform,
+        genre=genre,
     )
     return clip_windows or []
 
@@ -736,6 +1109,9 @@ async def _select_clip_windows_with_retries(
 async def _chunked_clip_selection(
     segments, title, duration, max_clips, user_settings,
     min_duration=None, max_duration=None, job_id=None, user_id="local",
+    user_query: str = None,
+    target_platform: str = None,
+    genre: str = None,
 ) -> list[dict]:
     """
     Split the video into time chunks and run AI clip selection on each chunk
@@ -792,6 +1168,9 @@ async def _chunked_clip_selection(
             clips_per_chunk, user_settings,
             min_duration=min_duration, max_duration=max_duration,
             time_offset=chunk_start,
+            user_query=user_query,
+            target_platform=target_platform,
+            genre=genre,
         )
         return windows or []
 
@@ -815,6 +1194,9 @@ async def _chunked_clip_selection(
             segments, title, duration, min(max_clips, 5), user_settings,
             min_duration=min_duration, max_duration=max_duration,
             job_id=job_id, user_id=user_id,
+            user_query=user_query,
+            target_platform=target_platform,
+            genre=genre,
         )
 
     # Remove overlapping clips (keep higher virality score), then dedupe
@@ -945,6 +1327,36 @@ _TOPIC_STOPWORDS = frozenset({
 TOPIC_DEDUP_THRESHOLD = 0.55
 
 
+# ── Score breakdown normalization ────────────────────────────────────────────
+# The AI returns a 4-key dict for `score_breakdown` (flow / value / trend /
+# shareability), but rarely it omits keys or returns wrong types. Normalizing
+# in a small pure helper means the validation is testable without faking the
+# whole AI call.
+
+_SCORE_BREAKDOWN_KEYS = ("flow", "value", "trend", "shareability")
+
+
+def _normalize_score_breakdown(raw, default_score: float) -> dict[str, float]:
+    """Coerce the AI's score_breakdown payload into a 4-key float dict.
+
+    `default_score` is the clip's overall virality_score — used when the AI
+    omits a sub-score so the UI bars don't collapse to zero on partial AI
+    responses. Each value is clamped to [1.0, 10.0]; non-numeric values
+    fall back to the default. A non-dict input returns {} (the UI hides
+    the panel for that clip).
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key in _SCORE_BREAKDOWN_KEYS:
+        try:
+            v = float(raw.get(key, default_score))
+        except (TypeError, ValueError):
+            v = default_score
+        out[key] = max(1.0, min(10.0, v))
+    return out
+
+
 def _topic_keywords(text: str) -> set[str]:
     """Return the set of content tokens in *text* for Jaccard comparison.
 
@@ -1025,6 +1437,9 @@ async def _select_clip_windows(
     min_duration: int = None,
     max_duration: int = None,
     time_offset: float = 0,
+    user_query: str = None,
+    target_platform: str = None,
+    genre: str = None,
 ) -> list[dict]:
     """Use AI to identify the best clip windows from the transcript."""
     # Resolve clip duration range from user input + source duration. Order
@@ -1065,6 +1480,29 @@ async def _select_clip_windows(
     # Infer niche from title
     niche = title if title != "Untitled" else "general content"
 
+    # User-supplied free-form filter ("ClipAnything" equivalent). When present,
+    # the AI ranks segments by *match to the query first*, then virality. Empty
+    # / whitespace-only queries fall back to pure virality.
+    user_query_block = ""
+    if user_query and user_query.strip():
+        q = user_query.strip()[:500]  # cap to keep prompt budget predictable
+        user_query_block = (
+            f"\nUSER REQUEST (ranks ABOVE pure virality — find clips that match this first):\n"
+            f"  \"{q}\"\n"
+            f"If the transcript has NO segments that match this request, return an empty array "
+            f"rather than padding with weak unrelated clips.\n"
+        )
+
+    # Platform-specific hook-type bias. Falls through to "" when no
+    # target_platform is set (vanilla virality ranking) — see
+    # _build_platform_bias_block for the keys + alias resolution.
+    platform_bias_block = _build_platform_bias_block(target_platform)
+
+    # Genre-specific selection guidance (podcast / vlog / tutorial / etc).
+    # Same fallback semantics as platform_bias — unknown / None → "" so
+    # callers can always pass through.
+    genre_bias_block = _build_genre_bias_block(genre)
+
     prompt = CLIP_SELECTION_PROMPT.format(
         max_clips=max_clips,
         min_clip=min_clip_sec,
@@ -1073,6 +1511,9 @@ async def _select_clip_windows(
         duration=duration,
         niche=niche,
         segments_text=segments_text,
+        user_query_block=user_query_block,
+        platform_bias_block=platform_bias_block,
+        genre_bias_block=genre_bias_block,
     )
 
     from backend.core.ai_provider import get_ai_client
@@ -1168,6 +1609,25 @@ async def _select_clip_windows(
             w["virality_score"] = max(1, min(10, score))
         except (TypeError, ValueError):
             w["virality_score"] = 5.0
+        # Ensure hook_score is present and valid
+        try:
+            hscore = float(w.get("hook_score", 5))
+            w["hook_score"] = max(1, min(10, hscore))
+        except (TypeError, ValueError):
+            w["hook_score"] = 5.0
+        # Validate hook_type against the closed set we advertise in the prompt.
+        # Anything unrecognized (or missing) collapses to "general" so we never
+        # store noisy free-form strings the UI doesn't know how to color.
+        ht = (w.get("hook_type") or "").strip().lower().replace(" ", "_").replace("-", "_")
+        if ht not in _ALLOWED_HOOK_TYPES:
+            ht = "general"
+        w["hook_type"] = ht
+        # Normalize score_breakdown — 4 sub-scores clamped to 1-10, missing
+        # keys default to the clip's overall virality_score so the UI bars
+        # don't collapse to zero on partial AI responses.
+        w["score_breakdown"] = _normalize_score_breakdown(
+            w.get("score_breakdown"), default_score=w["virality_score"],
+        )
         valid.append(w)
 
     # Sort by virality score descending
@@ -1225,8 +1685,16 @@ async def _process_clips_parallel(
     user_settings,
     job_id: str = None,
     user_id: str = "local",
+    remove_silence: bool = False,
+    force_vertical: bool = False,
+    emoji_style: str = "moderate",
 ) -> list[dict]:
-    """Process all clips in parallel: extract → caption → thumbnail → metadata."""
+    """Process all clips in parallel: extract → [silence removal] → caption → thumbnail → metadata.
+
+    `force_vertical` is accepted for signature parity with the options
+    contract; clips are always extracted vertical (blur-fill) in this build,
+    so it's a no-op here rather than a behavior toggle.
+    """
     from backend.services.ffmpeg_service import extract_clip, extract_thumbnail
 
     total = len(clip_windows)
@@ -1246,16 +1714,51 @@ async def _process_clips_parallel(
     extract_tasks = [_ffmpeg_limited(_extract_one(i, w)) for i, w in enumerate(clip_windows)]
     clip_paths = await asyncio.gather(*extract_tasks, return_exceptions=True)
 
+    # Phase 1.5: Remove silence & filler words (if enabled). Per-clip, soft-
+    # falls-back to the original clip on failure. When cleaned, the re-timed
+    # segments replace the normal per-clip segment filtering for captioning.
+    if remove_silence:
+        if job_id:
+            await ws_manager.send_progress(job_id, 45, f"Removing silence & filler words from {total} clips...", user_id)
+        cleaned_paths = []
+        cleaned_segments_list = []
+        for i, (clip_path, window) in enumerate(zip(clip_paths, clip_windows)):
+            if isinstance(clip_path, Exception):
+                cleaned_paths.append(clip_path)
+                cleaned_segments_list.append([])
+                continue
+            clip_segs = _filter_and_offset_segments(segments, window["start"], window["end"])
+            try:
+                cleaned_path, cleaned_segs = await _remove_silence_and_fillers(clip_path, clip_segs)
+                cleaned_paths.append(cleaned_path)
+                cleaned_segments_list.append(cleaned_segs)
+            except Exception as e:
+                logger.warning(f"Silence removal failed for clip {i+1}, using original: {e}")
+                cleaned_paths.append(clip_path)
+                cleaned_segments_list.append(clip_segs)
+        clip_paths = cleaned_paths
+    else:
+        cleaned_segments_list = None  # signals to use normal segment filtering
+
     # Phase 2: Burn captions in parallel (on successfully extracted clips)
     if job_id:
         await ws_manager.send_progress(job_id, 55, f"Adding captions to {total} clips...", user_id)
+
+    hook_enabled = bool(getattr(user_settings, "hook_overlay_enabled", True))
 
     async def _caption_one(i, clip_path, window):
         if isinstance(clip_path, Exception):
             return clip_path, "extract_failed"
 
-        clip_segments = _filter_and_offset_segments(segments, window["start"], window["end"])
-        captioned_path, caption_status = await _burn_clip_captions(clip_path, clip_segments, caption_style)
+        if cleaned_segments_list is not None:
+            clip_segments = cleaned_segments_list[i]
+        else:
+            clip_segments = _filter_and_offset_segments(segments, window["start"], window["end"])
+        hook_text = window.get("hook", "") if hook_enabled else ""
+        captioned_path, caption_status = await _burn_clip_captions(
+            clip_path, clip_segments, caption_style,
+            hook_text=hook_text, emoji_style=emoji_style,
+        )
         return captioned_path, caption_status
 
     caption_tasks = [_ffmpeg_limited(_caption_one(i, cp, w)) for i, (cp, w) in enumerate(zip(clip_paths, clip_windows))]
@@ -1379,11 +1882,15 @@ async def _process_clips_parallel(
             "thumbnail_path": thumb_path,
             "title": window.get("title", f"Clip {idx+1}"),
             "transcript_text": transcript_text,
+            "hook": window.get("hook", ""),
+            "hook_score": window.get("hook_score"),
+            "hook_type": window.get("hook_type"),
             "reason": window.get("reason", ""),
             "start": window["start"],
             "end": window["end"],
             "duration_seconds": int(window["end"] - window["start"]),
             "virality_score": window.get("virality_score", 5.0),
+            "score_breakdown": window.get("score_breakdown") or {},
             "caption_status": caption_status,
             "metadata_status": metadata_status,
             **metadata,
@@ -1414,14 +1921,233 @@ def _filter_and_offset_segments(segments: list[dict], clip_start: float, clip_en
     return filtered
 
 
-async def _burn_clip_captions(clip_path: Path, segments: list[dict], style: str = "viral") -> tuple[Path, str]:
-    """Burn captions onto a clip. Returns (output_path, status)."""
-    if not segments:
+FILLER_WORDS = {
+    "um", "uh", "uhm", "umm", "uhh", "hmm", "hm",
+    "like", "so", "basically", "actually", "literally",
+    "right", "okay", "ok", "yeah", "yep", "yea",
+    "i mean", "you know", "you see", "kind of", "sort of",
+}
+
+# Max gap between words (seconds) before it's considered silence worth removing
+SILENCE_GAP_THRESHOLD = 0.4
+# Minimum keep-segment duration to avoid micro-fragments
+MIN_KEEP_DURATION = 0.15
+# Padding around kept segments to avoid harsh cuts
+KEEP_PAD_SECONDS = 0.03
+
+
+async def _remove_silence_and_fillers(clip_path: Path, segments: list[dict]) -> tuple[Path, list[dict]]:
+    """
+    Remove silent gaps and filler words from a clip using FFmpeg select/aselect filters.
+    Returns (new_clip_path, adjusted_segments) with re-timed word timestamps.
+
+    Self-contained: shells out to ffmpeg directly (argv list, never shell=True),
+    no external service dependency.
+    """
+    import subprocess
+
+    # Step 1: Extract all word timestamps from segments
+    words = []
+    for seg in segments:
+        if "words" in seg:
+            for w in seg["words"]:
+                words.append({
+                    "text": w.get("word", w.get("text", "")).strip(),
+                    "start": w["start"],
+                    "end": w["end"],
+                })
+        else:
+            # Segment-level only — treat whole segment as one word
+            words.append({
+                "text": seg.get("text", "").strip(),
+                "start": seg["start"],
+                "end": seg["end"],
+            })
+
+    if not words:
+        return clip_path, segments
+
+    # Step 2: Mark filler words
+    keep_words = []
+    for w in words:
+        text_lower = w["text"].lower().strip(" .,!?")
+        if text_lower in FILLER_WORDS:
+            continue
+        # Check two-word fillers by combining with previous
+        if keep_words:
+            combined = f"{keep_words[-1]['text'].lower().strip(' .,!?')} {text_lower}"
+            if combined in FILLER_WORDS:
+                keep_words.pop()
+                continue
+        keep_words.append(w)
+
+    if not keep_words:
+        return clip_path, segments
+
+    # Step 3: Build keep-ranges by merging adjacent words with small gaps
+    keep_ranges = []
+    current_start = keep_words[0]["start"]
+    current_end = keep_words[0]["end"]
+
+    for w in keep_words[1:]:
+        gap = w["start"] - current_end
+        if gap <= SILENCE_GAP_THRESHOLD:
+            # Merge into current range
+            current_end = w["end"]
+        else:
+            # Close current range and start new one
+            if current_end - current_start >= MIN_KEEP_DURATION:
+                keep_ranges.append((
+                    max(0, current_start - KEEP_PAD_SECONDS),
+                    current_end + KEEP_PAD_SECONDS,
+                ))
+            current_start = w["start"]
+            current_end = w["end"]
+
+    # Don't forget the last range
+    if current_end - current_start >= MIN_KEEP_DURATION:
+        keep_ranges.append((
+            max(0, current_start - KEEP_PAD_SECONDS),
+            current_end + KEEP_PAD_SECONDS,
+        ))
+
+    if not keep_ranges:
+        return clip_path, segments
+
+    # Check if we're actually removing meaningful content (>0.5s total)
+    original_duration = words[-1]["end"]
+    kept_duration = sum(e - s for s, e in keep_ranges)
+    removed_duration = original_duration - kept_duration
+
+    if removed_duration < 0.5:
+        logger.debug(f"Only {removed_duration:.1f}s to remove — skipping silence removal")
+        return clip_path, segments
+
+    # Step 4: Build FFmpeg select filter expression
+    select_parts = [f"between(t\\,{s:.3f}\\,{e:.3f})" for s, e in keep_ranges]
+    select_expr = "+".join(select_parts)
+
+    output_path = clip_path.parent / f"{clip_path.stem}_cleaned{clip_path.suffix}"
+
+    def _run():
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(clip_path),
+            "-vf", f"select='{select_expr}',setpts=N/FRAME_RATE/TB",
+            "-af", f"aselect='{select_expr}',asetpts=N/SR/TB",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg silence removal failed: {result.stderr[-500:]}")
+
+    await asyncio.to_thread(_run)
+
+    # Step 5: Re-time segments to match the cleaned video
+    adjusted_segments = _retime_segments_after_removal(segments, keep_ranges)
+
+    # Cleanup original clip (the cleaned one replaces it)
+    try:
+        clip_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    logger.info(f"Silence removal: {original_duration:.1f}s → {kept_duration:.1f}s (removed {removed_duration:.1f}s)")
+    return output_path, adjusted_segments
+
+
+def _retime_segments_after_removal(segments: list[dict], keep_ranges: list[tuple[float, float]]) -> list[dict]:
+    """
+    Re-calculate segment timestamps after silence removal.
+    Maps original timestamps to their new positions in the shortened video.
+    """
+    def map_time(t: float) -> float | None:
+        """Map an original timestamp to its position in the cleaned video."""
+        elapsed = 0.0
+        for rs, re_ in keep_ranges:
+            if t < rs:
+                # Before this range — clamp to start of range
+                return elapsed
+            if t <= re_:
+                # Inside this range
+                return elapsed + (t - rs)
+            elapsed += re_ - rs
+        # After all ranges
+        return elapsed
+
+    adjusted = []
+    for seg in segments:
+        new_start = map_time(seg["start"])
+        new_end = map_time(seg["end"])
+        if new_start is None or new_end is None or new_end <= new_start:
+            continue
+
+        new_seg = dict(seg)
+        new_seg["start"] = new_start
+        new_seg["end"] = new_end
+
+        if "words" in new_seg:
+            new_words = []
+            for w in new_seg["words"]:
+                ws = map_time(w["start"])
+                we = map_time(w["end"])
+                if ws is not None and we is not None and we > ws:
+                    new_words.append({**w, "start": ws, "end": we})
+            new_seg["words"] = new_words
+            if not new_words:
+                continue
+
+        adjusted.append(new_seg)
+
+    return adjusted
+
+
+async def _burn_clip_captions(
+    clip_path: Path,
+    segments: list[dict],
+    style: str = "viral",
+    hook_text: str = "",
+    emoji_style: str = "moderate",
+) -> tuple[Path, str]:
+    """Burn captions onto a clip. Returns (output_path, status).
+
+    If hook_text is non-empty, a top-center "hook" overlay is rendered for
+    the first few seconds via the ASS Hook style (see caption_service).
+    Silent clips (empty segments AND empty hook_text) skip captioning.
+
+    `emoji_style` ("none" / "minimal" / "moderate" / "heavy") controls
+    AutoEmoji density. Default "moderate" matches the historical behavior.
+    """
+    # Silent clips with no hook have nothing to burn.
+    if not segments and not hook_text:
         return clip_path, "no_segments"
 
     try:
         from backend.services.caption_service import generate_captions_ass, burn_captions
-        ass_path = await generate_captions_ass(segments, style=style, aspect_ratio="9:16")
+        # Auto-detect aspect ratio from the clip file so landscape sources
+        # (force_vertical off) still get correctly-placed captions.
+        import subprocess
+        aspect = "9:16"
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height",
+                 "-of", "csv=p=0", str(clip_path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            w, h = map(int, probe.stdout.strip().split(","))
+            if w > h:
+                aspect = "16:9"
+        except Exception:
+            pass
+        ass_path = await generate_captions_ass(
+            segments, style=style, aspect_ratio=aspect,
+            hook_text=hook_text or None, emoji_style=emoji_style,
+        )
         captioned = await burn_captions(clip_path, ass_path)
 
         # Cleanup ASS file

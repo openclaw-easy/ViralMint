@@ -9,6 +9,8 @@ import asyncio
 import json
 import logging
 
+from backend.services.clip_options import ExtractOptions
+
 logger = logging.getLogger(__name__)
 
 
@@ -789,16 +791,23 @@ async def _generate_channel_ai_analysis(summary: dict, user_id: str) -> str:
 async def run_extract_clips(
     job_id: str,
     downloaded_video_id: str,
-    max_clips: int = 3,
-    caption_style: str = "viral",
-    whisper_quality: str = "balanced",
-    force_retranscribe: bool = False,
-    min_duration: int = None,
-    max_duration: int = None,
+    opts: ExtractOptions,
     user_id: str = "local",
 ):
-    """Extract viral clips from a downloaded video."""
-    logger.info("TASK START extract_clips | job=%s video=%s max=%d", job_id[:8], downloaded_video_id[:8], max_clips)
+    """Extract clips from a downloaded video — AI viral picker or manual ranges.
+
+    All run knobs come via `opts` (ExtractOptions). `opts.mode` is "ai"
+    (default — AI viral-clip picker) or "manual" (cut user-supplied
+    `opts.time_ranges` verbatim). The API endpoint validates `time_ranges`
+    before dispatching so the runner just forwards `opts` to
+    `extract_viral_clips`.
+    """
+    max_clips = opts.max_clips
+    mode = opts.mode
+    logger.info(
+        "TASK START extract_clips | job=%s video=%s mode=%s max=%d",
+        job_id[:8], downloaded_video_id[:8], mode, max_clips,
+    )
     from backend.agents.job_helper import update_job_status
     from backend.core.ws_manager import ws_manager
     from backend.database import AsyncSessionLocal
@@ -825,31 +834,65 @@ async def run_extract_clips(
             )
             user_settings = result.scalar_one_or_none()
 
-        # Run the clip extraction pipeline
+        # Run the clip extraction pipeline. `opts.mode` + `opts.time_ranges`
+        # branch the service-layer logic: "ai" runs the viral picker,
+        # "manual" cuts the user-supplied ranges verbatim.
         clips = await extract_viral_clips(
             video=video,
             user_settings=user_settings,
-            max_clips=max_clips,
-            caption_style=caption_style,
-            whisper_quality=whisper_quality,
-            force_retranscribe=force_retranscribe,
+            opts=opts,
             job_id=job_id,
             user_id=user_id,
-            min_duration=min_duration,
-            max_duration=max_duration,
         )
 
         if not clips:
             raise ValueError("No clips were extracted")
 
+        # Source video title — used as the prefix for per-clip names so users
+        # (and LLMs) can tell at a glance which source a clip came from.
+        # Truncated to ~30 chars to keep the per-clip title short.
+        source_title = (video.title if video and video.title else "Clip").strip()
+        if len(source_title) > 30:
+            source_title = source_title[:28].rstrip() + "…"
+
+        def _clip_title(c: dict, idx: int) -> str:
+            """Build a per-clip descriptive title.
+
+            All clips from the same source used to inherit the source's title
+            verbatim — five clips of "Tesla Q4 earnings call" all named the
+            same, useless when browsing or when an LLM is picking one via the
+            /mcp list_clips query.
+
+            Format priorities:
+              1. youtube_title  — when AI metadata succeeded, this is already
+                 a per-clip catchy title; prefer it.
+              2. {source} — {hook_type}: {reason} — derived from the
+                 viral-clip picker's structured fields.
+              3. {source} — clip {n} — fallback when neither AI metadata nor
+                 a reason landed.
+            """
+            yt = (c.get("youtube_title") or "").strip()
+            if yt:
+                return yt[:100]
+            hook = (c.get("hook_type") or "").strip()
+            reason = (c.get("reason") or "").strip()
+            if reason:
+                if len(reason) > 50:
+                    cut = reason[:48].rsplit(" ", 1)[0]
+                    reason = cut.rstrip(",.;:") + "…"
+                if hook:
+                    return f"{source_title} — {hook}: {reason}"
+                return f"{source_title} — {reason}"
+            return f"{source_title} — clip {idx + 1}"
+
         # Save each clip as a GeneratedVideo record with all new fields
         clip_ids = []
         async with AsyncSessionLocal() as db:
-            for clip in clips:
+            for idx, clip in enumerate(clips):
                 gv = GeneratedVideo(
                     user_id=user_id,
                     source_downloaded_video_id=downloaded_video_id,
-                    title=clip.get("title", "Clip"),
+                    title=_clip_title(clip, idx),
                     video_path=str(clip["video_path"]) if clip.get("video_path") else None,
                     thumbnail_path=str(clip["thumbnail_path"]) if clip.get("thumbnail_path") else None,
                     aspect_ratio="9:16",
@@ -865,7 +908,17 @@ async def run_extract_clips(
                     clip_start_seconds=clip.get("start"),
                     clip_end_seconds=clip.get("end"),
                     clip_virality_score=clip.get("virality_score"),
+                    clip_hook_score=clip.get("hook_score"),
+                    clip_hook_type=clip.get("hook_type"),
                     clip_virality_reason=clip.get("reason"),
+                    # score_breakdown is the dict produced by _select_clip_windows
+                    # with the 4 sub-scores (flow / value / trend / shareability).
+                    # Serialize only when non-empty so legacy rows / fallback paths
+                    # that don't compute it stay NULL.
+                    clip_score_breakdown_json=(
+                        json.dumps(clip["score_breakdown"])
+                        if clip.get("score_breakdown") else None
+                    ),
                     caption_status=clip.get("caption_status"),
                     metadata_status=clip.get("metadata_status"),
                     script=clip.get("transcript_text"),  # Store clip transcript as script

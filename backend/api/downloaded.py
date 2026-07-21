@@ -5,9 +5,11 @@ import json
 import logging
 import shutil
 from pathlib import Path
+from typing import Optional
 from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from backend.config import settings
@@ -643,33 +645,181 @@ async def reanalyze_video(video_id: str, body: dict = None):
     return {"job_id": job.id}
 
 
+# ── Manual-mode constants ─────────────────────────────────────────────
+# Surface here so tests and docs can introspect; tweaking these touches
+# both validation and the user-facing 400 message.
+_MANUAL_MAX_RANGES = 10      # cap per submit; mirrored on the frontend
+_MANUAL_MIN_CLIP_SEC = 1.0   # sub-second clips have no visual value
+
+
+def _validate_manual_time_ranges(raw_ranges, video_duration: float) -> list[dict]:
+    """Parse + validate user-supplied time ranges for manual-mode extraction.
+
+    `raw_ranges` is the unsafe payload from the API client: a list of
+    dicts where `start` / `end` are strings ("0:18") OR numbers (18).
+    Returns a normalized list of `{"start": float, "end": float}` in
+    seconds, sorted by start time.
+
+    Raises HTTPException(400) with a per-range message on any failure
+    so the user knows exactly which row in the dialog needs fixing.
+    """
+    from backend.services.clip_extractor import _parse_timestamp
+
+    if not isinstance(raw_ranges, list) or not raw_ranges:
+        raise HTTPException(
+            status_code=400,
+            detail="time_ranges required in manual mode (list of {start, end} entries)",
+        )
+    if len(raw_ranges) > _MANUAL_MAX_RANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many ranges: {len(raw_ranges)} (max {_MANUAL_MAX_RANGES} per submit)",
+        )
+
+    parsed: list[dict] = []
+    for i, r in enumerate(raw_ranges):
+        label = f"Range {i + 1}"
+        if not isinstance(r, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label}: expected an object with `start` and `end`",
+            )
+        try:
+            start = _parse_timestamp(r.get("start"))
+            end = _parse_timestamp(r.get("end"))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"{label}: {e}")
+
+        if end <= start:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label}: end ({end:g}s) must be after start ({start:g}s)",
+            )
+        if end - start < _MANUAL_MIN_CLIP_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{label}: clip too short "
+                    f"({end - start:.2f}s; min {_MANUAL_MIN_CLIP_SEC:g}s)"
+                ),
+            )
+        # Allow a tiny epsilon (0.5s) past the cached duration — yt-dlp
+        # sometimes records a duration off by half a second vs the actual
+        # frame count.
+        if video_duration and end > video_duration + 0.5:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{label}: end ({end:g}s) exceeds video duration "
+                    f"({video_duration:g}s)"
+                ),
+            )
+        parsed.append({"start": start, "end": end})
+
+    # Sort chronologically for stable clip numbering downstream.
+    parsed.sort(key=lambda r: r["start"])
+    return parsed
+
+
+class ExtractClipsRequest(BaseModel):
+    """Wire model for POST /downloaded/{id}/extract-clips.
+
+    Field names + defaults stay stable — the MCP `extract_viral_clips`
+    tool and older scripts post this exact shape. Validation/normalization
+    (mode/emoji/platform/genre vocab, duration clamps, manual time_ranges)
+    happens in the handler; this just types the wire + centralizes defaults.
+    """
+    mode: str = "ai"
+    max_clips: Optional[int] = None
+    caption_style: str = "viral"
+    whisper_quality: str = "balanced"
+    force_retranscribe: bool = False
+    min_duration: Optional[int] = None
+    max_duration: Optional[int] = None
+    remove_silence: bool = False
+    force_vertical: bool = False
+    user_query: Optional[str] = None
+    target_platform: Optional[str] = None
+    emoji_style: str = "moderate"
+    genre: Optional[str] = None
+    time_ranges: Optional[list[dict]] = None
+
+
 @router.post("/downloaded/{video_id}/extract-clips")
-async def extract_clips(video_id: str, body: dict = None):
-    """Extract viral clips from a downloaded long-form video.
+async def extract_clips(video_id: str, body: ExtractClipsRequest | None = None):
+    """Extract clips from a downloaded long-form video.
+
+    Two modes:
+      - "ai" (default) — AI-driven viral-clip picker. Returns N clips
+        based on virality scoring of the Whisper transcript.
+      - "manual"       — cut user-supplied `time_ranges` verbatim.
 
     Body params:
-        max_clips: int (1-50, default 3)
-        caption_style: str (viral|classic|bold, default viral)
-        min_duration: int (min clip seconds, optional)
-        max_duration: int (max clip seconds, optional)
+        mode: "ai" | "manual" (default "ai")
+        time_ranges: list[{start, end}] — REQUIRED when mode="manual".
+            Each start/end is either a number (seconds) or a string in
+            "SS" / "MM:SS" / "HH:MM:SS" form (with optional ".fff").
+
+      AI mode only (ignored when mode="manual"):
+        max_clips: int (1-99, default auto)
+        min_duration / max_duration: int (clip seconds, optional)
+        user_query: str (free-form filter; ranks above pure virality)
+        target_platform: str (hook-type bias — tiktok | youtube_shorts |
+            reels | linkedin | twitter; aliases accepted)
+        genre: str (genre bias — podcast | interview | qa | vlog |
+            tutorial | gaming | reaction | lecture; aliases accepted)
+
+      Both modes (post-processing):
+        caption_style: str (default viral)
+        emoji_style: str (none|minimal|moderate|heavy, default moderate)
+        whisper_quality: str (default balanced)
+        force_retranscribe: bool (default false)
+        remove_silence: bool (remove silent gaps & filler words, default false)
+        force_vertical: bool (default false)
     """
-    body = body or {}
-    caption_style = body.get("caption_style", "viral")
-    whisper_quality = body.get("whisper_quality", "balanced")
-    force_retranscribe = body.get("force_retranscribe", False)
-    min_duration = body.get("min_duration")
-    max_duration = body.get("max_duration")
-    # max_clips: if not specified, auto-calculate from video duration (~1 per 30s, min 3)
-    max_clips_input = body.get("max_clips")
+    req = body or ExtractClipsRequest()
+    # Mode is the discriminator — branches API-side validation. Default "ai"
+    # preserves the legacy behaviour for callers that don't know about manual
+    # mode (older MCP configs, scripts written before today).
+    mode = (req.mode or "ai").strip().lower()
+    if mode not in ("ai", "manual"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown mode '{mode}' (expected 'ai' or 'manual')",
+        )
+
+    caption_style = req.caption_style or "viral"
+    whisper_quality = req.whisper_quality or "balanced"
+    force_retranscribe = bool(req.force_retranscribe)
+    min_duration = req.min_duration
+    max_duration = req.max_duration
+    remove_silence = bool(req.remove_silence)
+    force_vertical = bool(req.force_vertical)
+    user_query = (req.user_query or "").strip() or None
+    # Platform hint biases the AI hook-type ranker. Unknown values quietly
+    # degrade to vanilla virality ranking — _build_platform_bias_block handles
+    # the unknown-key case.
+    target_platform = (req.target_platform or "").strip().lower() or None
+    # AutoEmoji density. Unknown values fall back to "moderate" rather than
+    # raising — caller doesn't have to know the exact vocabulary.
+    _EMOJI_STYLES = {"none", "minimal", "moderate", "heavy"}
+    emoji_style_raw = (req.emoji_style or "moderate").strip().lower()
+    emoji_style = emoji_style_raw if emoji_style_raw in _EMOJI_STYLES else "moderate"
+    # Genre hint biases the AI's clip-selection criteria. Unknown values
+    # quietly degrade to no genre bias.
+    genre = (req.genre or "").strip().lower() or None
+    max_clips_input = req.max_clips
     max_clips = None  # will be computed after loading video
 
-    # Validate custom duration range
-    if min_duration is not None:
-        min_duration = max(10, int(min_duration))
-    if max_duration is not None:
-        max_duration = max(15, int(max_duration))
-    if min_duration and max_duration and min_duration >= max_duration:
-        raise HTTPException(status_code=400, detail="min_duration must be less than max_duration")
+    # Validate custom duration range (AI mode only — manual mode uses
+    # user-supplied ranges directly).
+    if mode == "ai":
+        if min_duration is not None:
+            min_duration = max(10, int(min_duration))
+        if max_duration is not None:
+            max_duration = max(15, int(max_duration))
+        if min_duration and max_duration and min_duration >= max_duration:
+            raise HTTPException(status_code=400, detail="min_duration must be less than max_duration")
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -686,39 +836,69 @@ async def extract_clips(video_id: str, body: dict = None):
     # captioned clip rather than rejected. No blanket "too short" floor here.
     duration = video.duration_seconds or 0
 
-    # Auto-calculate max_clips from duration if not specified (~1 clip per 30s, min 3, max 99)
-    if max_clips_input is not None:
-        max_clips = max(1, min(int(max_clips_input), 99))
+    # Manual mode: validate ranges against the loaded video BEFORE creating the
+    # job so a typo'd range fails cleanly at submit time.
+    time_ranges: list[dict] | None = None
+    if mode == "manual":
+        time_ranges = _validate_manual_time_ranges(
+            req.time_ranges,
+            video_duration=duration,
+        )
+        max_clips = len(time_ranges)
     else:
-        max_clips = max(3, min(99, duration // 30)) if duration > 0 else 5
+        # Auto-calculate max_clips from duration if not specified
+        # (~1 clip per 30s, min 3, max 99). AI-mode only.
+        if max_clips_input is not None:
+            max_clips = max(1, min(int(max_clips_input), 99))
+        else:
+            max_clips = max(3, min(99, duration // 30)) if duration > 0 else 5
 
     from backend.agents.job_helper import create_job
     from backend.core.task_runner import run_extract_clips, dispatch
     from backend.core.ws_manager import ws_manager
+    from backend.services.clip_options import ExtractOptions
 
     job = await create_job("generate", "local", {
         "downloaded_video_id": video_id,
         "type": "clip_extraction",
+        "mode": mode,
         "max_clips": max_clips,
     })
-    dispatch(run_extract_clips(
-        job_id=job.id,
-        downloaded_video_id=video_id,
+    opts = ExtractOptions(
+        mode=mode,
         max_clips=max_clips,
         caption_style=caption_style,
         whisper_quality=whisper_quality,
         force_retranscribe=force_retranscribe,
         min_duration=min_duration,
         max_duration=max_duration,
+        remove_silence=remove_silence,
+        force_vertical=force_vertical,
+        user_query=user_query,
+        target_platform=target_platform,
+        emoji_style=emoji_style,
+        genre=genre,
+        time_ranges=time_ranges,
+    )
+    dispatch(run_extract_clips(
+        job_id=job.id,
+        downloaded_video_id=video_id,
+        opts=opts,
         user_id="local",
     ))
     video_title = video.title or "Untitled"
+    mode_label = "user-specified" if mode == "manual" else "viral"
     await ws_manager.send({
         "type": "job_started",
         "job_id": job.id,
         "job_type": "generate",
-        "message": f"Extracting clips from: {video_title}",
-        "input_data": {"type": "clip_extraction", "downloaded_video_id": video_id, "max_clips": max_clips},
+        "message": f"Extracting {mode_label} clips from: {video_title}",
+        "input_data": {
+            "type": "clip_extraction",
+            "downloaded_video_id": video_id,
+            "mode": mode,
+            "max_clips": max_clips,
+        },
     }, "local")
     return {"job_id": job.id}
 
