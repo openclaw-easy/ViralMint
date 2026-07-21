@@ -60,7 +60,7 @@ cd ViralMint && python run.py
 </tr>
 </table>
 
-The README below documents the **self-host** variant — keep reading if that's the path you want, or hop over to **[viralmint.net](https://viralmint.net)** for the hosted experience.
+The README below documents the **self-host** variant — keep reading if that's the path you want, or hop over to **[viralmint.net](https://viralmint.net)** for the hosted experience. Not sure which fits? See the **[self-host vs hosted comparison + FAQ](docs/hosted-vs-self-hosted.md)**.
 
 <div align="center">
 
