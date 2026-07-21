@@ -11,6 +11,8 @@
 
 [🌐 Website](https://viralmint.net) • [Quick Start](#-quick-start) • [Features](#-features) • [Architecture](#-architecture) • [API Keys](#-bring-your-own-keys-byok) • [Contributing](CONTRIBUTING.md)
 
+**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
+
 </div>
 
 ## 🚦 Two ways to use ViralMint
