@@ -7,6 +7,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Fixed
+- **Clip Studio — extraction hardening ported from the hosted variant (7 bugfixes).**
+  Fixes a `time_offset` double-count that silently dropped almost every clip
+  past the first chunk on long videos; a clip-count estimator that assumed 40s
+  clips (collapsing "3×15s from a 63s video" to 1); Whisper failures that
+  silently downgraded to random duration-based clips instead of failing loudly;
+  single-bound (min-only / max-only) duration overrides being ignored; the
+  retry cascade widening past user-pinned bounds; and two caption/exception
+  leaks into the output path. Adds `backend/core/concurrency.py` to cap
+  parallel ffmpeg work.
+- **Analyzer — chunked AI transcript correction.** The old single-call
+  correction on `raw_text[:6000]` silently discarded everything past 6000 chars
+  on long videos; now sentence-aligned chunking corrects the whole transcript
+  with a per-chunk sanity guard (never loses content). Plus a `has_audio_stream`
+  ffprobe preflight so a video-only/silent file raises a clear error instead of
+  faster-whisper's opaque "tuple index out of range".
+- **Captions — placement, flashing, and non-Latin fixes.** `alignment=5`
+  (frame-center, ignores margins) → `alignment=2` (bottom-anchored) with
+  per-aspect margins; phrase-aware line grouping with continuous-hold events so
+  captions no longer blank out during Whisper's inter-word gaps; script-aware
+  font fallback so CJK/Arabic/Thai captions stop burning as tofu boxes; libass
+  preflight; concurrency-safe temp file; new `brainrot`/`urban`/`warm`/`mono`
+  styles.
+- **Music mix — voiceover level.** `amix` defaulted `normalize=1`, halving the
+  voiceover to −6 dB; add `normalize=0` + an `alimiter` peak guard so the voice
+  stays full-level with music as a true −20 dB bed.
+- **Messaging — concurrent channel start.** `start_all()` now launches every
+  channel in parallel with per-channel failure isolation, so the slowest
+  channel no longer gates the rest.
 - **Download hardening — pinned yt-dlp floor + TLS impersonation.**
   `requirements.txt` now pins `yt-dlp>=2026.7.4`: an unbounded `yt-dlp` on an
   old Python (macOS's system `python3` is 3.9) silently resolves to an ancient
