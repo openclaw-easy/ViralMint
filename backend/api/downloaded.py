@@ -1045,6 +1045,55 @@ async def ai_action(video_id: str, body: dict = None):
         raise HTTPException(status_code=500, detail=f"AI action failed: {e}")
 
 
+@router.get("/downloaded/{video_id}/thumbnail")
+async def get_downloaded_thumbnail(video_id: str):
+    """Serve the thumbnail for a downloaded video.
+
+    Falls back to extracting one from the video file (ffmpeg) if thumbnail_path
+    isn't set, then backfills the DB so we don't re-extract next time.
+    """
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(DownloadedVideo).where(DownloadedVideo.id == video_id)
+        )
+        video = result.scalar_one_or_none()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    # Existing thumbnail first.
+    if video.thumbnail_path:
+        thumb = Path(video.thumbnail_path)
+        if thumb.exists():
+            return FileResponse(thumb, media_type="image/jpeg")
+
+    # No thumbnail yet — extract one from the video file.
+    video_file = video.video_path
+    if not video_file or not Path(video_file).exists():
+        raise HTTPException(status_code=404, detail="No thumbnail or video file available")
+
+    try:
+        from backend.services.ffmpeg_service import extract_thumbnail
+        thumb_path = await extract_thumbnail(
+            Path(video_file),
+            output_path=settings.THUMBNAILS_DIR / f"dl_{video_id[:8]}_thumb.jpg",
+            timestamp=2.0,
+        )
+        if thumb_path and thumb_path.exists():
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(DownloadedVideo).where(DownloadedVideo.id == video_id)
+                )
+                row = result.scalar_one_or_none()
+                if row:
+                    row.thumbnail_path = str(thumb_path)
+                    await db.commit()
+            return FileResponse(thumb_path, media_type="image/jpeg")
+    except Exception:
+        pass
+
+    raise HTTPException(status_code=404, detail="Could not generate thumbnail")
+
+
 @router.get("/downloaded/{video_id}/stream")
 async def stream_downloaded(video_id: str):
     """Stream/serve a downloaded video file."""

@@ -187,7 +187,7 @@ function ScoreBreakdownPanel({ clip }) {
 
 /* ── Source Video Sidebar Item ──────────────────────────────── */
 
-function SourceVideoCard({ video, clipCount, isSelected, onClick }) {
+function SourceVideoCard({ video, clipCount, isSelected, onClick, onPreview }) {
   return (
     <Paper
       elevation={0}
@@ -210,10 +210,11 @@ function SourceVideoCard({ video, clipCount, isSelected, onClick }) {
         width: "100%", aspectRatio: "16/9", borderRadius: 2, overflow: "hidden",
         bgcolor: "action.hover", mb: 1, position: "relative",
       }}>
-        {(video.thumbnail_path || video.thumbnail_url) ? (
+        {(video.video_path || video.thumbnail_url) ? (
           <Box component="img"
-            src={video.thumbnail_path ? `/api/downloaded/${video.id}/thumbnail` : video.thumbnail_url}
+            src={video.video_path ? `/api/downloaded/${video.id}/thumbnail` : video.thumbnail_url}
             alt=""
+            loading="lazy" decoding="async"
             sx={{ width: "100%", height: "100%", objectFit: "cover" }}
             onError={e => { e.target.style.display = "none" }} />
         ) : (
@@ -233,6 +234,23 @@ function SourceVideoCard({ video, clipCount, isSelected, onClick }) {
               "& .MuiChip-label": { px: 0.75 },
             }}
           />
+        )}
+        {/* Preview button — stopPropagation so it doesn't also select the card.
+            Only for locally-downloaded (streamable) sources. */}
+        {onPreview && video.video_path && (
+          <Tooltip title="Preview video">
+            <IconButton
+              size="small"
+              onClick={(e) => { e.stopPropagation(); onPreview(video) }}
+              sx={{
+                position: "absolute", top: 4, right: 4,
+                bgcolor: "rgba(0,0,0,0.6)", color: "#fff",
+                "&:hover": { bgcolor: "rgba(0,0,0,0.8)" }, p: 0.5,
+              }}
+            >
+              <PlayCircleOutlineIcon sx={{ fontSize: 20 }} />
+            </IconButton>
+          </Tooltip>
         )}
       </Box>
 
@@ -826,6 +844,7 @@ export default function ClipStudio() {
   const [selectedSourceId, setSelectedSourceId] = useState(null) // "all" or video id
   const [selectedClip, setSelectedClip] = useState(null)
   const [sourceFilter, setSourceFilter] = useState("")
+  const [previewVideo, setPreviewVideo] = useState(null) // source video for the play popup
   const [searchQuery, setSearchQuery] = useState("")
   const [sortBy, setSortBy] = useState("virality") // virality | newest | duration
   const [sortAnchor, setSortAnchor] = useState(null)
@@ -1175,6 +1194,7 @@ export default function ClipStudio() {
               video={v}
               clipCount={clipCountBySource[v.id] || 0}
               isSelected={selectedSourceId === v.id}
+              onPreview={setPreviewVideo}
               onClick={() => {
                 const newId = selectedSourceId === v.id ? null : v.id
                 setSelectedSourceId(newId)
@@ -1491,6 +1511,20 @@ export default function ClipStudio() {
         video={extractTarget}
         onExtract={handleExtract}
       />
+
+      {/* Source video preview popup */}
+      <Dialog open={!!previewVideo} onClose={() => setPreviewVideo(null)} maxWidth="md" fullWidth>
+        <DialogContent sx={{ p: 0, bgcolor: "#000", lineHeight: 0 }}>
+          {previewVideo && (
+            <Box
+              component="video"
+              src={`/api/downloaded/${previewVideo.id}/stream`}
+              controls autoPlay
+              sx={{ width: "100%", maxHeight: "80vh", display: "block", bgcolor: "#000" }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </Box>
   )
 }
