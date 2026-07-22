@@ -16,7 +16,9 @@
 #
 # Output: desktop/release/ with .dmg + .zip on macOS, .tar.gz on Linux.
 #
-# This is the OSS smoke-test build — single binary, no tray, browser is the UI.
+# The OSS build — one binary whose entry point is the launcher.py system-tray
+# app; it re-invokes itself with --run-backend to run uvicorn, and the user's
+# browser is the UI.
 
 set -euo pipefail
 

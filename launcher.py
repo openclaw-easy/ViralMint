@@ -38,12 +38,15 @@ PORT = 16888
 URL = f"http://localhost:{PORT}"
 APP_NAME = "ViralMint"
 
-# PyInstaller bundle detection. This OSS variant ships as a source
-# distribution and normally runs NON-frozen (`python launcher.py`), where the
-# backend is started via `run.py`. The frozen branch below is kept defensively
-# in case a downstream packager freezes the launcher — if a bundled backend
-# binary is present it is used, otherwise we degrade gracefully to running
-# `run.py` (the source path must never crash if the binary is absent).
+# PyInstaller bundle detection. Two run modes:
+#   • Source (`python launcher.py`, non-frozen): the backend is started via
+#     `run.py` with the venv/system Python.
+#   • Frozen (the packaged .app/.exe): launcher.py is the bundle entry point.
+#     It re-invokes the bundled binary with `--run-backend` (Option C), which
+#     runs uvicorn in a supervised child process. A standalone backend binary
+#     (BACKEND_BIN) is still preferred if a two-stage packager produced one.
+# In all modes the backend is a SEPARATE process so the tray watchdog can
+# restart/tree-kill it independently of the launcher UI.
 FROZEN = getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
 
 if FROZEN:
@@ -620,9 +623,8 @@ def start_service():
         _backend_log = open(log_path, "a", buffering=1)
 
         if FROZEN and BACKEND_BIN and BACKEND_BIN.exists():
-            # Packaged mode (defensive): spawn a bundled backend binary if a
-            # downstream packager produced one. Not the normal OSS path — the
-            # source path below is the supported one.
+            # Two-stage packagers may drop a standalone backend binary next to
+            # the launcher; prefer it if present.
             cmd = [str(BACKEND_BIN)]
             cwd = str(BACKEND_BIN.parent)
             env["VIRALMINT_FRONTEND_DIST"] = str(FRONTEND_DIST)
@@ -631,10 +633,20 @@ def start_service():
             # dir so Chromium downloads land in ~/ViralMint/playwright-browsers
             # instead of ~/.cache/ms-playwright.
             env["PLAYWRIGHT_BROWSERS_PATH"] = str(_DATA_DIR / "playwright-browsers")
+        elif FROZEN:
+            # Single-binary build (the OSS default): re-invoke ourselves with
+            # --run-backend so uvicorn runs in a supervised child process while
+            # this process keeps the tray + watchdog. sys.executable IS the
+            # bundled ViralMint binary, so no separate backend binary is needed.
+            cmd = [sys.executable, "--run-backend"]
+            cwd = str(_DATA_DIR)
+            env["VIRALMINT_FRONTEND_DIST"] = str(FRONTEND_DIST)
+            env["VIRALMINT_DATA_DIR"] = str(_DATA_DIR)
+            env["PLAYWRIGHT_BROWSERS_PATH"] = str(_DATA_DIR / "playwright-browsers")
         else:
-            # Source distribution (the normal OSS path): run the project's
-            # run.py with the venv/system Python. VIRALMINT_NO_BROWSER=1 tells
-            # run.py to skip its own browser auto-open (launcher owns that).
+            # Source distribution: run the project's run.py with the venv/system
+            # Python. VIRALMINT_NO_BROWSER=1 tells run.py to skip its own browser
+            # auto-open (launcher owns that).
             cmd = [_find_python(), str(ROOT / "run.py")]
             cwd = str(ROOT)
 
@@ -1530,9 +1542,49 @@ def _install_signal_handlers():
             pass
 
 
+def _run_backend_server() -> None:
+    """Backend child entry — invoked as `ViralMint --run-backend`.
+
+    Runs the FastAPI backend (uvicorn) in THIS process. In the packaged
+    single-binary build the tray launcher re-invokes the bundled binary with
+    this flag as its supervised backend child (Option C): uvicorn lives in a
+    separate process the watchdog can restart/tree-kill, while the parent owns
+    the tray + browser. No browser is opened here — the launcher owns that.
+    """
+    data_dir = Path(os.environ.get("VIRALMINT_DATA_DIR") or (Path.home() / "ViralMint"))
+    for sub in (
+        "storage/videos", "storage/audio", "storage/generated",
+        "storage/thumbnails", "storage/tmp", "logs",
+    ):
+        (data_dir / sub).mkdir(parents=True, exist_ok=True)
+    # SQLite's "./viralmint.db", storage/ and .env all resolve under the data dir.
+    os.chdir(data_dir)
+
+    if not os.environ.get("VIRALMINT_FRONTEND_DIST") and FROZEN:
+        cand = _BUNDLE_ROOT / "frontend" / "dist"
+        if cand.exists():
+            os.environ["VIRALMINT_FRONTEND_DIST"] = str(cand)
+
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "16888"))
+
+    import uvicorn
+    from backend.main import app  # noqa: E402
+
+    uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)
+
+
 # ─── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Backend child dispatch (Option C self-reinvoke): when the launcher spawns
+    # the bundled binary with --run-backend, run uvicorn instead of the tray.
+    # This must come BEFORE the single-instance lock + tray setup below so the
+    # child never contends for the launcher's lock.
+    if "--run-backend" in sys.argv[1:]:
+        _run_backend_server()
+        sys.exit(0)
+
     os.chdir(ROOT)
 
     _launcher_sentinel_sock = _acquire_single_instance()

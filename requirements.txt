@@ -83,3 +83,12 @@ neonize>=0.3.16
 discord.py>=2.3.0
 # Slack via Socket Mode (xoxb- bot token + xapp- app-level token). Optional.
 slack-sdk>=3.23.0
+
+# Desktop launcher (the system-tray UI in launcher.py — also the packaged-build
+# entry point, which re-invokes itself with --run-backend to run uvicorn).
+# pystray draws the tray icon; Pillow (pinned above) renders it. Per-OS tray
+# backends: macOS → pyobjc (AppKit/Foundation, also sets the Dock icon);
+# Linux → python-xlib (pystray's Xorg backend); Windows uses ctypes (no dep).
+pystray>=0.19.5
+pyobjc-framework-Cocoa>=10.0 ; sys_platform == "darwin"
+python-xlib>=0.33 ; sys_platform == "linux"

@@ -1,17 +1,20 @@
 # PyInstaller spec for ViralMint OSS — single-bundle desktop build.
 #
-# Builds one .app/.exe that embeds the FastAPI backend, the React SPA, and a
-# vendored ffprobe binary. The entry point (desktop_app.py) starts uvicorn,
-# opens the user's default browser at http://127.0.0.1:16888, and writes
-# user data to ~/ViralMint (or $VIRALMINT_DATA_DIR).
+# Builds one .app/.exe whose entry point is launcher.py: a system-tray app that
+# supervises the FastAPI backend and opens the user's browser at
+# http://127.0.0.1:16888. The bundle embeds the backend, the React SPA and a
+# vendored ffprobe binary. At runtime the tray launcher re-invokes THIS binary
+# with `--run-backend` to run uvicorn in a supervised child process — one binary
+# that plays both roles, with the backend still in its own process so the tray's
+# watchdog can restart it. User data lives in ~/ViralMint (or $VIRALMINT_DATA_DIR).
 #
 # Build with:
 #   bash desktop/scripts/build-app.sh
 # or directly:
 #   pyinstaller desktop/scripts/viralmint.spec --noconfirm --clean
 #
-# This is intentionally simpler than the private desktop installer's two-stage
-# (backend bundle + tray launcher) layout — OSS ships one binary, no tray.
+# Simpler than the private installer's two-stage (separate backend bundle +
+# launcher) layout — OSS ships ONE binary that self-reinvokes via --run-backend.
 
 # ruff: noqa
 import os
@@ -58,6 +61,19 @@ datas += d
 binaries += b
 hiddenimports += h
 
+# Desktop tray launcher — launcher.py is the entry point (below). pystray picks
+# its platform backend via lazy import, so PyInstaller's static analysis misses
+# it; collect every backend. Pillow (the icon renderer) is handled by its own
+# bundled hook. On macOS the Dock-icon + tray backend use pyobjc. tkinter is
+# intentionally NOT bundled — the frozen launcher runs tray-only (see
+# launcher.py __main__), which sidesteps the flaky bundled-Tcl/Tk on macOS.
+hiddenimports += collect_submodules("pystray")
+hiddenimports += [
+    "pystray._darwin", "pystray._win32", "pystray._xorg", "pystray._appindicator",
+]
+if IS_DARWIN:
+    hiddenimports += ["AppKit", "Foundation", "objc"]
+
 # Playwright Python lib only — Chromium browser (~450MB) is NEVER bundled.
 # (OSS doesn't currently use playwright at runtime, but it's a transitive
 # dep of tiktok-uploader, so collect it defensively. Filter out any
@@ -87,8 +103,8 @@ if os.path.exists(_ffprobe_src):
 else:
     print(f"WARN: {_ffprobe_src} not found — falling back to system ffprobe in packaged build")
 
-# Frontend SPA — backend/main.py reads VIRALMINT_FRONTEND_DIST, which
-# desktop_app.py sets to _MEIPASS/frontend/dist at runtime.
+# Frontend SPA — backend/main.py reads VIRALMINT_FRONTEND_DIST, which the
+# launcher's --run-backend child sets to _MEIPASS/frontend/dist at runtime.
 _frontend_dist = os.path.join(PROJECT_ROOT, "frontend", "dist")
 if os.path.isdir(_frontend_dist):
     datas.append((_frontend_dist, "frontend/dist"))
@@ -124,8 +140,8 @@ hiddenimports += collect_submodules("yt_dlp.extractor")
 # messaging channels, models) work in the frozen bundle.
 datas += collect_data_files("backend")
 
-# Tray + window icon (desktop_app.py doesn't use it currently, but the .app
-# bundle's BUNDLE() call below picks it up).
+# Tray icon — launcher.py loads it from _MEIPASS/icon-192.png (ICON_PATH) to
+# draw the system-tray glyph and set the macOS Dock icon.
 _icon_src = os.path.join(PROJECT_ROOT, "frontend", "public", "icon-192.png")
 if os.path.exists(_icon_src):
     datas.append((_icon_src, "."))
@@ -133,7 +149,7 @@ if os.path.exists(_icon_src):
 block_cipher = None
 
 a = Analysis(
-    [os.path.join(PROJECT_ROOT, "desktop_app.py")],
+    [os.path.join(PROJECT_ROOT, "launcher.py")],
     pathex=[PROJECT_ROOT],
     binaries=binaries,
     datas=datas,
