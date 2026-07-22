@@ -42,16 +42,31 @@ case "$OS" in
     ;;
 
   Linux)
-    # johnvansickle.com: canonical static ffmpeg/ffprobe build for Linux x64.
-    URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-    echo "==> Fetching Linux static ffprobe from $URL"
-    curl -fL --retry 3 -o "$VENDOR/ffmpeg-linux.tar.xz" "$URL"
-    tar -xJf "$VENDOR/ffmpeg-linux.tar.xz" -C "$VENDOR"
-    # The tarball unpacks as ffmpeg-<version>-amd64-static/{ffmpeg,ffprobe,…}.
-    # We only want ffprobe — drop the rest.
-    mv "$VENDOR"/ffmpeg-*-amd64-static/ffprobe "$VENDOR/ffprobe"
-    rm -rf "$VENDOR"/ffmpeg-*-amd64-static "$VENDOR/ffmpeg-linux.tar.xz"
+    # Static linux64 ffprobe. Prefer BtbN's GitHub-hosted build (reliable +
+    # UA-agnostic); fall back to johnvansickle.com (the classic mirror, but it
+    # intermittently 4xx's CI runners — a 415 there is what broke the build).
+    # A browser UA avoids the picky-WAF rejections both hosts can throw.
+    UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+    BTBN="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+    JVS="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+    fetched=0
+    for URL in "$BTBN" "$JVS"; do
+      echo "==> Fetching Linux static ffprobe from $URL"
+      if curl -fL --retry 3 --retry-all-errors -A "$UA" -o "$VENDOR/ff.tar.xz" "$URL"; then
+        fetched=1; break
+      fi
+      echo "==> source failed, trying next"
+    done
+    [[ "$fetched" == "1" ]] || { echo "fetch-ffprobe.sh: all Linux ffprobe sources failed" >&2; exit 1; }
+    tar -xJf "$VENDOR/ff.tar.xz" -C "$VENDOR"
+    # Archive layout differs per source (ffmpeg-*-amd64-static/ vs
+    # ffmpeg-*-linux64-gpl/bin/) — locate ffprobe wherever it landed.
+    FF="$(find "$VENDOR" -type f -name ffprobe 2>/dev/null | head -1)"
+    [[ -n "$FF" ]] || { echo "fetch-ffprobe.sh: ffprobe not found in archive" >&2; exit 1; }
+    mv "$FF" "$VENDOR/ffprobe"
     chmod +x "$VENDOR/ffprobe"
+    rm -f "$VENDOR/ff.tar.xz"
+    find "$VENDOR" -maxdepth 1 -type d -name 'ffmpeg-*' -exec rm -rf {} +
     ;;
 
   MINGW*|MSYS*|CYGWIN*)
