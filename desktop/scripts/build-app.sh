@@ -171,10 +171,12 @@ case "$PLATFORM" in
     (cd dist && ditto -c -k --keepParent "ViralMint.app" "$RELEASE_DIR/$ZIP_NAME")
 
     DMG_NAME="ViralMint-${VERSION}-mac.dmg"
+    VOLICON="$REPO_ROOT/desktop/build/icon.icns"   # generated from icon.png above
     if command -v create-dmg >/dev/null 2>&1; then
       echo "==> Building DMG via create-dmg"
       create-dmg \
         --volname "ViralMint" \
+        ${VOLICON:+--volicon "$VOLICON"} \
         --window-size 600 400 \
         --icon-size 100 \
         --icon "ViralMint.app" 150 200 \
@@ -182,12 +184,32 @@ case "$PLATFORM" in
         "$RELEASE_DIR/$DMG_NAME" \
         "$APP_PATH" || true
     else
-      echo "==> Building DMG via hdiutil"
+      echo "==> Building DMG via hdiutil (with ViralMint volume icon)"
       STAGING=$(mktemp -d)
       cp -R "$APP_PATH" "$STAGING/"
       ln -s /Applications "$STAGING/Applications"
+      # Give the mounted installer volume the ViralMint icon: drop
+      # .VolumeIcon.icns at the volume root and set the volume's custom-icon
+      # flag so Finder shows the logo instead of the generic disk icon.
+      if [[ -f "$VOLICON" ]]; then
+        cp "$VOLICON" "$STAGING/.VolumeIcon.icns"
+      fi
+      TMP_DMG="$(mktemp -u).dmg"
       hdiutil create -volname "ViralMint" -srcfolder "$STAGING" \
-        -ov -format UDZO "$RELEASE_DIR/$DMG_NAME"
+        -ov -format UDRW "$TMP_DMG" >/dev/null
+      if [[ -f "$VOLICON" ]]; then
+        MNT="$(mktemp -d)"
+        if hdiutil attach "$TMP_DMG" -nobrowse -noautoopen -mountpoint "$MNT" >/dev/null; then
+          # SetFile (Xcode CLT) marks the volume as having a custom icon.
+          if command -v SetFile >/dev/null 2>&1; then SetFile -a C "$MNT" || true
+          elif xcrun --find SetFile >/dev/null 2>&1; then xcrun SetFile -a C "$MNT" || true
+          fi
+          hdiutil detach "$MNT" >/dev/null 2>&1 || hdiutil detach "$MNT" -force >/dev/null 2>&1 || true
+        fi
+        rm -rf "$MNT"
+      fi
+      hdiutil convert "$TMP_DMG" -format UDZO -o "$RELEASE_DIR/$DMG_NAME" >/dev/null
+      rm -f "$TMP_DMG"
       rm -rf "$STAGING"
     fi
     ;;
