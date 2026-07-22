@@ -32,7 +32,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest ruff
+          # pytest-asyncio is required: pyproject sets asyncio_mode = "auto",
+          # and the suite has many `async def test_*` cases. Without the plugin
+          # pytest reports "async def functions are not natively supported" and
+          # fails them all.
+          pip install pytest pytest-asyncio ruff
 
       - name: Lint with ruff
         run: |
