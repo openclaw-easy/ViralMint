@@ -31,6 +31,8 @@ class StockScene(BaseModel):
 class StockGenerateRequest(BaseModel):
     script: str
     aspect_ratio: str = "9:16"
+    visual_style: Optional[str] = None
+    transition_style: Optional[str] = None
     tts_provider: str = "edge_tts"
     tts_voice: Optional[str] = None
     caption_enabled: bool = True
@@ -91,6 +93,8 @@ async def generate_stock(body: StockGenerateRequest):
         source_id=body.source_id,
         custom_script=body.script,
         aspect_ratio=body.aspect_ratio,
+        visual_style=body.visual_style,
+        transition_style=body.transition_style,
         tts_provider=body.tts_provider,
         tts_voice=body.tts_voice,
         caption_enabled=body.caption_enabled,

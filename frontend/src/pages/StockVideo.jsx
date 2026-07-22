@@ -1,28 +1,34 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { useNavigate } from "react-router-dom"
 import {
-  Box, Typography, Button, Stack, Paper, TextField, Chip,
-  FormControl, InputLabel, Select, MenuItem, ToggleButton, ToggleButtonGroup,
-  Tooltip, Divider,
+  Box, Typography, Button, Stack, TextField, Tooltip, Paper, Chip, Fade,
 } from "@mui/material"
 import PhotoLibraryIcon from "@mui/icons-material/PhotoLibrary"
 import MovieCreationIcon from "@mui/icons-material/MovieCreation"
-import ImageIcon from "@mui/icons-material/Image"
 import FolderOpenIcon from "@mui/icons-material/FolderOpen"
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome"
+import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh"
+import DragHandleIcon from "@mui/icons-material/DragHandle"
 import useAppStore from "../store/appStore"
 import useSettings from "../hooks/useSettings"
 import useRemoteConfig from "../hooks/useRemoteConfig"
 import useScriptGeneration from "../hooks/useScriptGeneration"
 import useSourceVideo from "../hooks/useSourceVideo"
 import http from "../api/http"
+import { glassPanelSx } from "../utils/glassFx"
 
-import ScriptPanel from "../components/create/ScriptPanel"
-import SceneStoryboard from "../components/create/SceneStoryboard"
-import AudioConfig from "../components/create/AudioConfig"
+import PageHero from "../components/PageHero"
+import SampleShowcase from "../components/SampleShowcase"
+import { STYLES, PreviewCanvas } from "../components/create/SmartVideoStyles"
+import { CompactSourcePanel } from "../components/create/SmartVideoPanels"
+import StudioConfigRail from "../components/create/StudioConfigRail"
 import EstimatedCost from "../components/create/EstimatedCost"
-import ImageUpload from "../components/create/ImageUpload"
-import TemplateGallery from "../components/create/TemplateGallery"
 import ActiveJobsBanner from "../components/create/ActiveJobsBanner"
+import TemplateGallery from "../components/create/TemplateGallery"
+import SMART_VIDEO_SAMPLES from "../data/sampleShowcase"
+
+const STYLE_SESSION_KEY = "vm_stock_visual_style"
+const SHOWCASE_OPEN_KEY = "vm_stock_showcase_open"
 
 export default function StockVideo() {
   const navigate = useNavigate()
@@ -33,14 +39,13 @@ export default function StockVideo() {
   const { data: CAPTION_STYLES } = useRemoteConfig("caption_styles")
   const { data: MUSIC_GENRES } = useRemoteConfig("music_genres")
 
-  const { source, sourceLoading, sourceId } = useSourceVideo()
+  const { source, sourceId } = useSourceVideo()
   const {
     script, setScript, scriptInstructions, setScriptInstructions,
-    scriptLoading, scriptGenerated, handleGenerateScript, handlePolishScript,
-    splitIntoScenes,
+    scriptLoading, handleGenerateScript, handlePolishScript,
   } = useScriptGeneration()
 
-  // Config state
+  // ── Config state ────────────────────────────────────────────────
   const [aspectRatio, setAspectRatio] = useState("9:16")
   const [operation, setOperation] = useState("t2v")
   const [startImage, setStartImage] = useState(null)
@@ -49,13 +54,23 @@ export default function StockVideo() {
   const [captionStyle, setCaptionStyle] = useState("viral")
   const [musicEnabled, setMusicEnabled] = useState(true)
   const [musicGenre, setMusicGenre] = useState("lofi")
-
-  // Scenes
-  const [scenes, setScenes] = useState([])
-  const [splitLoading, setSplitLoading] = useState(false)
+  const [visualStyle, setVisualStyle] = useState(() => sessionStorage.getItem(STYLE_SESSION_KEY) || "cinematic")
+  const [transitionStyle, setTransitionStyle] = useState("auto")
   const [generating, setGenerating] = useState(false)
 
-  // Load defaults from settings
+  // Center preview: null → procedural PreviewCanvas; a URL → play that video.
+  const [previewVideoUrl, setPreviewVideoUrl] = useState(null)
+
+  // Resizable script panel (drag its top edge).
+  const [scriptPanelHeight, setScriptPanelHeight] = useState(340)
+  const scriptHeightRef = useRef(340)
+
+  // Left showcase column open/collapsed (persisted).
+  const [showcaseOpen, setShowcaseOpen] = useState(() => sessionStorage.getItem(SHOWCASE_OPEN_KEY) !== "0")
+
+  useEffect(() => { sessionStorage.setItem(STYLE_SESSION_KEY, visualStyle) }, [visualStyle])
+  useEffect(() => { sessionStorage.setItem(SHOWCASE_OPEN_KEY, showcaseOpen ? "1" : "0") }, [showcaseOpen])
+
   useEffect(() => {
     if (settings) {
       setTtsProvider(settings.tts_provider || "edge_tts")
@@ -66,16 +81,44 @@ export default function StockVideo() {
     }
   }, [settings])
 
-  const handleSplitScenes = async () => {
-    setSplitLoading(true)
-    const result = await splitIntoScenes("stock", aspectRatio, sourceId)
-    if (result) {
-      setScenes(result.map(s => ({
-        text: s.text || "",
-        keywords: s.keywords || [],
-      })))
+  const palette = STYLES.find((s) => s.id === visualStyle) || STYLES[0]
+
+  const onScriptResizeStart = (e) => {
+    e.preventDefault()
+    const startY = e.clientY
+    const startH = scriptHeightRef.current
+    const onMove = (ev) => {
+      const dy = startY - ev.clientY // drag up → taller script
+      const h = Math.max(180, Math.min(560, startH + dy))
+      scriptHeightRef.current = h
+      setScriptPanelHeight(h)
     }
-    setSplitLoading(false)
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove)
+      window.removeEventListener("mouseup", onUp)
+    }
+    window.addEventListener("mousemove", onMove)
+    window.addEventListener("mouseup", onUp)
+  }
+
+  const applySample = (s) => {
+    setScript(s.script || "")
+    setScriptInstructions("")
+    const a = s.apply || {}
+    if (a.captionStyle) setCaptionStyle(a.captionStyle)
+    if (a.musicGenre) setMusicGenre(a.musicGenre)
+    if (a.aspectRatio) setAspectRatio(a.aspectRatio)
+    if (a.visualStyle) setVisualStyle(a.visualStyle)
+    setPreviewVideoUrl(null)
+    showSnackbar(`Loaded "${s.label}" — tweak the script or hit Generate`, "success")
+  }
+
+  const handleApplyTemplate = (defaults) => {
+    if (defaults.captionStyle) setCaptionStyle(defaults.captionStyle)
+    if (defaults.musicGenre) setMusicGenre(defaults.musicGenre)
+    if (defaults.aspectRatio) setAspectRatio(defaults.aspectRatio)
+    if (defaults.visualStyle) setVisualStyle(defaults.visualStyle)
+    if (defaults.scriptInstructions) setScriptInstructions(defaults.scriptInstructions)
   }
 
   const handleGenerate = async () => {
@@ -83,12 +126,13 @@ export default function StockVideo() {
       showSnackbar("Please write a script or generate one with AI first", "warning")
       return
     }
-
     setGenerating(true)
     try {
       const body = {
         script: script.trim(),
         aspect_ratio: aspectRatio,
+        visual_style: visualStyle,
+        transition_style: transitionStyle,
         tts_provider: ttsProvider,
         caption_enabled: captionEnabled,
         caption_style: captionEnabled ? captionStyle : undefined,
@@ -96,9 +140,6 @@ export default function StockVideo() {
         music_genre: musicEnabled ? musicGenre : undefined,
         source_id: sourceId || undefined,
         start_image: operation === "i2v" ? startImage : undefined,
-        scenes: scenes.length > 0
-          ? scenes.filter(s => s.text.trim()).map(s => ({ text: s.text, keywords: s.keywords || [] }))
-          : undefined,
       }
       await http.post("/api/generate/stock", body)
       showSnackbar("Stock video generation started!", "success")
@@ -110,207 +151,177 @@ export default function StockVideo() {
     }
   }
 
-  const handleApplyTemplate = (defaults) => {
-    if (defaults.captionStyle) setCaptionStyle(defaults.captionStyle)
-    if (defaults.musicGenre) setMusicGenre(defaults.musicGenre)
-    if (defaults.aspectRatio) setAspectRatio(defaults.aspectRatio)
-    if (defaults.scriptInstructions) setScriptInstructions(defaults.scriptInstructions)
-  }
-
   const audioProps = {
     ttsProvider, setTtsProvider, captionEnabled, setCaptionEnabled,
     captionStyle, setCaptionStyle, musicEnabled, setMusicEnabled, musicGenre, setMusicGenre,
     TTS_PROVIDERS, CAPTION_STYLES, MUSIC_GENRES, script,
   }
 
+  const openFolder = () =>
+    http.post("/api/settings/open-folder", { folder: "generated" })
+      .catch(() => showSnackbar("Could not open folder", "error"))
+
   return (
     <Box sx={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      {/* ── Header ────────────────────────────────────────── */}
-      <Box sx={{
-        px: 3, py: 2, flexShrink: 0,
-        borderBottom: 1, borderColor: "divider",
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        background: (t) => t.palette.mode === "dark"
-          ? "linear-gradient(135deg, rgba(56,142,60,0.10) 0%, rgba(30,28,26,1) 100%)"
-          : "linear-gradient(135deg, rgba(56,142,60,0.07) 0%, rgba(255,255,255,1) 100%)",
-      }}>
-        <Stack direction="row" spacing={1.5} alignItems="center">
-          <PhotoLibraryIcon sx={{ color: "success.main", fontSize: 26 }} />
-          <Box>
-            <Typography variant="h5" sx={{ fontWeight: 700, letterSpacing: -0.3 }}>
-              Stock Video
-            </Typography>
-            <Typography variant="caption" sx={{ color: "text.secondary" }}>
-              Free videos with Pexels stock footage matched to your script
-            </Typography>
-          </Box>
-        </Stack>
-
-        <Stack direction="row" spacing={1} alignItems="center">
-          <Tooltip title="Open generated folder">
-            <Button size="small" variant="outlined" sx={{ minWidth: 0, px: 1 }}
-              onClick={() => http.post("/api/settings/open-folder", { folder: "generated" }).catch(() => showSnackbar("Could not open folder", "error"))}>
-              <FolderOpenIcon fontSize="small" />
+      <PageHero
+        icon={<PhotoLibraryIcon />}
+        title="Smart Video"
+        subtitle="Turn a script into a captioned short — Pexels footage matched to every line"
+        accentColor="#2E9E6B"
+        actions={
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Tooltip title="Open generated folder">
+              <Button size="small" variant="outlined" sx={{ minWidth: 0, px: 1 }} onClick={openFolder}>
+                <FolderOpenIcon fontSize="small" />
+              </Button>
+            </Tooltip>
+            <Button
+              variant="contained" size="medium"
+              disabled={generating || !script?.trim()}
+              onClick={handleGenerate}
+              startIcon={<MovieCreationIcon />}
+              sx={{ borderRadius: 2, fontWeight: 600, textTransform: "none", px: 2.5 }}
+            >
+              {generating ? "Starting…" : "Generate"}
             </Button>
-          </Tooltip>
-          <Button
-            variant="contained" size="medium"
-            disabled={generating || !script?.trim()}
-            onClick={handleGenerate}
-            startIcon={<MovieCreationIcon />}
-            sx={{ borderRadius: 2, fontWeight: 600, textTransform: "none", px: 2.5 }}
-          >
-            {generating ? "Starting..." : "Generate Video"}
-          </Button>
-        </Stack>
-      </Box>
+          </Stack>
+        }
+      />
 
-      {/* ── Active Jobs Progress ─────────────────────────── */}
       <ActiveJobsBanner />
 
-      {/* ── Templates (collapsible strip) ────────────────── */}
-      <Box sx={{ px: 3, pt: 2, pb: 0.5, flexShrink: 0 }}>
+      <Box sx={{ px: 3, pt: 1.5, pb: 0.5, flexShrink: 0 }}>
         <TemplateGallery mode="stock" onApply={handleApplyTemplate} />
       </Box>
 
-      {/* ── 3-Panel Layout ───────────────────────────────── */}
-      <Box sx={{ flex: 1, display: "flex", overflow: "hidden" }}>
+      {/* ── Studio: showcase · preview+script · config rail ─────────── */}
+      <Box sx={{ flex: 1, display: "flex", overflow: "hidden", gap: 0, px: 2, pb: 2, minHeight: 0 }}>
+        {/* Left — sample showcase */}
+        <SampleShowcase
+          samples={SMART_VIDEO_SAMPLES}
+          onUse={applySample}
+          open={showcaseOpen}
+          onToggle={() => setShowcaseOpen((o) => !o)}
+        />
 
-        {/* Left Panel: Script */}
-        <Box sx={{
-          flex: 5, overflow: "auto", p: 2.5,
-          borderRight: 1, borderColor: "divider",
-        }}>
-          <ScriptPanel
-            source={source}
-            script={script} setScript={setScript}
-            scriptInstructions={scriptInstructions} setScriptInstructions={setScriptInstructions}
-            onGenerateScript={() => handleGenerateScript(sourceId, aspectRatio)}
-            onPolishScript={handlePolishScript}
-            scriptLoading={scriptLoading}
-            scriptGenerated={scriptGenerated}
-            sourceId={sourceId}
-            mode="stock"
+        {/* Center — live preview + resizable script */}
+        <Box sx={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, px: 1.5, minHeight: 0 }}>
+          {/* Live preview */}
+          <Box sx={{ flex: 1, minHeight: 120, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+            <Box sx={{
+              position: "relative", height: "100%",
+              aspectRatio: aspectRatio === "9:16" ? "9 / 16" : "16 / 9",
+              maxWidth: "100%", borderRadius: 3, overflow: "hidden",
+              boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+            }}>
+              {previewVideoUrl ? (
+                <video src={previewVideoUrl} autoPlay loop muted playsInline
+                  style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              ) : (
+                <PreviewCanvas
+                  paletteA={palette.cA}
+                  paletteB={palette.cB}
+                  captionText={script || "Your caption animates here"}
+                  aspectRatio={aspectRatio}
+                />
+              )}
+              <Chip
+                size="small"
+                label={palette.label}
+                sx={{ position: "absolute", top: 8, left: 8, bgcolor: "rgba(0,0,0,0.55)", color: "#fff", fontSize: "0.68rem", height: 22 }}
+              />
+            </Box>
+          </Box>
+
+          {/* Drag handle */}
+          <Box
+            onMouseDown={onScriptResizeStart}
+            sx={{
+              height: 14, flexShrink: 0, cursor: "ns-resize", display: "flex",
+              alignItems: "center", justifyContent: "center", color: "text.disabled",
+              "&:hover": { color: "text.secondary" },
+            }}
           >
-            {operation === "i2v" && (
-              <Paper variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 600, color: "text.secondary", mb: 1 }}>
-                  <ImageIcon sx={{ fontSize: 16, verticalAlign: "text-bottom", mr: 0.5 }} />
-                  Input Image
-                </Typography>
-                <ImageUpload label="Image" value={startImage} onChange={setStartImage} onRemove={() => setStartImage(null)} />
-              </Paper>
+            <DragHandleIcon sx={{ fontSize: 18 }} />
+          </Box>
+
+          {/* Script panel */}
+          <Paper elevation={0} sx={(t) => ({
+            ...glassPanelSx(t), height: scriptPanelHeight, minHeight: 180, flexShrink: 0,
+            p: 1.75, borderRadius: 3, display: "flex", flexDirection: "column", position: "relative",
+          })}>
+            {source && (
+              <Box sx={{ mb: 1 }}>
+                <CompactSourcePanel source={source} />
+              </Box>
             )}
-          </ScriptPanel>
+
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1, flexWrap: "wrap", useFlexGap: true, gap: 1 }}>
+              <Button
+                size="small" variant="outlined" startIcon={<AutoAwesomeIcon />}
+                onClick={() => handleGenerateScript(sourceId, aspectRatio)}
+                disabled={scriptLoading}
+                sx={{ textTransform: "none", borderRadius: 2 }}
+              >
+                {scriptLoading ? "Writing…" : "AI script"}
+              </Button>
+              <Button
+                size="small" variant="text" startIcon={<AutoFixHighIcon />}
+                onClick={handlePolishScript}
+                disabled={scriptLoading || !script?.trim()}
+                sx={{ textTransform: "none" }}
+              >
+                Polish
+              </Button>
+              <Box sx={{ flex: 1 }} />
+              <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                {script ? `${script.trim().split(/\s+/).filter(Boolean).length} words` : "empty"}
+              </Typography>
+            </Stack>
+
+            <TextField
+              size="small" fullWidth
+              placeholder="Optional: tell the AI the angle, tone, or audience…"
+              value={scriptInstructions}
+              onChange={(e) => setScriptInstructions(e.target.value)}
+              sx={{ mb: 1 }}
+            />
+
+            <Box sx={{ flex: 1, position: "relative", minHeight: 0 }}>
+              <TextField
+                multiline fullWidth
+                value={script}
+                onChange={(e) => setScript(e.target.value)}
+                placeholder="Write your script here, or hit “AI script” to draft one…"
+                sx={{
+                  height: "100%",
+                  "& .MuiOutlinedInput-root": { height: "100%", alignItems: "flex-start", fontSize: "0.9rem" },
+                  "& textarea": { height: "100% !important", overflow: "auto !important" },
+                }}
+              />
+              <Fade in={scriptLoading}>
+                <Box sx={{
+                  position: "absolute", inset: 0, borderRadius: 1,
+                  bgcolor: "rgba(0,0,0,0.25)", display: "flex", alignItems: "center", justifyContent: "center",
+                  pointerEvents: "none",
+                }}>
+                  <Chip label="Writing your script…" color="primary" />
+                </Box>
+              </Fade>
+            </Box>
+          </Paper>
         </Box>
 
-        {/* Center Panel: Scene Storyboard */}
-        <Box sx={{ flex: 4, overflow: "auto", p: 2.5, borderRight: 1, borderColor: "divider" }}>
-          <SceneStoryboard
-            scenes={scenes}
-            setScenes={setScenes}
-            onSplitScript={handleSplitScenes}
-            splitLoading={splitLoading}
-            maxScenes={12}
-            showSplitButton={!!script?.trim()}
-            emptyMessage="Write a script first, then click 'Split into Scenes' to generate keyword-tagged scenes for stock footage matching."
-            renderCard={(scene, idx, updateScene) => (
-              <StockSceneCard scene={scene} idx={idx} updateScene={updateScene} />
-            )}
-          />
-        </Box>
-
-        {/* Right Panel: Configuration */}
-        <Box sx={{ flex: 3, overflow: "auto", p: 2.5, minWidth: 240 }}>
-          <Typography variant="overline" sx={{ color: "text.secondary", fontWeight: 700, fontSize: "0.65rem", mb: 1.5, display: "block" }}>
-            Configuration
-          </Typography>
-
-          <Stack spacing={1.5}>
-            {/* Operation toggle */}
-            <Typography variant="caption" sx={{ fontWeight: 600, color: "text.secondary" }}>Mode</Typography>
-            <ToggleButtonGroup value={operation} exclusive onChange={(_, v) => v && setOperation(v)} size="small" fullWidth
-              sx={{ "& .MuiToggleButton-root": { textTransform: "none", fontSize: "0.8rem", py: 0.5 } }}>
-              <ToggleButton value="t2v">Script to Video</ToggleButton>
-              <ToggleButton value="i2v"><ImageIcon sx={{ fontSize: 16, mr: 0.5 }} />Image to Video</ToggleButton>
-            </ToggleButtonGroup>
-
-            <Divider />
-
-            <FormControl fullWidth size="small">
-              <InputLabel>Aspect Ratio</InputLabel>
-              <Select value={aspectRatio} onChange={e => setAspectRatio(e.target.value)} label="Aspect Ratio">
-                <MenuItem value="9:16">9:16 — Vertical (TikTok, Shorts)</MenuItem>
-                <MenuItem value="16:9">16:9 — Horizontal (YouTube)</MenuItem>
-              </Select>
-            </FormControl>
-
-            <Divider />
-            <AudioConfig {...audioProps} />
-            <Divider />
-            <EstimatedCost mode="stock" model={null} ttsProvider={ttsProvider} script={script} />
-          </Stack>
-        </Box>
+        {/* Right — config rail */}
+        <StudioConfigRail
+          visualStyle={visualStyle} setVisualStyle={setVisualStyle}
+          aspectRatio={aspectRatio} setAspectRatio={setAspectRatio}
+          operation={operation} setOperation={setOperation}
+          startImage={startImage} setStartImage={setStartImage}
+          transitionStyle={transitionStyle} setTransitionStyle={setTransitionStyle}
+          audioProps={audioProps} ttsProvider={ttsProvider} script={script}
+        />
       </Box>
     </Box>
-  )
-}
-
-/* ── Stock Scene Card ────────────────────────────────────────────── */
-
-function StockSceneCard({ scene, idx, updateScene }) {
-  const [editingKeyword, setEditingKeyword] = useState("")
-
-  const handleAddKeyword = () => {
-    const kw = editingKeyword.trim()
-    if (kw && !(scene.keywords || []).includes(kw)) {
-      updateScene({ keywords: [...(scene.keywords || []), kw] })
-    }
-    setEditingKeyword("")
-  }
-
-  const handleRemoveKeyword = (kw) => {
-    updateScene({ keywords: (scene.keywords || []).filter(k => k !== kw) })
-  }
-
-  const wordCount = scene.text ? scene.text.trim().split(/\s+/).filter(Boolean).length : 0
-  const estSec = wordCount > 0 ? Math.ceil(wordCount / 2.5) : 0
-
-  return (
-    <>
-      <TextField
-        multiline rows={3} fullWidth size="small"
-        value={scene.text}
-        onChange={e => updateScene({ text: e.target.value })}
-        placeholder={`Scene ${idx + 1} narration...`}
-        sx={{ mb: 1, "& .MuiOutlinedInput-root": { fontSize: "0.82rem" } }}
-      />
-      <Box sx={{ mb: 0.75 }}>
-        <Typography variant="caption" sx={{ color: "text.secondary", fontWeight: 600, mb: 0.5, display: "block" }}>
-          Pexels Keywords
-        </Typography>
-        <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ gap: 0.5 }}>
-          {(scene.keywords || []).map(kw => (
-            <Chip key={kw} label={kw} size="small" variant="outlined"
-              onDelete={() => handleRemoveKeyword(kw)}
-              sx={{ fontSize: "0.72rem", height: 24 }} />
-          ))}
-          <TextField
-            size="small" variant="standard"
-            placeholder="+ keyword"
-            value={editingKeyword}
-            onChange={e => setEditingKeyword(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); handleAddKeyword() } }}
-            onBlur={handleAddKeyword}
-            sx={{ width: 80, "& .MuiInput-input": { fontSize: "0.75rem", py: 0.25 } }}
-          />
-        </Stack>
-      </Box>
-      {wordCount > 0 && (
-        <Typography variant="caption" sx={{ color: "text.secondary" }}>
-          ~{estSec}s ({wordCount} words)
-        </Typography>
-      )}
-    </>
   )
 }

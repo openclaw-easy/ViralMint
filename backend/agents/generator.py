@@ -53,6 +53,8 @@ class GeneratorAgent:
         music_genre: str = None,
         custom_script: str = None,
         start_image: str = None,
+        visual_style: str = None,
+        transition_style: str = None,
         **_ignored,  # absorb deprecated kwargs (gen_tier, video_model, operation_type, etc.)
     ):
         """Full generation pipeline."""
@@ -123,6 +125,7 @@ class GeneratorAgent:
             await ws_manager.send_progress(job_id, 35, "Generating video (stock footage)...", user_id)
             video_path = await self._generate_video(
                 script, voice_path, aspect_ratio, user_settings, start_image=start_image,
+                visual_style=visual_style, transition_style=transition_style,
             )
 
             if not video_path:
@@ -497,7 +500,7 @@ class GeneratorAgent:
 
     # ── Video generation ────────────────────────────────────────────────
 
-    async def _generate_video(self, script: str, voice_path: Path, aspect_ratio: str, user_settings, start_image: str = None) -> Path:
+    async def _generate_video(self, script: str, voice_path: Path, aspect_ratio: str, user_settings, start_image: str = None, visual_style: str = None, transition_style: str = None) -> Path:
         """Generate video: Pexels stock footage → Ken Burns image → text fallback."""
         result = None
 
@@ -511,7 +514,7 @@ class GeneratorAgent:
         # Pexels stock footage
         if not result:
             try:
-                result = await generate_stock_video(script, voice_path, aspect_ratio, user_settings)
+                result = await generate_stock_video(script, voice_path, aspect_ratio, user_settings, visual_style=visual_style, transition_style=transition_style)
             except Exception as e:
                 logger.warning(f"Stock video generation failed: {e}")
 

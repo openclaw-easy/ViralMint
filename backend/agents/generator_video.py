@@ -17,7 +17,7 @@ from backend.core.exceptions import GenerationError
 logger = logging.getLogger(__name__)
 
 
-async def generate_stock_video(script: str, voice_path: Path, aspect_ratio: str, user_settings) -> Path:
+async def generate_stock_video(script: str, voice_path: Path, aspect_ratio: str, user_settings, visual_style: str = None, transition_style: str = None) -> Path:
     """Pexels stock footage matched to script keywords."""
     pexels_key = settings.PEXELS_API_KEY
 
@@ -39,6 +39,8 @@ async def generate_stock_video(script: str, voice_path: Path, aspect_ratio: str,
         pexels_api_key=pexels_key,
         aspect_ratio=aspect_ratio,
         ai_client=ai_client,
+        visual_style=visual_style,
+        transition_style=transition_style,
     )
 
 

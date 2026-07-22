@@ -269,6 +269,31 @@ Return JSON array only (no markdown):
     return fallback[:num_scenes]
 
 
+# Visual-style → Pexels footage mood. Appended to each scene query so the
+# selected style actually changes the look of the stock footage that's pulled.
+VISUAL_STYLE_MOODS = {
+    "cinematic": "cinematic film",
+    "vlog": "handheld vlog lifestyle",
+    "card": "moody dark abstract",
+    "educational": "clean bright minimal",
+    "documentary": "documentary realistic",
+    "noir": "black and white noir",
+    "neon": "neon night city",
+    "vintage": "vintage retro film grain",
+}
+
+# Studio transition id → FFmpeg xfade effect (see ffmpeg_service.TRANSITIONS).
+# "auto"/None keep the cinematic default ("dissolve"); "none" hard-cuts.
+TRANSITION_MAP = {
+    "auto": "dissolve",
+    "none": "none",
+    "fade": "fade",
+    "slide": "slideleft",
+    "zoom": "smoothright",
+    "whip": "wiperight",
+}
+
+
 async def build_stock_video(
     script: str,
     voice_path: Path,
@@ -276,6 +301,8 @@ async def build_stock_video(
     aspect_ratio: str = "9:16",
     ai_client=None,
     output_path: Path = None,
+    visual_style: str = None,
+    transition_style: str = None,
 ) -> Path:
     """
     Full stock footage video pipeline:
@@ -314,6 +341,14 @@ async def build_stock_video(
         words = script.split()
         scenes = [{"query": w, "mood": "neutral", "priority": i + 1}
                   for i, w in enumerate(w for w in words if len(w) > 4 and w.isalpha()) if i < 8]
+    # Bias every scene's Pexels query toward the chosen visual style so the
+    # footage that comes back actually matches the look the user picked.
+    mood = VISUAL_STYLE_MOODS.get((visual_style or "").lower())
+    if mood:
+        for s in scenes:
+            q = (s.get("query") or "").strip()
+            s["query"] = f"{q} {mood}".strip()
+
     logger.info(f"Stock video: {len(scenes)} scenes for {voice_duration:.0f}s video: {[s.get('query') for s in scenes]}")
 
     # Step 2: Search clips for all scenes (parallel search, then parallel download)
@@ -431,8 +466,10 @@ async def build_stock_video(
     from backend.services.ffmpeg_service import stitch_clips
 
     stitched = settings.TMP_DIR / "stock_stitched.mp4"
-    # Use fade/dissolve for a cinematic feel (0.8s transitions — smooth, not jarring)
-    stitched = await stitch_clips(clip_paths, stitched, transition="dissolve", transition_duration=0.8)
+    # Transition from the studio's Transitions picker; "auto"/None keeps the
+    # cinematic dissolve default (0.8s — smooth, not jarring).
+    transition = TRANSITION_MAP.get((transition_style or "").lower(), "dissolve")
+    stitched = await stitch_clips(clip_paths, stitched, transition=transition, transition_duration=0.8)
 
     # Step 6: Merge voice audio — use voice duration as the master length
     if voice_path and voice_path.exists():
