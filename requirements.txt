@@ -18,7 +18,7 @@ pydantic-settings==2.14.1
 # Both bumped for httpx 0.28+ compat — older versions pass a `proxies` kwarg
 # that httpx 0.28 removed. neonize transitively requires httpx >=0.28.1, so
 # we can't pin httpx down. Fixed in anthropic 0.39 / openai 1.55.
-anthropic>=0.39.0,<1.0
+anthropic>=0.105.2,<1.0
 openai>=1.109.1,<2.0
 
 # Scout
