@@ -1,0 +1,169 @@
+name: Build Desktop
+
+# Builds the packaged desktop bundle on all three OSes so the desktop/scripts
+# build can't silently rot (it drifted unnoticed for months because nothing
+# exercised it). Each build also boots the FROZEN binary with --run-backend and
+# hits the API, verifying the single-binary self-reinvoke path (Option C) in the
+# real bundle — not just from source.
+#
+# Triggers:
+#   • push tag v*   → full release build, attaches artifacts to a GitHub Release
+#   • workflow_dispatch → manual build (optional version input)
+#   • pull_request touching the build inputs → smoke build (catch breakage early)
+#
+#   git tag v0.1.1 && git push origin v0.1.1
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without leading v (e.g. 0.1.1). Defaults to 0.0.0-dev.'
+        required: false
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - 'launcher.py'
+      - 'run.py'
+      - 'requirements.txt'
+      - 'frontend/package.json'
+      - 'frontend/package-lock.json'
+      - '.github/workflows/build-desktop.yml'
+
+concurrency:
+  # A newer push/dispatch for the same ref supersedes an in-flight build instead
+  # of paying for two full 3-OS runs (macOS minutes bill at 10x).
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # attach artifacts to a GitHub Release on tag builds
+
+env:
+  NODE_VERSION: '20'
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: mac
+            frozen_bin: dist/ViralMint.app/Contents/MacOS/ViralMint
+          - os: ubuntu-22.04
+            platform: linux
+            frozen_bin: dist/ViralMint/ViralMint
+          - os: windows-2022
+            platform: win
+            frozen_bin: dist/ViralMint/ViralMint.exe
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            V="${{ inputs.version }}"
+          else
+            V="0.0.0-dev.${{ github.run_number }}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Building ViralMint $V for ${{ matrix.platform }}"
+
+      - name: Ensure zip is available (Windows)
+        # build-app.sh's Windows branch packages with `zip`, which isn't on the
+        # runner's git-bash by default.
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: choco install zip -y --no-progress
+
+      - name: Build desktop bundle
+        shell: bash
+        env:
+          PYTHON_BIN: python
+          VIRALMINT_VERSION: ${{ steps.ver.outputs.version }}
+        run: bash desktop/scripts/build-app.sh
+
+      - name: Smoke-test the frozen backend (--run-backend)
+        # The bundled binary re-invokes itself with --run-backend to run uvicorn;
+        # boot it directly and confirm the API serves. Skipped on Windows where
+        # background-process management under git-bash is unreliable.
+        if: matrix.platform != 'win'
+        shell: bash
+        run: |
+          set -uo pipefail
+          BIN="${{ matrix.frozen_bin }}"
+          [[ -x "$BIN" ]] || { echo "frozen binary not found at $BIN"; ls -R dist | head -50; exit 1; }
+          export VIRALMINT_DATA_DIR="${RUNNER_TEMP}/vm-smoke"
+          mkdir -p "$VIRALMINT_DATA_DIR"
+          PORT=17999 HOST=127.0.0.1 "$BIN" --run-backend > "${RUNNER_TEMP}/backend.log" 2>&1 &
+          PID=$!
+          ok=0
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:17999/api/jobs >/dev/null 2>&1; then ok=1; break; fi
+            kill -0 "$PID" 2>/dev/null || { echo "backend process exited early"; break; }
+            sleep 1
+          done
+          kill "$PID" 2>/dev/null || true
+          echo "----- backend log -----"; tail -30 "${RUNNER_TEMP}/backend.log" || true
+          [[ "$ok" == "1" ]] || { echo "FROZEN --run-backend did not serve /api/jobs"; exit 1; }
+          echo "OK: frozen --run-backend booted and served the API"
+
+      - name: List artifacts
+        shell: bash
+        run: ls -lh desktop/release
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ViralMint-${{ steps.ver.outputs.version }}-${{ matrix.platform }}
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.zip
+            desktop/release/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: List collected artifacts
+        run: ls -lhR release-artifacts
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release-artifacts/**/*
