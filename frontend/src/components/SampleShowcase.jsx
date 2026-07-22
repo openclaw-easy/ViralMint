@@ -135,15 +135,9 @@ function SampleCard({ sample, onUse }) {
   const showVideo = hasVideo && ready         // footage now covers the gradient
   const q = sample.bgQuery || sample.niche
 
-  // Ask the desktop (→ cloud, key stays server-side) for a real clip to show
-  // behind the caption. No url → keep the procedural gradient.
-  useEffect(() => {
-    let cancelled = false
-    http.get(`/api/showcase/clip?q=${encodeURIComponent(q)}`)
-      .then(({ data }) => { if (!cancelled && data?.url) setClipUrl(data.url) })
-      .catch(() => { /* procedural fallback */ })
-    return () => { cancelled = true }
-  }, [q])
+  // The OSS build has no /api/showcase/clip endpoint, so we always use the
+  // procedural gradient + animated caption (looks like a real ViralMint output)
+  // rather than firing a request that would 404 for every sample on load.
 
   // Show the real footage at rest (not a flat color block), but AUTOPLAY only
   // while the card is on-screen so we never decode all 10 clips at once —
