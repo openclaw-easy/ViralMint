@@ -1512,15 +1512,21 @@ export default function ClipStudio() {
         onExtract={handleExtract}
       />
 
-      {/* Source video preview popup */}
-      <Dialog open={!!previewVideo} onClose={() => setPreviewVideo(null)} maxWidth="md" fullWidth>
-        <DialogContent sx={{ p: 0, bgcolor: "#000", lineHeight: 0 }}>
+      {/* Source video preview popup — video sizes to its natural aspect ratio
+          (capped at 80vw/80vh), NOT stretched to the dialog width. */}
+      <Dialog
+        open={!!previewVideo}
+        onClose={() => setPreviewVideo(null)}
+        maxWidth="md"
+        PaperProps={{ sx: { bgcolor: "#000", width: "auto" } }}
+      >
+        <DialogContent sx={{ p: 0, lineHeight: 0 }}>
           {previewVideo && (
             <Box
               component="video"
               src={`/api/downloaded/${previewVideo.id}/stream`}
               controls autoPlay
-              sx={{ width: "100%", maxHeight: "80vh", display: "block", bgcolor: "#000" }}
+              style={{ display: "block", maxWidth: "80vw", maxHeight: "80vh" }}
             />
           )}
         </DialogContent>
