@@ -9,6 +9,7 @@ import FolderOpenIcon from "@mui/icons-material/FolderOpen"
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome"
 import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh"
 import DragHandleIcon from "@mui/icons-material/DragHandle"
+import ViewModuleIcon from "@mui/icons-material/ViewModule"
 import useAppStore from "../store/appStore"
 import useSettings from "../hooks/useSettings"
 import useRemoteConfig from "../hooks/useRemoteConfig"
@@ -22,9 +23,8 @@ import SampleShowcase from "../components/SampleShowcase"
 import { STYLES, PreviewCanvas } from "../components/create/SmartVideoStyles"
 import { CompactSourcePanel } from "../components/create/SmartVideoPanels"
 import StudioConfigRail from "../components/create/StudioConfigRail"
-import EstimatedCost from "../components/create/EstimatedCost"
 import ActiveJobsBanner from "../components/create/ActiveJobsBanner"
-import TemplateGallery from "../components/create/TemplateGallery"
+import TemplatesDrawer from "../components/create/TemplatesDrawer"
 import SMART_VIDEO_SAMPLES from "../data/sampleShowcase"
 
 const STYLE_SESSION_KEY = "vm_stock_visual_style"
@@ -57,6 +57,7 @@ export default function StockVideo() {
   const [visualStyle, setVisualStyle] = useState(() => sessionStorage.getItem(STYLE_SESSION_KEY) || "cinematic")
   const [transitionStyle, setTransitionStyle] = useState("auto")
   const [generating, setGenerating] = useState(false)
+  const [templatesOpen, setTemplatesOpen] = useState(false)
 
   // Center preview: null → procedural PreviewCanvas; a URL → play that video.
   const [previewVideoUrl, setPreviewVideoUrl] = useState(null)
@@ -170,6 +171,13 @@ export default function StockVideo() {
         accentColor="#2E9E6B"
         actions={
           <Stack direction="row" spacing={1} alignItems="center">
+            <Button
+              size="small" variant="outlined" startIcon={<ViewModuleIcon />}
+              onClick={() => setTemplatesOpen(true)}
+              sx={{ textTransform: "none", borderRadius: 2 }}
+            >
+              Templates
+            </Button>
             <Tooltip title="Open generated folder">
               <Button size="small" variant="outlined" sx={{ minWidth: 0, px: 1 }} onClick={openFolder}>
                 <FolderOpenIcon fontSize="small" />
@@ -189,10 +197,6 @@ export default function StockVideo() {
       />
 
       <ActiveJobsBanner />
-
-      <Box sx={{ px: 3, pt: 1.5, pb: 0.5, flexShrink: 0 }}>
-        <TemplateGallery mode="stock" onApply={handleApplyTemplate} />
-      </Box>
 
       {/* ── Studio: showcase · preview+script · config rail ─────────── */}
       <Box sx={{ flex: 1, display: "flex", overflow: "hidden", gap: 0, px: 2, pb: 2, minHeight: 0 }}>
@@ -322,6 +326,13 @@ export default function StockVideo() {
           audioProps={audioProps} ttsProvider={ttsProvider} script={script}
         />
       </Box>
+
+      <TemplatesDrawer
+        open={templatesOpen}
+        onClose={() => setTemplatesOpen(false)}
+        mode="stock"
+        onApply={handleApplyTemplate}
+      />
     </Box>
   )
 }

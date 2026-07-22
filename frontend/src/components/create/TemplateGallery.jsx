@@ -85,7 +85,8 @@ const TEMPLATE_MAP = {
 
 /* ── Component ─────────────────────────────────────────────────────── */
 
-export default function TemplateGallery({ mode, onApply }) {
+export default function TemplateGallery({ mode, onApply, variant }) {
+  const drawer = variant === "drawer" // render bare (no collapse header, cards wrap) for a right-side drawer
   const [expanded, setExpanded] = useState(true)
   const [selectedId, setSelectedId] = useState(null)
   const [trendingTemplates, setTrendingTemplates] = useState([])
@@ -159,15 +160,18 @@ export default function TemplateGallery({ mode, onApply }) {
 
   return (
     <Paper
-      variant="outlined"
+      variant={drawer ? "elevation" : "outlined"}
+      elevation={0}
       sx={{
-        borderRadius: 2.5,
-        mb: 2.5,
+        borderRadius: drawer ? 0 : 2.5,
+        mb: drawer ? 0 : 2.5,
         overflow: "hidden",
         borderColor: "divider",
+        ...(drawer && { bgcolor: "transparent" }),
       }}
     >
-      {/* Header */}
+      {/* Header (hidden in drawer — the Drawer supplies its own) */}
+      {!drawer && (
       <Box
         onClick={() => setExpanded(!expanded)}
         sx={{
@@ -202,11 +206,12 @@ export default function TemplateGallery({ mode, onApply }) {
           {expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
         </IconButton>
       </Box>
+      )}
 
       {/* Template cards */}
-      <Collapse in={expanded}>
+      <Collapse in={drawer || expanded}>
         <Box sx={{
-          display: "flex", gap: 1.5, p: 2, overflowX: "auto",
+          display: "flex", flexWrap: drawer ? "wrap" : "nowrap", gap: 1.5, p: 2, overflowX: drawer ? "visible" : "auto",
           "&::-webkit-scrollbar": { height: 4 },
           "&::-webkit-scrollbar-thumb": { bgcolor: "divider", borderRadius: 2 },
         }}>
