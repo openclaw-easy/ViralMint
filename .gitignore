@@ -49,6 +49,16 @@ desktop/scripts/vendor/
 desktop/dist/
 desktop/release/
 
+# desktop/build/ holds SOURCE assets for the packaged build. The broad `build/`
+# rule near the top of this file also matches desktop/build/, which silently
+# kept icon.png + the macOS entitlements out of git — so a fresh checkout (CI)
+# had no icon and build-app.sh aborted. Re-include the source inputs here; the
+# generated icon.icns / icon.ico stay ignored as build outputs.
+!desktop/build/
+desktop/build/*
+!desktop/build/icon.png
+!desktop/build/entitlements.mac.plist
+
 # macOS Finder cruft from unzipped archives
 __MACOSX/
 .AppleDouble
