@@ -106,7 +106,7 @@ aiohttp>=3.14.0,<4  # CVE-2026-34993, CVE-2026-47265
 # dependency is the fix; there is nothing to upgrade to.)
 
 # Messaging channels
-python-telegram-bot>=22.0,<23.0
+python-telegram-bot>=22.8,<23.0
 # WhatsApp via neonize (Python bindings to Go's whatsmeow). Optional —
 # the WhatsApp channel reports `installed: false` if neonize isn't installed.
 neonize>=0.3.16
