@@ -82,7 +82,7 @@ imageio-ffmpeg>=0.6.0
 # in backend/main.py went with moviepy — it existed solely because moviepy
 # 1.0.3 used constants Pillow 11 removed. Nothing in the tree, and nothing in
 # a resolved install, references them any more.
-Pillow>=12.2.0,<13.0
+Pillow>=12.3.0,<13.0
 
 # Multi-TTS providers
 edge-tts>=6.1.0
