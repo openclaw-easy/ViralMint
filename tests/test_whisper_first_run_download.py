@@ -205,6 +205,38 @@ class TestNoCallSiteCanGoSilentAgain:
             f"or their first run sits on a frozen step for minutes: {offenders}"
         )
 
+    def test_every_on_download_name_actually_resolves(self):
+        """The `on_download` assertion above is satisfied by a name that is
+        imported in a DIFFERENT branch's scope — which raises NameError only
+        when that path runs, and only on a cold model cache. Caught in CI by
+        ruff F821 rather than here, so pin it here too: every module using the
+        helper must import it somewhere that covers all of its uses."""
+        import ast
+        offenders = []
+        for rel in self.JOB_MODULES:
+            tree = ast.parse(Path(rel).read_text())
+            for fn in ast.walk(tree):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                uses, imports = [], []
+                for node in ast.walk(fn):
+                    if isinstance(node, ast.Name) and node.id == "job_download_notice":
+                        uses.append(node.lineno)
+                    if isinstance(node, ast.ImportFrom) and any(
+                            a.name == "job_download_notice" for a in node.names):
+                        imports.append(node.lineno)
+                # A use with no import at or above it inside this function, and
+                # none at module level, cannot resolve.
+                module_level = "\nfrom backend.services.whisper_service import" in \
+                    "\n".join(Path(rel).read_text().splitlines()[:40])
+                for u in uses:
+                    if not module_level and not any(i < u for i in imports):
+                        offenders.append(f"{rel}:{u} in {fn.name}()")
+        assert not offenders, (
+            "job_download_notice is used where it was never imported — "
+            f"NameError at runtime on a cold model cache: {offenders}"
+        )
+
     def test_nobody_calls_load_directly(self):
         """`load()` on the loop is the freeze. `ensure_model()` is the door."""
         offenders = []

@@ -605,6 +605,7 @@ class AnalyzerAgent:
                 asyncio.run_coroutine_threadsafe(
                     update_job_status(job_id, "running", progress_pct=pct, current_step=step), _loop)
 
+            from backend.services.whisper_service import job_download_notice
             transcript_data = await whisper_service.transcribe(
                 audio_path, quality=whisper_quality, on_progress=_tx_progress,
                 on_download=job_download_notice(job_id, user_id))
