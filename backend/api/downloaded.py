@@ -463,17 +463,31 @@ async def import_local_video(
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_path = dest_dir / f"{file_id}{suffix}"
 
-    # Stream upload to disk (max 2GB)
+    # Stream upload to disk (max 2GB).
+    #
+    # EVERY abnormal exit has to take the partial file with it. Only the
+    # oversize branch used to clean up, but `await file.read()` raises when the
+    # user navigates away or cancels mid-upload — and the DB rows are created
+    # further down, so nothing referenced the bytes. VIDEOS_DIR has no sweeper
+    # (`cleanup_stale` deletes ROWS; it never walks the directory), so three
+    # abandoned 1.5 GB drags cost ~4.5 GB permanently and invisibly.
     MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024
     file_size = 0
-    with open(dest_path, "wb") as f:
-        while chunk := await file.read(1024 * 1024):  # 1MB chunks
-            file_size += len(chunk)
-            if file_size > MAX_UPLOAD_SIZE:
-                f.close()
-                dest_path.unlink(missing_ok=True)
-                raise HTTPException(413, "File too large. Maximum upload size is 2GB.")
-            f.write(chunk)
+    try:
+        with open(dest_path, "wb") as f:
+            while chunk := await file.read(1024 * 1024):  # 1MB chunks
+                file_size += len(chunk)
+                if file_size > MAX_UPLOAD_SIZE:
+                    f.close()
+                    dest_path.unlink(missing_ok=True)
+                    raise HTTPException(413, "File too large. Maximum upload size is 2GB.")
+                f.write(chunk)
+    except BaseException:
+        # BaseException, not Exception: a client disconnect surfaces as anyio's
+        # cancelled-exception class on some stacks, which derives from
+        # BaseException and would otherwise slip straight past.
+        dest_path.unlink(missing_ok=True)
+        raise
 
     # An empty upload is not an import. The size was capped above but never
     # floored, so a zero-byte file became a Library row pointing at zero bytes

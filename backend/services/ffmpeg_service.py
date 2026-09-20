@@ -289,6 +289,34 @@ async def extract_thumbnail(
     return await asyncio.to_thread(_extract)
 
 
+# Wall-clock budget for one clip cut, scaled to the CLIP's length — the work is
+# a full re-encode of `end - start`, so a constant could only ever be right for
+# one clip size. It was a flat 600s: fine for the 15-60s clips the Clipper
+# normally cuts, hopeless for a legitimately long manual range. Manual mode
+# enforces a MINIMUM length and caps the COUNT but never caps the length, so
+# "pull the six interview blocks out of this 6-hour recording" is a valid submit
+# — and it hit the wall on every window, then reported "All N clip extractions
+# failed … may indicate a corrupt source video", the wrong cause, after burning
+# an hour of CPU.
+#
+# Same shape as the caption burn budget and
+# clip_extractor._silence_removal_timeout: the floor keeps today's behaviour for
+# short clips, the factor is generous against observed realtime, and the ceiling
+# is a backstop rather than a budget.
+_CLIP_TIMEOUT_FLOOR_S = 600      # short clips: unchanged behaviour
+_CLIP_SECONDS_PER_SECOND = 4     # generous vs. observed re-encode realtime
+_CLIP_TIMEOUT_CEILING_S = 7200   # 2h backstop
+
+
+def _clip_timeout_for_duration(duration_s: float) -> int:
+    """Seconds to allow for one clip cut. Pure, so it is directly testable."""
+    if not duration_s or duration_s <= 0:
+        return _CLIP_TIMEOUT_FLOOR_S
+    return int(min(_CLIP_TIMEOUT_CEILING_S,
+                   max(_CLIP_TIMEOUT_FLOOR_S,
+                       duration_s * _CLIP_SECONDS_PER_SECOND)))
+
+
 async def extract_clip(
     video_path: Path,
     start: float,
@@ -346,9 +374,15 @@ async def extract_clip(
                 str(output_path),
             ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            budget = _clip_timeout_for_duration(duration)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=budget)
         except subprocess.TimeoutExpired:
-            raise VideoGenerationError(f"Clip extraction timed out after 10 minutes (start={start:.1f}s, end={end:.1f}s)")
+            raise VideoGenerationError(
+                f"Clip extraction timed out after "
+                f"{_clip_timeout_for_duration(duration) // 60} minutes re-encoding "
+                f"a {duration:.0f}s clip (start={start:.1f}s, end={end:.1f}s). "
+                f"Cut it into shorter ranges and retry."
+            )
         if result.returncode != 0:
             raise VideoGenerationError(f"Clip extraction failed: {result.stderr[:500]}")
         if not output_path.exists() or output_path.stat().st_size < 1000:
@@ -1144,6 +1178,11 @@ async def convert_aspect_ratio(
         stem = video_path.stem
         output_path = video_path.parent / f"{stem}_{target_aspect.replace(':', 'x')}_{method}.mp4"
 
+    # This cache check is only safe because the encode below lands via
+    # temp-then-replace. A timed-out or killed pass used to leave a PARTIAL file
+    # at exactly this name, and every later call returned it instantly — for the
+    # export bundle that meant a truncated mp4 persisted as the landscape
+    # version and was served from then on.
     if output_path.exists():
         return output_path
 
@@ -1182,7 +1221,21 @@ async def convert_aspect_ratio(
             "ffmpeg", "-y", "-i", str(video_path),
             filter_flag, vf,
             "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            # yuv420p like every other re-encode in this module. Without it a
+            # 10-bit source exported a file Safari and iOS refuse to play.
+            "-pix_fmt", "yuv420p",
         ]
+        # Encode to a unique temp beside the target, then rename atomically —
+        # the same discipline extract_thumbnail and extract_frame_at use. Two
+        # callers can race the same derived output name, and a partial file at
+        # that name is permanent (see the cache check above).
+        tmp_path = output_path.with_name(
+            f"{output_path.stem}.{uuid4().hex[:8]}.part{output_path.suffix}"
+        )
+        # Scaled to the SOURCE length for the same reason extract_clip is: this
+        # is a full re-encode, and 300s was a constant sized for short clips, so
+        # a 12-minute export hit the wall and left its partial behind.
+        budget = _clip_timeout_for_duration(probe_duration(video_path, 0.0))
         # Audio is untouched by an aspect conversion — copy it instead of
         # paying a 128k AAC generation every pass. Chained tools stack these:
         # reframe → captions → watermark used to re-encode the same voice
@@ -1192,16 +1245,31 @@ async def convert_aspect_ratio(
         last_err = ""
         for label, aargs in (("copy", ["-c:a", "copy"]),
                              ("re-encode", ["-c:a", "aac", "-b:a", "128k"])):
-            result = subprocess.run(common + aargs + [str(output_path)],
-                                    capture_output=True, text=True, timeout=300)
+            try:
+                result = subprocess.run(common + aargs + [str(tmp_path)],
+                                        capture_output=True, text=True, timeout=budget)
+            except BaseException:
+                # Including a timeout, which used to escape this function
+                # leaving the partial file at the CACHED name.
+                tmp_path.unlink(missing_ok=True)
+                raise
             if result.returncode == 0:
+                # Exit 0 is not proof of an artifact — the sibling cutters in
+                # this module all size-check before handing a path back.
+                size = tmp_path.stat().st_size if tmp_path.exists() else 0
+                if size < 1000:
+                    tmp_path.unlink(missing_ok=True)
+                    raise VideoGenerationError(
+                        f"FFmpeg aspect conversion exited 0 but produced {size} bytes"
+                    )
+                tmp_path.replace(output_path)
                 return output_path
             last_err = result.stderr[-500:]
             logger.warning("Aspect conversion (%s audio) failed: %s", label, last_err[:200])
-            # A failed pass leaves a partial file behind; drop it so the next
+            # A failed pass leaves a partial temp behind; drop it so the next
             # attempt isn't fooled by it and a failure can't look like a result.
             try:
-                output_path.unlink(missing_ok=True)
+                tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
         logger.error(f"Aspect ratio conversion failed: {last_err}")

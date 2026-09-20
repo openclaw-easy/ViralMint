@@ -15,6 +15,7 @@ method, so the UI produced the identical file.
 The last test is the app-wide lock: "scale until it fits inside the frame" may
 only appear where we decided it should, and every such place is narrowing-only.
 """
+import pathlib
 from pathlib import Path
 
 import pytest
@@ -86,7 +87,11 @@ async def test_auto_resolves_the_method_before_ffmpeg_sees_it(tmp_path, monkeypa
         class _R:
             returncode = 0
             stderr = ""
-        (tmp_path / "out.mp4").write_bytes(b"x")
+        # Write where ffmpeg was TOLD to write: the conversion encodes to a
+        # temp file and renames, so a stub that writes the final name directly
+        # leaves the temp empty and the size check rejects the pass. ≥1KB
+        # because an exit-0 pass that produced nothing is treated as a failure.
+        pathlib.Path(cmd[-1]).write_bytes(b"x" * 2048)
         return _R()
 
     monkeypatch.setattr(ffmpeg_service, "_probe_dimensions", fake_probe)
@@ -119,6 +124,9 @@ async def test_auto_still_blur_fills_the_core_short_form_path(tmp_path, monkeypa
         class _R:
             returncode = 0
             stderr = ""
+        # Same reason as above: write where ffmpeg was told to, and enough
+        # bytes that the pass is not treated as an empty encode.
+        pathlib.Path(cmd[-1]).write_bytes(b"x" * 2048)
         return _R()
 
     monkeypatch.setattr(ffmpeg_service, "_probe_dimensions", fake_probe)

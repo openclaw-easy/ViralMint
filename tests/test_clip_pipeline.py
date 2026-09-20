@@ -211,7 +211,9 @@ class TestSilenceRemovalPhase:
     def test_it_runs_per_clip_when_enabled(self, video, ffmpeg, monkeypatch):
         seen = []
 
-        async def fake_desilence(clip_path, segs):
+        # Signature must match the real one — the pipeline's soft fallback
+        # swallows a TypeError, so a stale stub reads as "never called".
+        async def fake_desilence(clip_path, segs, warn_user_id=None):
             seen.append(Path(clip_path))
             return Path(clip_path), segs
         monkeypatch.setattr(CE, "_remove_silence_and_fillers", fake_desilence)

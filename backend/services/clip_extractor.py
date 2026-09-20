@@ -2085,7 +2085,8 @@ async def _process_clips_parallel(
                 continue
             clip_segs = _filter_and_offset_segments(segments, window["start"], window["end"])
             try:
-                cleaned_path, cleaned_segs = await _remove_silence_and_fillers(clip_path, clip_segs)
+                cleaned_path, cleaned_segs = await _remove_silence_and_fillers(
+                    clip_path, clip_segs, warn_user_id=user_id)
                 cleaned_paths.append(cleaned_path)
                 cleaned_segments_list.append(cleaned_segs)
             except Exception as e:
@@ -2427,6 +2428,11 @@ SILENCE_TIMEOUT_FLOOR_S = 300
 SILENCE_TIMEOUT_CEILING_S = 1800
 SILENCE_TIMEOUT_REALTIME_FACTOR = 6
 
+# Below this share of the clip surviving, the trim has changed the artifact
+# enough that the user needs to hear about it. 0.5 is a judgement call, not a
+# measurement — tune it freely; nothing branches on it but the warning.
+DRASTIC_TRIM_KEEP_RATIO = 0.5
+
 
 def _silence_removal_timeout(duration_s: float) -> int:
     """ffmpeg wall-clock budget for a select/aselect pass over `duration_s`."""
@@ -2454,7 +2460,9 @@ def _has_video_stream(path: Path) -> bool:
         return True
 
 
-async def _remove_silence_and_fillers(clip_path: Path, segments: list[dict]) -> tuple[Path, list[dict]]:
+async def _remove_silence_and_fillers(
+    clip_path: Path, segments: list[dict], warn_user_id: str | None = None,
+) -> tuple[Path, list[dict]]:
     """
     Remove silent gaps and filler words from a clip using FFmpeg select/aselect filters.
     Returns (new_clip_path, adjusted_segments) with re-timed word timestamps.
@@ -2606,6 +2614,37 @@ async def _remove_silence_and_fillers(clip_path: Path, segments: list[dict]) -> 
         pass
 
     logger.info(f"Silence removal: {original_duration:.1f}s → {kept_duration:.1f}s (removed {removed_duration:.1f}s)")
+
+    # Rule #14: a DRASTIC trim is a known degradation, so say so.
+    #
+    # `select` keeps only the speech ranges, with no upper bound on what it
+    # discards — and Whisper emits no words for music, effects or room tone. So
+    # a clip whose middle carries no speech can come back a fraction of its
+    # length, with the job reporting success and a log line for a receipt. The
+    # user asked for silence removal, so we still DO it; what was missing is
+    # telling them how much went.
+    #
+    # Measured against the PROBED length, not `original_duration` (the last
+    # word's end) — that is exactly the quantity that hides a long non-speech
+    # tail. Deliberately a warning and not a new skip: raising the existing
+    # `removed_duration < 0.5` guard to use the probed length would make a clip
+    # with speech only at the start collapse instead of being left alone, which
+    # is the bug this exists to surface.
+    if warn_user_id and source_duration > 0:
+        if (kept_duration / source_duration) < DRASTIC_TRIM_KEEP_RATIO:
+            await ws_manager.send_constraint_warning(
+                constraint="silence_removal_drastic",
+                message=(
+                    f"Removing silence cut this clip from {source_duration:.0f}s "
+                    f"to about {kept_duration:.0f}s — most of it carried no "
+                    f"detected speech (music, effects or room tone). The clip is "
+                    f'still saved; turn off "Trim silence" if you wanted the '
+                    f"full length."
+                ),
+                severity="warning",
+                user_id=warn_user_id,
+            )
+
     return output_path, adjusted_segments
 
 
