@@ -1849,8 +1849,19 @@ async def run_tool_auto_zoom(
                 in_path, words, output_path=out_path,
                 zoom_factor=float(zoom_factor), words_per_group=int(words_per_group),
             )
+            # apply_auto_zoom hands back the SOURCE only when no usable word
+            # group survived its own filtering; an ffmpeg failure now RAISES
+            # (before, it returned the source and this branch reported a
+            # byte-identical copy as a successful zoom).
             if result_path != out_path and not out_path.exists():
+                noop = True
                 await asyncio.to_thread(shutil.copy2, str(in_path), str(out_path))
+                await ws_manager.send_constraint_warning(
+                    constraint="auto_zoom_noop",
+                    message="No usable word timings — returned unchanged (zoom pulses need spoken words).",
+                    severity="info",
+                    user_id=user_id,
+                )
 
         await _tool_success(job_id, out_path, cleanup, user_id)
         logger.info("TASK DONE  tool:auto_zoom | job=%s words=%d noop=%s", job_id[:8], len(words), noop)

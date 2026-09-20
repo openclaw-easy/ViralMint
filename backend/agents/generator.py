@@ -172,11 +172,29 @@ class GeneratorAgent:
 
             # Step 7: Burn animated captions (75%)
             if segments and opts["caption_enabled"]:
+                # burn_captions returns its INPUT on failure (missing libass, an
+                # ffmpeg error, a zero-byte write) — so an unchanged path IS the
+                # failure signal. The video still ships, but the user asked for
+                # captions, so the least this owes them is to say they are
+                # missing (rule #14) instead of leaving it in a log file.
+                before_captions = str(video_path)
                 try:
                     await ws_manager.send_progress(job_id, 75, f"Burning {opts['caption_style']} captions...", user_id)
                     video_path = await self._burn_captions(video_path, segments, aspect_ratio, opts)
+                    if str(video_path) == before_captions:
+                        await ws_manager.send_constraint_warning(
+                            "captions_failed",
+                            "Captions could not be burned — the video was saved WITHOUT "
+                            "captions (the ffmpeg error is in the backend log).",
+                            severity="warning", user_id=user_id,
+                        )
                 except Exception as e:
                     logger.warning(f"Caption burn failed, saving video without captions: {e}")
+                    await ws_manager.send_constraint_warning(
+                        "captions_failed",
+                        f"Captions could not be burned — the video was saved WITHOUT captions ({str(e)[:160]}).",
+                        severity="warning", user_id=user_id,
+                    )
 
             # Step 7b: Apply auto-zoom on highlighted words (80%)
             if segments and opts.get("auto_zoom_enabled", False):
@@ -193,6 +211,11 @@ class GeneratorAgent:
                         )
                 except Exception as e:
                     logger.warning(f"Auto-zoom failed, saving video without zoom: {e}")
+                    await ws_manager.send_constraint_warning(
+                        "auto_zoom_failed",
+                        f"Auto-zoom failed — the video was saved without zoom pulses ({str(e)[:160]}).",
+                        severity="warning", user_id=user_id,
+                    )
 
             # Step 8: Generate metadata (85%)
             metadata = {"youtube": {}, "tiktok": {}}

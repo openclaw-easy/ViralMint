@@ -372,15 +372,20 @@ class TestApplyAutoZoom:
                {"text": "y", "start": "nope", "end": 2}]
         assert await fs.apply_auto_zoom(vid, bad) == vid
 
-    async def test_builds_crop_scale_filter(self, monkeypatch, tmp_path):
+    async def test_builds_animated_scale_then_fixed_crop(self, monkeypatch, tmp_path):
+        """An animated crop SIZE could never work — ffmpeg evaluates crop's w/h
+        once at init, where `t` is NaN — and the unquoted between() commas split
+        the graph. The filter is now an eval=frame scale into a fixed crop; see
+        tests/test_auto_zoom_filtergraph.py for the parse proof."""
         calls = _patch_run(monkeypatch, probe_out="1080,1920,30/1")
         words = [{"text": w, "start": i * 0.5, "end": i * 0.5 + 0.4}
                  for i, w in enumerate(["a", "b", "c", "d", "e", "f"])]
         out = await fs.apply_auto_zoom(tmp_path / "v.mp4", words, words_per_group=3)
         cmd = calls[-1]
         vf = cmd[cmd.index("-vf") + 1]
-        assert vf.startswith("crop=w=")
-        assert "scale=1080:1920:flags=lanczos" in vf
+        assert vf.startswith("scale=w=")
+        assert "eval=frame" in vf
+        assert vf.endswith("crop=1080:1920")
         assert "sin(PI*" in vf  # sine-pulse zoom expression
         assert out == tmp_path / "v_zoomed.mp4"
 
@@ -400,11 +405,14 @@ class TestApplyAutoZoom:
         assert out == tmp_path / "v_zoomed.mp4"
         assert "1080" in calls[-1][calls[-1].index("-vf") + 1]
 
-    async def test_ffmpeg_failure_returns_original(self, monkeypatch, tmp_path):
+    async def test_ffmpeg_failure_raises_instead_of_returning_the_original(
+            self, monkeypatch, tmp_path):
+        """Handing back the input made every caller report a byte-identical
+        copy of the source as a finished zoom."""
         _patch_run(monkeypatch, probe_out="1080,1920,30/1", ffmpeg_rc=1)
-        vid = tmp_path / "v.mp4"
         words = [{"text": "a", "start": 0.0, "end": 1.0}]
-        assert await fs.apply_auto_zoom(vid, words) == vid
+        with pytest.raises(VideoGenerationError):
+            await fs.apply_auto_zoom(tmp_path / "v.mp4", words)
 
 
 # ── generate_text_video ──────────────────────────────────────────────────────

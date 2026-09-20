@@ -934,8 +934,7 @@ async def apply_auto_zoom(
         try:
             probe = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
         except subprocess.TimeoutExpired:
-            logger.warning("ffprobe timed out for auto-zoom, returning original")
-            return video_path
+            raise VideoGenerationError("ffprobe timed out while preparing auto-zoom")
         try:
             parts = probe.stdout.strip().split(",")
             vid_w, vid_h = int(parts[0]), int(parts[1])
@@ -1014,18 +1013,7 @@ async def apply_auto_zoom(
             return video_path
 
         zoom_expr = "1+" + "+".join(zoom_parts)
-
-        # Crop dimensions: crop to (w/z, h/z) centered, then scale back to original
-        # crop=w/z:h/z:(w-w/z)/2:(h-h/z)/2, scale=w:h
-        crop_w = f"{vid_w}/({zoom_expr})"
-        crop_h = f"{vid_h}/({zoom_expr})"
-        crop_x = f"({vid_w}-{crop_w})/2"
-        crop_y = f"({vid_h}-{crop_h})/2"
-
-        vf = (
-            f"crop=w={crop_w}:h={crop_h}:x={crop_x}:y={crop_y},"
-            f"scale={vid_w}:{vid_h}:flags=lanczos"
-        )
+        vf = auto_zoom_vf(vid_w, vid_h, zoom_expr)
 
         cmd = [
             "ffmpeg", "-y",
@@ -1038,14 +1026,40 @@ async def apply_auto_zoom(
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         except subprocess.TimeoutExpired:
-            logger.warning("Auto-zoom FFmpeg timed out after 600s, returning original")
-            return video_path
+            raise VideoGenerationError("Auto-zoom FFmpeg timed out after 600s")
         if result.returncode != 0:
-            logger.warning(f"Auto-zoom failed, returning original: {result.stderr[:400]}")
-            return video_path
+            # RAISE rather than hand back the input: every caller treated the
+            # returned path as a finished result, so while the filtergraph
+            # below could not parse at all, every auto-zoom "succeeded" with a
+            # byte-identical copy of the source.
+            raise VideoGenerationError(f"Auto-zoom FFmpeg failed: {ffmpeg_error(result.stderr)}")
         return output_path
 
     return await asyncio.to_thread(_run)
+
+
+def auto_zoom_vf(vid_w: int, vid_h: int, zoom_expr: str) -> str:
+    """The auto-zoom filtergraph, as a pure function so a test can pin it.
+
+    Two things the previous form got wrong, each fatal on its own:
+
+    1. `zoom_expr` contains `between(t,a,b)`, whose COMMAS are filtergraph
+       separators unless the option value is quoted. ffmpeg split the graph
+       mid-expression and failed with "No option name near
+       '.../(1+0.15*sin(PI*(t-0.000)/1.000)*between(t'" on every single input.
+    2. It animated `crop`'s w/h, and ffmpeg evaluates those ONCE at filter
+       init, where `t` is NaN — a time-varying crop SIZE can never work.
+
+    `scale` with `eval=frame` re-evaluates its size per frame (where `t` is
+    defined), and a fixed centred `crop` at the source size brings the frame
+    back to its original dimensions. `trunc(.../2)*2` keeps both sides even at
+    every zoom level, which yuv420p requires.
+    """
+    z = f"({zoom_expr})"
+    return (
+        f"scale=w='trunc({vid_w}*{z}/2)*2':h='trunc({vid_h}*{z}/2)*2':eval=frame,"
+        f"crop={vid_w}:{vid_h}"
+    )
 
 
 ASPECT_DIMS = {
