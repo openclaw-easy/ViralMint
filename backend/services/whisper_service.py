@@ -66,7 +66,30 @@ _SERIALIZE_MIN_SECONDS = 120.0
 # poller, and maps a failed fetch to a typed, user-readable error instead of a
 # raw huggingface_hub traceback.
 _download_state: dict[str, dict] = {}   # quality -> {"downloading": bool, "error": str|None}
-_ensure_locks: dict[str, asyncio.Lock] = {}
+# Keyed by (event loop, quality), NOT by quality alone. An asyncio.Lock binds
+# itself to the loop that first awaits it, so one module-level lock reused from
+# a second loop either raises "is bound to a different event loop" or waits
+# forever on a lock no live loop can release. The packaged app runs one loop —
+# but the boot sweep, a helper spawned in a thread and every test bring their
+# own, and this only bites where the weights are ABSENT, because a cached model
+# returns before the lock is taken. That is CI and a first-run user.
+#
+# The key holds the loop OBJECT, not its id: ids are recycled the moment a dead
+# loop is collected, which would hand a new loop the old loop's lock. The dict
+# is pruned to the live loop on every miss, so the strong reference costs one
+# entry.
+_ensure_locks: dict[tuple[object, str], asyncio.Lock] = {}
+
+
+def _ensure_lock(quality: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    key = (loop, quality)
+    lock = _ensure_locks.get(key)
+    if lock is None:
+        for stale in [k for k in _ensure_locks if k[0] is not loop]:
+            _ensure_locks.pop(stale, None)
+        lock = _ensure_locks[key] = asyncio.Lock()
+    return lock
 
 
 def download_state(quality: str) -> dict:
@@ -225,7 +248,7 @@ class WhisperService:
         except Exception:
             logger.debug("whisper on_download notice raised", exc_info=True)
 
-        lock = _ensure_locks.setdefault(quality, asyncio.Lock())
+        lock = _ensure_lock(quality)
         async with lock:
             # Re-check: we may have just waited out another caller's download.
             if cls.is_model_cached(quality):

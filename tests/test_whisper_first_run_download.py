@@ -135,6 +135,62 @@ class TestTheLoopKeepsRunning:
         assert beats > 5, f"the loop was blocked during the load ({beats} beats)"
 
 
+class TestTheLockIsNotSharedAcrossLoops:
+    """An `asyncio.Lock` binds to the loop that first awaits it, so a
+    module-level one raises "is bound to a different event loop" the moment a
+    second loop uses it. The packaged app runs one loop — but the boot sweep, a
+    helper spawned in a thread and every test bring their own.
+
+    This could ONLY fail where the weights are absent, because a cached model
+    returns before the lock is ever taken. That is CI and a first-run user, and
+    not a developer machine — which is exactly why it reached CI.
+    """
+
+    def test_two_loops_can_each_ensure_the_same_quality(self):
+        import asyncio as aio
+
+        async def once():
+            with patch.object(WhisperService, "is_model_cached", return_value=False), \
+                 patch.object(WhisperService, "load", staticmethod(lambda q: MagicMock())), \
+                 patch("backend.core.ws_manager.ws_manager.send_constraint_warning",
+                       new=AsyncMock()):
+                await WhisperService.ensure_model("balanced")
+
+        # Two separate loops, as the suite and the app both produce.
+        aio.run(once())
+        aio.run(once())          # raised RuntimeError before the per-loop key
+
+    def test_each_loop_gets_its_own_lock_object(self):
+        """The invariant, asserted directly. Sharing one Lock across loops
+        either raises "bound to a different event loop" (3.11, which is what CI
+        reported) or hangs forever waiting on a lock no live loop can release —
+        both fatal, both invisible on a machine where the weights are cached."""
+        import asyncio as aio
+        seen = []          # keep REFERENCES: ids get reused after GC
+
+        async def grab():
+            from backend.services.whisper_service import _ensure_lock
+            seen.append(_ensure_lock("balanced"))
+
+        aio.run(grab())
+        aio.run(grab())
+        assert seen[0] is not seen[1], "the same Lock object was handed to two loops"
+
+    def test_stale_loops_do_not_accumulate(self):
+        import asyncio as aio
+
+        async def once():
+            with patch.object(WhisperService, "is_model_cached", return_value=False), \
+                 patch.object(WhisperService, "load", staticmethod(lambda q: MagicMock())), \
+                 patch("backend.core.ws_manager.ws_manager.send_constraint_warning",
+                       new=AsyncMock()):
+                await WhisperService.ensure_model("balanced")
+
+        for _ in range(5):
+            aio.run(once())
+        assert len(ws._ensure_locks) <= 1, ws._ensure_locks
+
+
 class TestFailureIsTypedAndReadable:
     async def test_a_failed_fetch_raises_the_typed_error(self):
         def _boom(quality):
