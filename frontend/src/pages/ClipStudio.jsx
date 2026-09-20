@@ -564,8 +564,10 @@ export default function ClipStudio() {
           : "Extracting viral clips — AI will find the best moments",
         "success",
       )
+      return true
     } catch (e) {
       showSnackbar(`Extract failed: ${e.response?.data?.detail || e.message}`, "error")
+      return false
     } finally {
       setExtracting(false)
     }
@@ -575,11 +577,17 @@ export default function ClipStudio() {
      because its button is in the hero — see benchRanges above. */
   const doCut = async () => {
     if (!benchSource || !cutCount || extracting || clipJobRunning) return
-    await handleExtract(benchSource.id, {
+    const ok = await handleExtract(benchSource.id, {
       ...clipSettings.toPayload({ hasTranscript: !!benchSource.has_transcript_segments }),
       mode: "manual",
       time_ranges: benchRanges.ranges.map(({ start, end }) => ({ start, end })),
     })
+    // Spent ranges must not stay armed. The button re-enables the moment the
+    // job finishes and it re-rendered the SAME "Cut N clips" over the SAME
+    // blocks, so a second click re-cut clips the user already had. (The ghost
+    // lane drew them, but nothing stopped the cut.) Only on success: a failed
+    // submit should leave the user's work intact so they can fix it and retry.
+    if (ok) benchRanges.clear()
   }
 
   const handleUpload = async (platform) => {

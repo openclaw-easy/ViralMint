@@ -113,6 +113,10 @@ class TestBuildManualClipWindows:
         assert windows[0] == {
             "start": 18.0, "end": 38.0,
             "title": "Tesla Q4 earnings — clip 1",
+            # Provenance: a hand-picked range must not reach the Library
+            # labelled as an AI pick, which is what the downstream default
+            # ("ai") made of an untagged window.
+            "selection": "manual",
             "hook": "", "reason": "",
         }
         assert windows[1]["title"] == "Tesla Q4 earnings — clip 2"

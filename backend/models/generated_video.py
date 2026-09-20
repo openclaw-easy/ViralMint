@@ -49,6 +49,12 @@ class GeneratedVideo(Base):
     clip_score_breakdown_json = Column(Text, nullable=True) # JSON: {flow, value, trend, shareability} each 1-10 — vidiq-style sub-scores behind the virality_score. Hook lives on clip_hook_score so it's not duplicated here.
     caption_status = Column(String(20), nullable=True)      # "applied" | "skipped" (caption_style="none") | "no_segments" (silent clip) | "failed" | "extract_failed" | null
     metadata_status = Column(String(20), nullable=True)     # "ai_generated" | "fallback" | null
+    # Where this clip's window came from: "ai" (the viral picker chose it) |
+    # "manual" (a bench cut or an explicit time range) | "duration_fallback"
+    # (the picker found nothing, so the run cut evenly-spaced time slices).
+    # NULL on rows that predate the column. A job-level count cannot say WHICH
+    # clips to distrust; this can.
+    clip_selection = Column(String(20), nullable=True)
 
     # Upload tracking
     youtube_video_id = Column(String(50), nullable=True)

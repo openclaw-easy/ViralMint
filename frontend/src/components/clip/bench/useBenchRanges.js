@@ -248,6 +248,29 @@ export default function useBenchRanges(sourceId, duration) {
   const update = useCallback((id, patch) => {
     setRanges((prev) => prev.map((r) => {
       if (r.id !== id) return r
+
+      // The free gap around this block. `add`/`addAt`/`addMany` each refuse to
+      // stack — manual mode cuts VERBATIM, so two blocks over the same seconds
+      // are two near-identical clips — but `update`, which is what a resize
+      // drag, a whole-block move AND the rail's editable timecodes all call,
+      // only clamped to [0, duration] and never looked at the other blocks. So
+      // dragging one block onto its neighbour, or typing an overlapping time,
+      // stacked them and the backend cut both.
+      //
+      // Bounded by the gap rather than refused, per this function's own rule: a
+      // handle that stops moving reads as a stuck UI, while a handle that parks
+      // against its neighbour reads as a floor. Ranges never overlap (that is
+      // the invariant), so every other block sits wholly left or wholly right
+      // of where this one currently is, and its ORIGINAL bounds decide which —
+      // which keeps the limits stable for the whole drag.
+      let lo = 0
+      let hi = duration
+      for (const o of prev) {
+        if (o.id === id) continue
+        if (o.end <= r.start + 1e-6) lo = Math.max(lo, o.end)
+        else if (o.start >= r.end - 1e-6) hi = Math.min(hi, o.start)
+      }
+
       let start = patch.start != null ? patch.start : r.start
       let end = patch.end != null ? patch.end : r.end
       const len = end - start
@@ -255,14 +278,22 @@ export default function useBenchRanges(sourceId, duration) {
         // Whole-block move: preserve length while sliding into bounds,
         // so dragging a block off the edge parks it rather than squashing it.
         const span = r.end - r.start
-        start = clamp(start, 0, Math.max(0, duration - span))
+        // Park against the neighbour instead of sliding over it. If the gap
+        // somehow cannot hold the block, leave it where it was rather than
+        // emitting an overlap.
+        if (hi - lo < span) return r
+        start = clamp(start, lo, hi - span)
         end = start + span
       } else {
-        start = clamp(start, 0, duration)
-        end = clamp(end, 0, duration)
+        start = clamp(start, lo, hi)
+        end = clamp(end, lo, hi)
         if (end - start < MIN_LEN_SEC) {
-          if (patch.start != null && patch.end == null) start = Math.max(0, end - MIN_LEN_SEC)
-          else end = Math.min(duration, start + MIN_LEN_SEC)
+          // Grow within the gap, and only in the direction that still fits —
+          // otherwise a resize at a tight boundary would push past a neighbour
+          // just to satisfy the minimum length.
+          if (patch.start != null && patch.end == null) start = Math.max(lo, end - MIN_LEN_SEC)
+          else end = Math.min(hi, start + MIN_LEN_SEC)
+          if (end - start < MIN_LEN_SEC) return r
         }
       }
       return { ...r, start: round3(start), end: round3(end) }

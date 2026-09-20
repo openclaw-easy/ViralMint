@@ -114,6 +114,28 @@ async def update_job_status(
         # predecessor's final "success" still lands over the sweep's "failed".
         if job.status in _TERMINAL and status not in _TERMINAL:
             return
+        # ...with ONE exception: a user's cancel must never become "success".
+        # Cancellation is cooperative (DELETE /api/jobs/{id} only flips the
+        # row), so a runner that polls `job_cancelled()` too late — or, as the
+        # download family did, not at all — reaches its unconditional terminal
+        # write and turns the user's "cancelled" back into "success", complete
+        # with a job_complete event and a completion notification. That is what
+        # made cancelling a download look like it had done nothing.
+        #
+        # Scoped deliberately narrow. failed→success still lands, because
+        # database.sweep_stale_jobs depends on exactly that to self-heal a
+        # mis-swept job whose draining predecessor later finishes; and
+        # cancelled→failed still lands, so a job that cancels and then errors
+        # is not silently "clean". Only the transition that contradicts the
+        # user is refused. The per-runner polls remain the primary mechanism —
+        # they also stop the work — and this is the backstop for runners that
+        # forget.
+        if job.status == "cancelled" and status == "success":
+            logger.info(
+                "Refusing to overwrite cancelled job %s with success — "
+                "the user cancelled it (job_type=%s)", job_id[:8], job.job_type,
+            )
+            return
         prev_status = job.status
         job.status = status
         # Heartbeat: touch on EVERY accepted update, even when no other column

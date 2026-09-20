@@ -113,7 +113,7 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
     wanted on disk is minutes of work nobody asked for — Library can analyze
     on demand."""
     logger.info("TASK START batch_download | job=%s count=%d", job_id[:8], len(urls))
-    from backend.agents.job_helper import update_job_status
+    from backend.agents.job_helper import update_job_status, job_cancelled
     from backend.core.ws_manager import ws_manager
     from backend.core.exceptions import RateLimitError
 
@@ -129,6 +129,7 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
         video_summaries = []
         errors = []
         rate_limited = False
+        cancelled = False
 
         for i, item in enumerate(urls):
             video_url = item.get("url", "")
@@ -139,6 +140,21 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
             if rate_limited:
                 errors.append(f"Video {i + 1}/{total} '{video_title[:40]}': Skipped (rate-limited)")
                 continue
+
+            # Cooperative cancellation, polled at the one boundary that
+            # matters: BEFORE the next transfer starts. yt-dlp runs inside
+            # asyncio.to_thread and cannot be interrupted, so the video already
+            # in flight will finish and is KEPT (deleting the user's file is the
+            # one irreversible move) — but every video after it is skipped.
+            # This was the one runner family that never polled at all, so a
+            # cancelled 10-URL batch downloaded all 10 anyway.
+            if await job_cancelled(job_id):
+                cancelled = True
+                logger.info(
+                    "TASK CANCELLED batch_download | job=%s (stopped before %d/%d)",
+                    job_id[:8], i + 1, total,
+                )
+                break
 
             step = f"Downloading video {i + 1}/{total}: {video_title[:50] or video_url[:50]}"
             base_pct = (i / total) * 70  # 0% to 70% for downloads
@@ -172,6 +188,25 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
         error_summary = None
         if errors:
             error_summary = f"Failed {len(errors)}/{total} download(s):\n" + "\n".join(errors)
+
+        # A cancel is neither a failure nor a success. Leave the row on the
+        # "cancelled" the user asked for, skip the (expensive) analysis pass,
+        # and say what actually landed — the in-flight video may well have
+        # completed, and it IS in the Library.
+        #
+        # Polled AGAIN here, not only at the top of the loop: a cancel that
+        # lands during the LAST transfer — the only transfer, for a one-URL
+        # batch, which is the common case — is never seen by the loop gate.
+        if cancelled or await job_cancelled(job_id):
+            await update_job_status(
+                job_id, "cancelled",
+                current_step=(
+                    f"Cancelled — {len(downloaded_ids)}/{total} downloaded before stopping"
+                ),
+                output_data={"downloaded_ids": downloaded_ids, "total": total,
+                             "videos": video_summaries, "cancelled": True},
+            )
+            return
 
         if not downloaded_ids:
             user_msg = (
@@ -250,7 +285,7 @@ async def run_download_url(job_id: str, url: str, title: str = "", user_id: str 
 
 async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int = 5):
     """Download top N videos from a channel/playlist, then analyze each."""
-    from backend.agents.job_helper import update_job_status
+    from backend.agents.job_helper import update_job_status, job_cancelled
     from backend.services.ytdlp_service import list_channel_videos
     from backend.core.ws_manager import ws_manager
     from backend.core.exceptions import RateLimitError
@@ -268,6 +303,7 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
 
     downloaded_ids = []
     rate_limited = False
+    cancelled = False
     for i, video in enumerate(videos):
         video_url = video.get("url", "")
         video_title = video.get("title", "")
@@ -276,6 +312,17 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
 
         if rate_limited:
             continue
+
+        # Same cooperative gate as run_batch_download_urls — stop before the
+        # next transfer instead of pulling the whole channel after the user hit
+        # cancel.
+        if await job_cancelled(job_id):
+            cancelled = True
+            logger.info(
+                "TASK CANCELLED download_channel | job=%s (stopped before %d/%d)",
+                job_id[:8], i + 1, total,
+            )
+            break
 
         step = f"Downloading video {i + 1}/{total}: {video_title[:50]}"
         base_pct = 10 + (i / total) * 60  # 10% to 70% for downloads
@@ -302,6 +349,18 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
         except Exception as e:
             logger.warning(f"Failed to download {video_url}: {e}")
             continue
+
+    # Cancel wins over both the failure and the success write below, and is
+    # re-polled so a cancel during the last transfer is honoured too (see the
+    # same gate in run_batch_download_urls).
+    if cancelled or await job_cancelled(job_id):
+        await update_job_status(
+            job_id, "cancelled",
+            current_step=f"Cancelled — {len(downloaded_ids)}/{total} downloaded before stopping",
+            output_data={"downloaded_ids": downloaded_ids, "url": url,
+                         "total": total, "cancelled": True},
+        )
+        return
 
     if not downloaded_ids:
         raise Exception(
@@ -332,12 +391,26 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
 
 async def _download_single_url(job_id: str, url: str, title: str, user_id: str):
     """Download a single video URL, save to DB, and analyze."""
-    from backend.agents.job_helper import update_job_status
+    from backend.agents.job_helper import update_job_status, job_cancelled
     from backend.core.ws_manager import ws_manager
 
     await ws_manager.send_progress(job_id, 10, "Downloading video...", user_id)
 
     dv_id = (await _download_single_video_to_db(job_id, url, title, user_id))["id"]
+
+    # The transfer itself could not be interrupted, but the user's cancel still
+    # stands: no success write, no job_complete, no notification, and above all
+    # no minutes of Whisper on a video they told us to stop fetching. The file
+    # is kept — it is already on disk and in the Library.
+    if await job_cancelled(job_id):
+        logger.info("TASK CANCELLED download_url | job=%s (transfer had already started)",
+                    job_id[:8])
+        await update_job_status(
+            job_id, "cancelled",
+            current_step="Cancelled — the download had already finished; it is in your Library",
+            output_data={"downloaded_ids": [dv_id], "url": url, "cancelled": True},
+        )
+        return
 
     await ws_manager.send_progress(job_id, 70, "Analyzing video...", user_id)
 
@@ -1136,6 +1209,23 @@ async def run_extract_clips(
                     pass
             return "9:16"
 
+        # Resolve every missing aspect BEFORE the write transaction opens.
+        #
+        # This used to be `await _fallback_aspect(clip)` inline in the save loop
+        # below — a 15-second ffprobe subprocess awaited while the session
+        # already held SQLite's write lock from the previous row's flush().
+        # busy_timeout is 5s, so every other writer in the process (another
+        # job's status update, a download saving its row) got "database is
+        # locked" while a big extract saved. The window opened exactly when it
+        # was most likely to matter: this fallback only runs when the parallel
+        # probe already failed, and the documented cause of that is machine
+        # load. Sequential on purpose — same cost as before, just outside the
+        # lock.
+        resolved_aspects: dict[int, str] = {}
+        for _idx, _clip in enumerate(clips):
+            if not _clip.get("aspect_ratio"):
+                resolved_aspects[_idx] = await _fallback_aspect(_clip)
+
         # Save each clip as a GeneratedVideo record with all new fields
         clip_ids = []
         async with AsyncSessionLocal() as db:
@@ -1152,7 +1242,7 @@ async def run_extract_clips(
                     # persisted as "9:16" — which is what the Library sizes the
                     # tile from and what the aspect filter chips match on.
                     aspect_ratio=clip.get("aspect_ratio")
-                    or await _fallback_aspect(clip),
+                    or resolved_aspects.get(idx, "9:16"),
                     duration_seconds=clip.get("duration_seconds"),
                     gen_tier="clip_extraction",
                     source_type="clip_extraction",
@@ -1178,6 +1268,7 @@ async def run_extract_clips(
                     ),
                     caption_status=clip.get("caption_status"),
                     metadata_status=clip.get("metadata_status"),
+                    clip_selection=clip.get("selection"),
                     script=clip.get("transcript_text"),  # Store clip transcript as script
                 )
                 db.add(gv)
@@ -1202,11 +1293,20 @@ async def run_extract_clips(
                 user_id=user_id,
             )
 
+        # The picker-fallback count is the only trace that SURVIVES: the
+        # progress string that announced it is overwritten by the next phase
+        # seconds later, and a socket warning never reaches a REST client.
+        fallback_count = sum(1 for c in clips if c.get("selection") == "duration_fallback")
+        output_data = {"clip_ids": clip_ids, "count": len(clips)}
+        if fallback_count:
+            output_data["picker_fallback"] = True
+            output_data["fallback_count"] = fallback_count
+
         await update_job_status(
             job_id, "success",
             progress_pct=100,
             current_step=f"Extracted {len(clips)} clips",
-            output_data={"clip_ids": clip_ids, "count": len(clips)},
+            output_data=output_data,
         )
         await ws_manager.send({
             "type": "job_complete",

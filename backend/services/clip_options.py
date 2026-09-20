@@ -38,3 +38,11 @@ class ExtractOptions:
     emoji_style: str = "moderate"
     genre: Optional[str] = None
     time_ranges: Optional[list[dict]] = None
+    # When the AI picker returns nothing, the run falls back to evenly-spaced
+    # duration windows so the user still gets deliverables. That is right for a
+    # human at the Clipper and wrong for a client doing its own framing: it
+    # silently swaps curated clips for time slices. Default True preserves the
+    # long-standing behaviour every existing caller depends on; set False to get
+    # a clear failure instead. Either way the clips say where they came from
+    # (`selection="duration_fallback"`).
+    allow_duration_fallback: bool = True

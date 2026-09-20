@@ -147,6 +147,7 @@ async def list_videos(
                 "clip_virality_reason": v.clip_virality_reason,
                 "clip_score_breakdown_json": v.clip_score_breakdown_json,
                 "caption_status": v.caption_status,
+                "clip_selection": v.clip_selection,
                 "metadata_status": v.metadata_status,
                 "duration_seconds": v.duration_seconds,
                 "created_at": v.created_at.isoformat() if v.created_at else None,
@@ -200,6 +201,7 @@ async def get_video(video_id: str, db: AsyncSession = Depends(get_db)):
         "clip_virality_reason": v.clip_virality_reason,
         "clip_score_breakdown_json": v.clip_score_breakdown_json,
         "caption_status": v.caption_status,
+        "clip_selection": v.clip_selection,
         "metadata_status": v.metadata_status,
         "created_at": v.created_at.isoformat() if v.created_at else None,
     }

@@ -501,6 +501,69 @@ def align_script_to_segments(script: str, segments: list[dict]) -> list[dict]:
     return out or segments
 
 
+# ── Sanitising a style that came out of a language model ────────────────────
+#
+# The ASS `Style:` line is COMMA-DELIMITED and one-per-line:
+#
+#   Style: Default,{font},{size},{primary},&H000000FF,{outline},...
+#
+# so a comma or a newline inside any interpolated field silently shifts every
+# field after it — libass reads the next fragment as Fontsize, gets 0, and the
+# burn produces captions that are invisible or unstyled. ffmpeg still exits 0
+# and the clip still reports "applied": a broken artifact, reported as a good
+# one.
+#
+# The values reaching that line come from `CaptionStyle` rows, and those rows
+# are written from MODEL OUTPUT by the AI style generator in api/captions.py,
+# which clamps every numeric field and validates none of the strings. The two
+# plausible slips are a CSS-style stack ("Arial Bold, Helvetica") and a web
+# colour ("#FFFFFF") instead of ASS's &HBBGGRR.
+#
+# Sanitising HERE rather than at the write endpoint is deliberate: this is the
+# one choke point every style — the Default line, the Hook line and the
+# per-word override tags — passes through (rule #32), and it repairs rows that
+# were written before this existed.
+_ASS_COLOUR_RE = re.compile(r"^&H[0-9A-Fa-f]{2,8}$")
+_HEX_COLOUR_RE = re.compile(r"^#?([0-9A-Fa-f]{6})$")
+
+
+def _ass_font_name(value: str | None, default: str = "Arial Bold") -> str:
+    """One comma-free, single-line font name for a Style: line.
+
+    A CSS-style stack degrades to its first family rather than being rejected —
+    that is what the author meant, and libass takes one name.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return default
+    name = value.split(",")[0]                      # first family only
+    name = " ".join(name.split())                   # collapse newlines/tabs
+    name = name.replace("{", "").replace("}", "")   # override-block chars
+    return name.strip() or default
+
+
+def _ass_colour(value: str | None, default: str) -> str:
+    """An ASS &HBBGGRR / &HAABBGGRR colour, or `default`.
+
+    `#RRGGBB` is CONVERTED rather than dropped — a model emitting web hex is
+    expressing a real colour, and silently substituting white would be a worse
+    answer than honouring it in the right byte order.
+    """
+    if not isinstance(value, str):
+        return default
+    v = value.strip()
+    if _ASS_COLOUR_RE.match(v):
+        return v
+    m = _HEX_COLOUR_RE.match(v)
+    if m:
+        rr, gg, bb = m.group(1)[0:2], m.group(1)[2:4], m.group(1)[4:6]
+        return f"&H00{bb}{gg}{rr}".upper()
+    logger.warning(
+        "Caption style carried an unusable colour %r — falling back to %s",
+        value, default,
+    )
+    return default
+
+
 async def _load_custom_style(style_id: str) -> dict | None:
     """Load a custom caption style from the database by ID."""
     try:
@@ -512,12 +575,12 @@ async def _load_custom_style(style_id: str) -> dict | None:
             s = result.scalar_one_or_none()
             if s:
                 return {
-                    "font": s.font,
+                    "font": _ass_font_name(s.font),
                     "font_size_portrait": s.font_size_portrait,
                     "font_size_landscape": s.font_size_landscape,
-                    "primary_color": s.primary_color,
-                    "highlight_color": s.highlight_color,
-                    "outline_color": s.outline_color,
+                    "primary_color": _ass_colour(s.primary_color, "&H00FFFFFF"),
+                    "highlight_color": _ass_colour(s.highlight_color, "&H0000FFFF"),
+                    "outline_color": _ass_colour(s.outline_color, "&H00000000"),
                     "outline_width": s.outline_width,
                     "shadow_depth": s.shadow_depth,
                     "alignment": s.alignment,
@@ -1061,11 +1124,19 @@ async def burn_captions(
         # failure, and returning the INPUT is the signal every caller already
         # keys on to know the captions are missing.
         try:
-            if not output_path.exists() or output_path.stat().st_size == 0:
+            # A playable mp4 is never under a kilobyte, so this catches a
+            # truncated write as well as an empty one.
+            size = output_path.stat().st_size if output_path.exists() else -1
+            if size < 1000:
                 logger.error(
-                    "ASS caption burn exited 0 but produced no bytes at %s "
-                    "— returning the original video", output_path,
+                    "ASS caption burn exited 0 but produced %s — treating it as "
+                    "a failure so the caller knows the captions are missing",
+                    "no file" if size < 0 else f"only {size} bytes",
                 )
+                try:
+                    output_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return video_path
         except OSError as e:
             logger.error("ASS caption burn output unreadable (%s) — returning the original", e)

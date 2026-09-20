@@ -278,7 +278,24 @@ async def delete_downloaded(video_id: str):
 @router.post("/downloaded/cleanup")
 async def cleanup_stale():
     """Remove DB records whose main video file no longer exists on disk.
-    Also cleans up orphaned audio files."""
+    Also cleans up orphaned audio files.
+
+    A missing FILE is not a missing VOLUME. With DATA_DIR on an external or
+    network drive that is asleep, unplugged or failing, EVERY row's `exists()`
+    is False and this would delete the user's entire Clipper library — rows,
+    transcripts, analyses and clip lineage — while the mp4s sit intact but
+    unreferenced on a drive that comes back a minute later. `list_videos` and
+    `job_retention.is_library_item` both take this guard; this endpoint was the
+    one destructive surface missing it.
+    """
+    from backend.config import settings as _settings
+    if not _settings.STORAGE_ROOT.exists():
+        logger.warning(
+            "cleanup_stale refused: the storage root is unreachable, so every "
+            "file looks missing. Nothing deleted."
+        )
+        return {"ok": True, "removed": 0, "skipped": "storage_unavailable"}
+
     removed = 0
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(DownloadedVideo))
@@ -801,6 +818,9 @@ _MANUAL_MAX_RANGES = 10      # cap per submit; mirrored on the frontend as
                              # It also ceilings AI suggestions, since every
                              # proposal is cut through manual mode.
 _MANUAL_MIN_CLIP_SEC = 1.0   # sub-second clips have no visual value
+_MANUAL_OVERLAP_EPS = 0.01   # float-noise tolerance when rejecting overlaps; the UI
+                             # rounds bounds to 3dp and a real user overlap is seconds,
+                             # so 10ms cleanly separates noise from intent.
 
 
 def _validate_manual_time_ranges(raw_ranges, video_duration: float) -> list[dict]:
@@ -841,6 +861,17 @@ def _validate_manual_time_ranges(raw_ranges, video_duration: float) -> list[dict
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"{label}: {e}")
 
+        # NaN specifically: `json.loads` accepts a bare `NaN` literal and EVERY
+        # comparison against NaN is False, so `end <= start` below passes it
+        # straight through to ffmpeg as `-ss nan`. The free /suggest-clips path
+        # already rejected this shape; the cutting path did not. Guarded with
+        # isfinite rather than a range check so a slightly-negative start is
+        # still clamped into a usable clip instead of newly refused.
+        if not (math.isfinite(start) and math.isfinite(end)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label}: start and end must be finite numbers",
+            )
         if end <= start:
             raise HTTPException(
                 status_code=400,
@@ -865,11 +896,39 @@ def _validate_manual_time_ranges(raw_ranges, video_duration: float) -> list[dict
                     f"({video_duration:g}s)"
                 ),
             )
-        parsed.append({"start": start, "end": end})
+        parsed.append({"start": start, "end": end, "_label": label})
 
     # Sort chronologically for stable clip numbering downstream.
     parsed.sort(key=lambda r: r["start"])
-    return parsed
+
+    # Reject OVERLAPS. Manual mode cuts verbatim — `_build_manual_clip_windows`
+    # deliberately skips the AI path's `_remove_overlapping_clips` — so two
+    # ranges covering the same seconds produce two near-identical clips, and
+    # `max_clips = len(time_ranges)` pre-authorises exactly that.
+    #
+    # "Nothing may stack" was enforced only in the bench's
+    # `useBenchRanges.add/addAt/addMany`. Two doors went around it: dragging a
+    # block over its neighbour or typing a timecode (both `update`, which
+    # clamped bounds but never looked at neighbours), and any API client posting
+    # `time_ranges` directly. The invariant belongs on the server, where every
+    # client meets it.
+    #
+    # Touching ranges (a.end == b.start) are legitimate back-to-back cuts and
+    # stay allowed; the epsilon only absorbs float noise from the UI's rounding.
+    for a, b in zip(parsed, parsed[1:]):
+        if b["start"] < a["end"] - _MANUAL_OVERLAP_EPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{a['_label']} ({a['start']:g}-{a['end']:g}s) and "
+                    f"{b['_label']} ({b['start']:g}-{b['end']:g}s) overlap. "
+                    f"Manual mode cuts ranges exactly as given, so overlapping "
+                    f"ranges would produce duplicate clips. Adjust them so they "
+                    f"don't cover the same seconds."
+                ),
+            )
+
+    return [{"start": r["start"], "end": r["end"]} for r in parsed]
 
 
 class ExtractClipsRequest(BaseModel):
@@ -894,6 +953,11 @@ class ExtractClipsRequest(BaseModel):
     emoji_style: str = "moderate"
     genre: Optional[str] = None
     time_ranges: Optional[list[dict]] = None
+    # AI mode only. When the picker returns nothing, the run cuts evenly-spaced
+    # windows by duration so you still get deliverables — those are flagged
+    # `picker_fallback` in the job output and `clip_selection="duration_fallback"`
+    # per clip. Pass false to get an error instead of time slices.
+    allow_duration_fallback: bool = True
 
 
 @router.post("/downloaded/{video_id}/extract-clips")
@@ -1031,6 +1095,7 @@ async def extract_clips(video_id: str, body: ExtractClipsRequest | None = None):
         emoji_style=emoji_style,
         genre=genre,
         time_ranges=time_ranges,
+        allow_duration_fallback=req.allow_duration_fallback,
     )
     dispatch(run_extract_clips(
         job_id=job.id,

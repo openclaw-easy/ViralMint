@@ -537,6 +537,10 @@ def _build_manual_clip_windows(
             "start": round(start, 1),
             "end": round(end, 1),
             "title": f"{title} — clip {i + 1}",
+            # Tagged at the source. Without this the downstream default ("ai")
+            # would report every bench cut and every explicit time range as an
+            # AI pick — to the caller least likely to believe it.
+            "selection": "manual",
             "hook": "",
             "reason": "",  # explicitly empty so task_runner's _clip_title
                           # falls through to the "clip N" branch when batched
@@ -848,6 +852,16 @@ async def extract_viral_clips(
                     f"(range {min_duration or 'auto'}-{max_duration or 'auto'}s, "
                     f"max={max_clips})"
                 )
+                # Opt-out for clients that would rather fail than receive time
+                # slices dressed as curated clips.
+                if not opts.allow_duration_fallback:
+                    raise ValueError(
+                        "The AI found no clip-worthy moments in this video"
+                        + (f' matching "{user_query}"' if user_query else "")
+                        + ". Try a wider length range, a different query, or "
+                        "allow_duration_fallback=true to get evenly-spaced "
+                        "clips instead."
+                    )
                 if job_id:
                     await ws_manager.send_progress(
                         job_id, 28,
@@ -858,6 +872,26 @@ async def extract_viral_clips(
                     duration, max_clips,
                     min_duration=min_duration, max_duration=max_duration,
                     title=video.title or "Untitled",
+                )
+                # Provenance, tagged HERE at the AI-failure call site and not
+                # inside _generate_duration_based_clips — the other caller (no
+                # transcript at all, below) is an honest answer to a silent
+                # video. These are not: the user asked for curated clips and got
+                # time slices, so each one says so and the job carries a count.
+                for _w in clip_windows:
+                    _w["selection"] = "duration_fallback"
+                # Rule #14: never degrade silently. The progress string above is
+                # overwritten seconds later by the next phase, so without this
+                # the only surviving trace was a log line.
+                await ws_manager.send_constraint_warning(
+                    constraint="clip_picker_fallback",
+                    message=(
+                        f"The AI found no clip-worthy moments, so these "
+                        f"{len(clip_windows)} clips are evenly-spaced time slices "
+                        f"rather than curated picks — check them before posting."
+                    ),
+                    severity="warning",
+                    user_id=user_id,
                 )
                 segments = []
                 if not clip_windows:
@@ -1353,7 +1387,13 @@ async def _select_clip_windows_with_retries(
     # Attempt 3: most permissive — but user-set bounds still win where present.
     perm_min = min_duration if min_duration is not None else 5
     perm_max = max_duration if max_duration is not None else 120
-    reduced_clips = max(2, max_clips // 2)
+    # The floor exists so the model is never asked for zero clips — but at
+    # max_clips=1 it asked for TWO, and nothing downstream re-clamps:
+    # _select_clip_windows truncates at the count IT was given, the caller never
+    # truncates after selection, and the silent-gap guard (`len < max_clips`) is
+    # false at 2 < 1. So a run authorised for one clip could cut two. Never ask
+    # for more than was authorised.
+    reduced_clips = min(max(2, max_clips // 2), max_clips)
     logger.info(
         f"Still no clips, trying permissive extraction "
         f"({perm_min}-{perm_max}s, {reduced_clips} clips)..."
@@ -2114,8 +2154,16 @@ async def _process_clips_parallel(
         # fix, resurfacing only under load.
         return {"aspect": aspect_from_dims(w, h, default=None), "duration": dur}
 
+    # Through the SAME semaphore as every other ffmpeg phase. ffprobe is a
+    # blocking subprocess on the event loop's default thread pool
+    # (min(32, cpu+4) — 12 on an 8-core box), and every ffmpeg/ffprobe call in
+    # the backend draws from that one pool. An unbounded fan-out of 50 probes
+    # therefore starved the Clipper bench's own filmstrip and frame requests and
+    # any job running alongside — which is what "the UI freezes on a big
+    # extract" was. This was the only phase here not already wrapped.
     clip_probes = await asyncio.gather(
-        *[_probe_one(cr) for cr in caption_results], return_exceptions=True,
+        *[_ffmpeg_limited(_probe_one(cr)) for cr in caption_results],
+        return_exceptions=True,
     )
 
     results = []
@@ -2270,6 +2318,10 @@ async def _process_clips_parallel(
             "score_breakdown": window.get("score_breakdown") or {},
             "caption_status": caption_status,
             "metadata_status": metadata_status,
+            # Where this window came from: "ai" | "manual" | "duration_fallback".
+            # A job-level count cannot say WHICH clips to distrust, and with 50
+            # clips that is the only question worth asking.
+            "selection": window.get("selection", "ai"),
             # Whitelisted LAST-position spread: `metadata` is model output, and
             # an unfiltered `**metadata` let any stray key the model invented
             # (video_path, start/end, duration_seconds, caption_status)
@@ -2281,6 +2333,45 @@ async def _process_clips_parallel(
     return final_results
 
 
+def _trim_wordless_cue(text: str, seg_start: float, seg_end: float,
+                       clip_start: float, clip_end: float) -> str:
+    """Drop the parts of a WORDLESS cue that fall outside the clip.
+
+    A cue WITH word timings needs none of this — the word filter below drops
+    out-of-range words exactly. A cue WITHOUT them (an imported SRT/VTT, and
+    every YouTube subtitle track, because the inline `<00:00:05.120><c>` word
+    timestamps are stripped when the track is parsed) carries only a start/end
+    and a blob of text, and `caption_service._extract_word_timestamps` spreads
+    that text EVENLY across the cue.
+
+    So when a cut lands mid-cue, clamping the cue's start to 0 while keeping all
+    of its text renders words spoken BEFORE the cut from the clip's very first
+    frame — burned captions running ahead of the audio by up to a full cue
+    length, 3-8s for YouTube's rolling cues. It is worst on manual and bench
+    cuts, which start mid-cue by construction.
+
+    The fix applies the SAME uniform-distribution assumption the even-spread
+    builder already makes: if N words are going to be spread evenly over the
+    cue, the fraction of the cue preceding the cut holds that fraction of the
+    words. An approximation, but the one already in force downstream, so it is
+    consistent rather than newly clever. Returns "" when nothing survives, and
+    the caller then skips the cue.
+    """
+    dur = seg_end - seg_start
+    toks = (text or "").split()
+    if dur <= 0 or not toks:
+        return text or ""
+    lead = max(0.0, (clip_start - seg_start) / dur)
+    tail = max(0.0, (seg_end - clip_end) / dur)
+    if lead <= 0 and tail <= 0:
+        return text
+    first = int(round(lead * len(toks)))
+    last = len(toks) - int(round(tail * len(toks)))
+    if last <= first:
+        return ""
+    return " ".join(toks[first:last])
+
+
 def _filter_and_offset_segments(segments: list[dict], clip_start: float, clip_end: float) -> list[dict]:
     """Filter segments to clip range and offset timestamps to start at 0."""
     filtered = []
@@ -2290,6 +2381,14 @@ def _filter_and_offset_segments(segments: list[dict], clip_start: float, clip_en
         # Include if segment overlaps with clip range
         if seg_end > clip_start and seg_start < clip_end:
             adjusted = dict(s)
+            # A wordless cue straddling either cut point: drop the text that
+            # belongs outside the clip BEFORE the start gets clamped to 0.
+            if not s.get("words") and (seg_start < clip_start or seg_end > clip_end):
+                kept = _trim_wordless_cue(
+                    s.get("text", ""), seg_start, seg_end, clip_start, clip_end)
+                if not kept.strip():
+                    continue
+                adjusted["text"] = kept
             adjusted["start"] = max(seg_start - clip_start, 0)
             adjusted["end"] = min(seg_end - clip_start, clip_end - clip_start)
             # Also adjust word timestamps if present

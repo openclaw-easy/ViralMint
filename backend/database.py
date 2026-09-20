@@ -85,6 +85,7 @@ async def init_db():
         await _add_column_if_missing(conn, "generated_videos", "clip_score_breakdown_json", "TEXT", existing=_cols)
         await _add_column_if_missing(conn, "generated_videos", "caption_status", "VARCHAR(20)", existing=_cols)
         await _add_column_if_missing(conn, "generated_videos", "metadata_status", "VARCHAR(20)", existing=_cols)
+        await _add_column_if_missing(conn, "generated_videos", "clip_selection", "VARCHAR(20)", existing=_cols)
         # BYOK: per-user encrypted keys (override .env at runtime)
         await _add_column_if_missing(conn, "user_settings", "ai_provider", "VARCHAR(20)", existing=_cols)
         await _add_column_if_missing(conn, "user_settings", "ai_model", "VARCHAR(100)", existing=_cols)
