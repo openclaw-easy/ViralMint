@@ -86,6 +86,83 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   grey block.
 
 ### Fixed
+- **Captions are burned on Windows.** They never were. A path with a drive
+  letter in it broke the filter ViralMint hands to FFmpeg, so every caption
+  burn on Windows failed — Clip Studio clips, the Captions tool, Smart Video —
+  and the app reported success anyway, because a burn that produced nothing
+  still looked like one that worked. Paths are now quoted the one way that
+  survives FFmpeg's two parsing passes, an empty burn is treated as the failure
+  it is, and the log carries FFmpeg's actual error instead of its version
+  banner. If clips do get saved without the captions you asked for, you are
+  told.
+- **Auto-zoom does something.** The zoom pulse filter had never once been
+  accepted by FFmpeg — the expression was built in a form FFmpeg splits apart,
+  and it animated a value FFmpeg only reads once. Every auto-zoom in the app's
+  history quietly handed back a copy of the source and called it a success. The
+  filter is rebuilt, a failure is now a failure instead of a silent copy, and
+  Smart Video tells you when captions, zoom or the watermark could not be
+  applied rather than shipping the video as if they had been.
+- **Cancel stops the work.** Cancelling a download used to do nothing visible:
+  the batch downloaded every remaining video, then wrote "success" over your
+  "cancelled" and announced it had finished. The same was true of every tool —
+  a cancelled crop, trim or compress ran to completion and reported success.
+  All of them now stop at the next safe point. Whatever had already started
+  downloading still finishes and is kept — losing a file you already have is
+  worse — but nothing after it runs, no transcription follows, and the job
+  stays cancelled. A cancel is also no longer reported as a failure.
+- **Overlapping cuts can't stack any more.** Dragging one pending cut onto its
+  neighbour, or typing an overlapping time into the rail, quietly produced two
+  near-identical clips from the same seconds. A cut now parks against its
+  neighbour instead of sliding over it, the server refuses overlapping ranges
+  whatever sent them, and cutting clears the bench so the button can't fire
+  twice over work you already have.
+- **The Clipper stops freezing the app on a big extract.** Measuring 50 finished
+  clips ran unbounded, and every FFmpeg operation in ViralMint shares one pool —
+  so a large extract starved the bench's own filmstrip and anything else
+  running. A second bug compounded it: the save step measured clips while
+  holding the database lock, so other work got "database is locked". Both are
+  fixed.
+- **Long clips finish.** Clip extraction allowed ten minutes regardless of the
+  clip's length, so pulling a long section out of a long recording hit the wall
+  on every range and then blamed the source video for being corrupt. The budget
+  now scales with what you asked for.
+- **A cancelled or interrupted upload no longer leaks gigabytes.** Navigating
+  away mid-upload left the partial file on disk forever, referenced by nothing
+  and found by no cleanup.
+- **An interrupted aspect-ratio conversion no longer poisons the result.** A
+  timed-out export left a truncated file exactly where the finished one belongs,
+  and every later export handed that back instantly. Conversions now land
+  atomically, are checked before use, and are encoded in a format Safari and iOS
+  will play.
+- **The first run says it is downloading the speech model.** Whisper's model
+  files aren't in the installer, so the first transcription downloads 150 MB to
+  3 GB — and almost nothing said so. Worse, the download ran on the main thread,
+  which froze the entire app, progress bars included, until it finished. It now
+  runs in the background, tells you it is happening, and fails with an
+  explanation you can act on instead of a stack trace.
+- **A sleeping external drive can't delete your library.** If ViralMint's data
+  lives on a drive that is asleep or unplugged, every file looks missing. The
+  cleanup routines took that at face value and would have deleted the rows
+  behind your clips, transcripts and analyses while the files sat safely on a
+  drive that came back a minute later. They now do nothing until the drive is
+  reachable.
+- **Uploaded cookies are no longer downloadable.** The endpoint that serves
+  images you upload would serve any file in its scratch folder by name,
+  including the browser session used for downloads. It serves images only now.
+- **Nothing else on your machine can drive the chat.** The chat connection
+  accepted a browser page from any website, which could then run jobs, cancel
+  yours, and read everything the app sent back. It now only accepts the app's
+  own pages — and, as before, non-browser clients such as the messaging bridges.
+- **A drastic silence trim tells you.** Removing silence from a clip that is
+  mostly music or room tone could return a fraction of its length with nothing
+  but a log line to show for it.
+- **AI-written caption styles can't corrupt the render.** A style generated with
+  a font list or a web colour code shifted every following setting, so captions
+  came out unstyled or invisible while the job reported success.
+- **Failures say what went wrong.** FFmpeg prints its version banner before any
+  error, and ViralMint was logging the banner and discarding the error — so a
+  failed render, a dropped colour grade or an unplayable clip left a log entry
+  that said nothing at all. Every one of those now carries the real message.
 - **Cancelling an AI clip search now actually stops it.** Ask AI on the
   cutting bench runs Whisper and then the model; nothing interrupted that work
   when you pressed cancel, so it carried on, made the model call anyway, and

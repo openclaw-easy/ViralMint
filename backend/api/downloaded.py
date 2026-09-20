@@ -875,12 +875,15 @@ def _validate_manual_time_ranges(raw_ranges, video_duration: float) -> list[dict
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"{label}: {e}")
 
-        # NaN specifically: `json.loads` accepts a bare `NaN` literal and EVERY
-        # comparison against NaN is False, so `end <= start` below passes it
-        # straight through to ffmpeg as `-ss nan`. The free /suggest-clips path
-        # already rejected this shape; the cutting path did not. Guarded with
-        # isfinite rather than a range check so a slightly-negative start is
-        # still clamped into a usable clip instead of newly refused.
+        # Defence in depth on NaN. `json.loads` accepts a bare `NaN` literal and
+        # EVERY comparison against NaN is False, so `end <= start` below would
+        # pass it straight through to ffmpeg as `-ss nan`. `_parse_timestamp`
+        # above already rejects non-finite values, so this is a second belt
+        # rather than a live fix — kept because the guard it protects is two
+        # lines away and reads as sufficient on its own, which is how the same
+        # hole opened in the tool endpoints. isfinite rather than a range check,
+        # so a slightly-negative start is still clamped into a usable clip
+        # instead of newly refused.
         if not (math.isfinite(start) and math.isfinite(end)):
             raise HTTPException(
                 status_code=400,
