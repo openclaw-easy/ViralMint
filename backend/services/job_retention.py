@@ -59,6 +59,15 @@ def is_library_item(job: Job) -> bool:
     delete it and the file is orphaned on disk while disappearing from the
     Library and the asset endpoint that serves it.
     """
+    # A missing VOLUME is not a missing file. With DATA_DIR on an external or
+    # network drive that is asleep, every is_file() below is False, so every
+    # successful tool job stops looking like a Library item — and this function is
+    # the ONLY thing standing between them and both the retention sweep and
+    # Activity's "Clear" button. Protect what we cannot check; the next healthy
+    # sweep prunes the true orphans.
+    from backend.config import settings as _settings
+    if not _settings.STORAGE_ROOT.exists():
+        return True
     if job.status != "success" or not job.output_json:
         return False
     if classify(job.job_type) is None:

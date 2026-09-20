@@ -593,9 +593,12 @@ async def gif_tool(
         raise HTTPException(400, "fps must be 5-30")
     if not 240 <= width <= 1080:
         raise HTTPException(400, "width must be 240-1080")
-    if start_seconds < 0:
-        raise HTTPException(400, "start_seconds must be >= 0")
-    if duration_seconds < 0 or duration_seconds > 60:
+    # Two-sided so NaN/inf are rejected rather than reaching ffmpeg — see the
+    # note on the same pair in /trim.
+    from backend.services.video_utils import MAX_MEDIA_SECONDS
+    if not 0.0 <= start_seconds <= MAX_MEDIA_SECONDS:
+        raise HTTPException(400, "start_seconds must be a number >= 0")
+    if not 0.0 <= duration_seconds <= 60.0:
         raise HTTPException(400, "duration_seconds must be 0-60 (0 means whole video)")
 
     from backend.agents.job_helper import create_job
@@ -712,8 +715,15 @@ async def trim_tool(
 
     Pure FFmpeg, frame-accurate (re-encode, not keyframe-snapped).
     """
-    if start_seconds < 0:
-        raise HTTPException(400, "start_seconds must be >= 0")
+    # Bounded on BOTH sides, not `< 0`: NaN fails every comparison, so the
+    # one-sided form passed it through all three checks below and handed ffmpeg
+    # `-ss nan` (a Form float parses "nan"/"inf" happily). The same defect the
+    # clip pipeline's timestamp parser carried.
+    from backend.services.video_utils import MAX_MEDIA_SECONDS
+    if not 0.0 <= start_seconds <= MAX_MEDIA_SECONDS:
+        raise HTTPException(400, "start_seconds must be a number >= 0")
+    if not 0.0 < end_seconds <= MAX_MEDIA_SECONDS:
+        raise HTTPException(400, "end_seconds must be a number > 0")
     if end_seconds <= start_seconds:
         raise HTTPException(400, "end_seconds must be greater than start_seconds")
     if end_seconds - start_seconds < 0.5:

@@ -106,7 +106,11 @@ async def _tool_success(
 ) -> bool:
     """Validate the artifact, mark job success, emit job_complete, delete
     input scratch files. Returns True when the artifact was delivered, False
-    when the validation gate failed the job instead.
+    when it was not — either the validation gate failed the job, or the user had
+    cancelled it (see the two gates below). Callers that promoted a
+    `GeneratedVideo` row before calling roll it back on False, which is right for
+    both: a rejected artifact must not sit in the Library as "ready", and neither
+    must one the user asked not to have.
 
     `expect` (all optional): {"min_duration": float, "orientation": str,
     "audio": bool} — assertions the RUNNER makes about its own output, which
@@ -118,10 +122,39 @@ async def _tool_success(
     Returning bool matters for runners that do more work after this call —
     they must be able to tell "delivered" from "gate-failed".
     """
-    from backend.agents.job_helper import update_job_status
+    from backend.agents.job_helper import job_cancelled, update_job_status
     from backend.core.exceptions import GenerationError
     from backend.core.ws_manager import ws_manager
     from backend.services.output_validator import validate_output
+
+    # Cancellation gate, at the same choke point as the artifact gate and for
+    # the same reason: cancellation is COOPERATIVE (DELETE /api/jobs/{id} only
+    # flips the row) and `update_job_status` deliberately allows
+    # terminal→terminal writes, so a runner that finished after a cancel used to
+    # overwrite the user's "cancelled" with "success" and announce a completed
+    # job. Every file-producing tool passes through here without a single poll of
+    # its own; `run_extract_clips` grew its own gates for exactly this, and this
+    # is that fix for the other ~40 runners at once.
+    #
+    # Deliberately BEFORE the artifact gate: a cancelled job needs no verdict,
+    # and grading it would route a broken artifact into `_tool_fail`, turning the
+    # user's cancel into a red "Job failed" toast.
+    #
+    # What is NOT done here, on purpose: `out_path` is left on disk. Deleting is
+    # the one irreversible move, and the 24h tools-scratch sweeper is the
+    # existing owner of an unclaimed tool output. Returning False does drop the
+    # `GeneratedVideo` row a promoting runner created, so the file is not
+    # reachable from the Library — it is kept because deletion cannot be undone,
+    # not because anything still points at it. Input scratch IS cleaned, exactly
+    # as the success and failure paths do.
+    if await job_cancelled(job_id):
+        logger.info(
+            "TASK CANCELLED tool | job=%s finished after the user cancelled it "
+            "— status left cancelled, artifact kept at %s",
+            job_id[:8], out_path,
+        )
+        _cleanup_paths(*cleanup)
+        return False
 
     # "Verify the artifact before you call it done", as code, at the one point
     # every file-producing tool passes through. A runner that finishes without
@@ -156,9 +189,21 @@ async def _tool_success(
 
 
 async def _tool_fail(job_id: str, err: Exception, cleanup: list[Path], user_id: str, tool: str):
-    """Mark job failed, emit job_failed, delete input scratch files."""
-    from backend.agents.job_helper import update_job_status
+    """Mark job failed, emit job_failed, delete input scratch files.
+
+    A CANCELLED job stops quietly instead. Runners funnel EVERY exception here,
+    and a cancel routinely arrives as one — work killed mid-flight raises
+    whatever it raises. Without this check the user's "cancelled" became
+    "failed" plus a red toast for something they asked for. Same shape as
+    `run_extract_clips`' quiet-stop handler.
+    """
+    from backend.agents.job_helper import job_cancelled, update_job_status
     from backend.core.ws_manager import ws_manager
+    if await job_cancelled(job_id):
+        logger.info("TASK CANCELLED tool:%s | job=%s (user cancel honoured)",
+                    tool, job_id[:8])
+        _cleanup_paths(*cleanup)
+        return
     logger.error("TASK FAIL  tool:%s | job=%s: %s", tool, job_id[:8], err, exc_info=True)
     await update_job_status(job_id, "failed", error_message=str(err))
     await ws_manager.send({"type": "job_failed", "job_id": job_id, "error": str(err)}, user_id)

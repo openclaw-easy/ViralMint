@@ -19,6 +19,7 @@ from backend.config import settings
 from backend.core.exceptions import VideoGenerationError
 from backend.core.ws_manager import ws_manager
 from backend.services.ffmpeg_service import (
+    ffmpeg_error,
     generate_single_kenburns_clip,
     normalize_still,
 )
@@ -183,8 +184,19 @@ async def trim_and_normalize_clip(
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
             if color_grade:
-                # Retry without color grading (normalize filter may not be available)
-                logger.info("Color grading failed, retrying without it")
+                # Retry without colour grading. The stated reason used to be a
+                # guess in a comment ("normalize may not be available") and the
+                # log carried no evidence either way — not the clip, not the
+                # filter chain, not ffmpeg's own message — and at INFO, so it
+                # scrolled past unnoticed. When most clips in a render take this
+                # branch the whole video silently ships ungraded, and nothing in
+                # the log says why. Whatever the cause is, the next occurrence
+                # now names it.
+                logger.warning(
+                    "Colour grading failed for %s (dur=%.1fs) — retrying "
+                    "without it: %s",
+                    clip_path.name, duration, ffmpeg_error(result.stderr),
+                )
                 vf_basic = (
                     f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
                     f"crop={target_w}:{target_h},setsar=1,"
@@ -201,10 +213,10 @@ async def trim_and_normalize_clip(
                 ]
                 result2 = subprocess.run(cmd_retry, capture_output=True, text=True, timeout=60)
                 if result2.returncode != 0:
-                    logger.warning(f"Clip trim failed: {result2.stderr[:300]}")
+                    logger.warning("Clip trim failed for %s: %s", clip_path.name, ffmpeg_error(result2.stderr))
                     return clip_path
                 return output_path
-            logger.warning(f"Clip trim failed: {result.stderr[:300]}")
+            logger.warning("Clip trim failed for %s: %s", clip_path.name, ffmpeg_error(result.stderr))
             return clip_path
         return output_path
 
@@ -622,7 +634,7 @@ async def _merge_video_audio_full(
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
-            logger.warning(f"Full merge failed, trying simple merge: {result.stderr[:300]}")
+            logger.warning(f"Full merge failed, trying simple merge: {ffmpeg_error(result.stderr)}")
             # Fallback: simple merge without loop (may be slightly short)
             cmd_simple = [
                 "ffmpeg", "-y",
@@ -633,7 +645,7 @@ async def _merge_video_audio_full(
             ]
             result2 = subprocess.run(cmd_simple, capture_output=True, text=True, timeout=300)
             if result2.returncode != 0:
-                raise VideoGenerationError(f"FFmpeg merge failed: {result2.stderr[:500]}")
+                raise VideoGenerationError(f"FFmpeg merge failed: {ffmpeg_error(result2.stderr, 500)}")
         return output_path
 
     return await asyncio.to_thread(_merge)

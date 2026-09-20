@@ -32,6 +32,13 @@ def probe_duration(file_path: Path | str, default: float = 0.0) -> float:
         return default
 
 
+# The largest timestamp any real media carries — ~10 days. Used as the UPPER
+# bound on a user-supplied seconds value so the check is two-sided: NaN and inf
+# fail every comparison, so a one-sided `< 0` guard passes them straight through
+# to ffmpeg (a Form float parses "nan" and "inf" happily).
+MAX_MEDIA_SECONDS = 863999.0
+
+
 def probe_media(file_path: Path | str) -> tuple[int, int, float]:
     """Get (width, height, duration_seconds) in ONE ffprobe call.
 
