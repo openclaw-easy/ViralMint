@@ -50,9 +50,16 @@ async def upload_media(file: UploadFile = File(...)):
 @router.get("/media/{filename}")
 async def serve_media(filename: str):
     """Serve an uploaded media file."""
-    # Sanitize filename to prevent path traversal
+    # Sanitize filename to prevent path traversal, then serve ONLY the image
+    # types the upload above writes. TMP_DIR is shared scratch: it also holds
+    # yt-dlp's browser_cookies.txt — the user's logged-in YouTube/TikTok
+    # session — and this route used to hand it to anyone who asked for it by
+    # name. A page the user visits cannot read the response cross-origin, but
+    # the app's own UI can, and so can any local process.
     safe_name = Path(filename).name
+    if Path(safe_name).suffix.lower() not in ALLOWED_IMAGE_EXTS:
+        raise HTTPException(404, "File not found")
     path = settings.TMP_DIR / safe_name
-    if not path.exists():
+    if not path.exists() or not path.is_file():
         raise HTTPException(404, "File not found")
     return FileResponse(path)

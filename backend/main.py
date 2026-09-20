@@ -264,27 +264,12 @@ def create_app() -> FastAPI:
     # non-loopback bind (e.g. HOST=192.168.1.5) DOES have an enumerable origin,
     # so we keep CSRF enforced and just allowlist it below. Reverse-proxy / custom
     # domain deployments set FRONTEND_URL, which is already allowlisted.
-    lan_mode = settings.HOST == "0.0.0.0"
-    allowed_origins = {
-        settings.FRONTEND_URL,
-        "http://localhost:5173",
-        "http://localhost:3000",
-        f"http://localhost:{settings.PORT}",
-        f"http://127.0.0.1:{settings.PORT}",
-    }
-    if settings.HOST not in ("0.0.0.0", "127.0.0.1", "localhost"):
-        allowed_origins.add(f"http://{settings.HOST}:{settings.PORT}")
+    # The allowlist itself lives in backend/core/origins.py so the chat
+    # WebSocket — which this HTTP middleware never sees — judges Origin by the
+    # same rule and the same set.
+    from backend.core.origins import lan_mode as _lan_mode, origin_ok as _origin_ok
+    lan_mode = _lan_mode()
     safe_methods = {"GET", "HEAD", "OPTIONS"}
-
-    def _origin_ok(header: str) -> bool:
-        if not header:
-            return False
-        try:
-            parsed = urlparse(header)
-            origin = f"{parsed.scheme}://{parsed.netloc}"
-        except Exception:
-            return False
-        return origin in allowed_origins
 
     @app.middleware("http")
     async def csrf_origin_check(request: Request, call_next):

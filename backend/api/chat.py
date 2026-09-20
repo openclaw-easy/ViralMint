@@ -127,6 +127,19 @@ async def _maybe_update_profile(user_id: str):
 @router.websocket("/ws/chat")
 async def chat_websocket(websocket: WebSocket):
     user_id = "local"
+    # The HTTP CSRF middleware never sees a websocket scope, so any page the
+    # user happens to have open could connect here, drive the planner (real
+    # dispatched jobs, `job_cancel` on the user's own work) and read every
+    # event the app streams. Same allowlist, same rule as the middleware: a
+    # PRESENT Origin must be ours; no Origin is a non-browser client
+    # (messaging bridge, tests, CLI) and still passes. Closing before accept
+    # answers the handshake with a refusal rather than an open socket.
+    from backend.core.origins import lan_mode, origin_ok
+    origin = websocket.headers.get("origin")
+    if origin and not lan_mode() and not origin_ok(origin):
+        logger.warning("Rejected /ws/chat handshake from foreign origin %r", origin[:120])
+        await websocket.close(code=1008)
+        return
     await ws_manager.connect(websocket, user_id)
 
     # Load user settings
