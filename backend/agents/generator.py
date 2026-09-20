@@ -590,6 +590,10 @@ class GeneratorAgent:
             # cheaper decode would degrade the visible captions, not just the
             # discarded text.
             await asyncio.to_thread(whisper_service.load, "fast")
+            # No job_id in scope here, so the DEFAULT on_download applies: a
+            # constraint-warning toast. That is the point of making the toast the
+            # default — a caller that cannot name a progress bar still says
+            # something rather than nothing.
             result = await whisper_service.transcribe(
                 voice_path, language=None, quality="fast")
             segments = result.get("segments", [])

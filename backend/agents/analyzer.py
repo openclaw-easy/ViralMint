@@ -312,10 +312,14 @@ class AnalyzerAgent:
                         logger.warning(f"No audio/video file for {dv.id} — skipping transcription")
                         continue
 
-                    from backend.services.whisper_service import whisper_service
-                    await asyncio.to_thread(whisper_service.load, whisper_quality)
+                    from backend.services.whisper_service import (
+                        whisper_service, job_download_notice)
+                    # No pre-load: `transcribe()` goes through ensure_model(),
+                    # which loads off the loop AND announces a first-run
+                    # download. A bare `load()` here did neither.
                     transcript_data = await whisper_service.transcribe(
-                        audio_path, quality=whisper_quality)
+                        audio_path, quality=whisper_quality,
+                        on_download=job_download_notice(job_id, user_id))
                     transcript_source = "whisper"
 
                     # AI post-correction of Whisper transcript (chunked; never loses content)
@@ -602,7 +606,8 @@ class AnalyzerAgent:
                     update_job_status(job_id, "running", progress_pct=pct, current_step=step), _loop)
 
             transcript_data = await whisper_service.transcribe(
-                audio_path, quality=whisper_quality, on_progress=_tx_progress)
+                audio_path, quality=whisper_quality, on_progress=_tx_progress,
+                on_download=job_download_notice(job_id, user_id))
 
             await ws_manager.send_progress(job_id, 40, "Correcting transcript...", user_id)
 

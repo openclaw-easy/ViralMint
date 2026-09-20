@@ -96,6 +96,28 @@ class AIKeyMissingError(AIProviderError):
 
 # ── Motion Graphics ───────────────────────────────────────────────────────────
 
+class WhisperModelUnavailableError(ViralMintError):
+    """The local speech-recognition model isn't on disk and couldn't be fetched.
+
+    Whisper WEIGHTS are not bundled in the installer (the installer-size
+    budget) — faster-whisper downloads them from HuggingFace into
+    ``DATA_DIR/whisper-cache`` the first time a quality tier is used. Before
+    this class existed, a first-run user with no network (or a blocked HF host)
+    got the raw huggingface_hub error wrapped in a generic 500 / "job failed",
+    which reads as "transcription is broken" rather than "the one-time download
+    didn't happen". The message is user-facing.
+
+    ENVELOPE mirrors HyperFramesNotInstalledError so the on-demand-dependency
+    gates share one shape.
+    """
+
+    ENVELOPE = {
+        "ok": False,
+        "error_code": "whisper_model_unavailable",
+        "action_url": "/settings#advanced",
+    }
+
+
 class MotionGraphicsError(ViralMintError):
     """Base for the local motion-graphics (HyperFrames) render path."""
 

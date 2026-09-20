@@ -195,8 +195,9 @@ async def run_tool_captions(job_id: str, in_path: Path, style: str, emoji_style:
     cleanup = [in_path]
     try:
         await _tool_progress(job_id, 5, "Transcribing audio...", user_id)
-        from backend.services.whisper_service import whisper_service
-        tx = await whisper_service.transcribe(str(in_path))
+        from backend.services.whisper_service import whisper_service, job_download_notice
+        tx = await whisper_service.transcribe(str(in_path),
+                                               on_download=job_download_notice(job_id, user_id))
         segments = tx.get("segments", [])
         if not segments:
             raise ValueError("No speech detected — nothing to caption")
@@ -1014,8 +1015,9 @@ async def run_tool_translate(
         user_settings = await _load_user_settings(user_id)
 
         await _tool_progress(job_id, 10, "Transcribing source audio...", user_id)
-        from backend.services.whisper_service import whisper_service
-        tx = await whisper_service.transcribe(str(in_path))
+        from backend.services.whisper_service import whisper_service, job_download_notice
+        tx = await whisper_service.transcribe(str(in_path),
+                                               on_download=job_download_notice(job_id, user_id))
         segments = tx.get("segments", [])
         if not segments:
             raise ValueError("No speech detected — nothing to translate.")
@@ -1116,8 +1118,9 @@ async def run_tool_hook_analysis(job_id: str, in_path: Path, user_id: str = "loc
         await asyncio.to_thread(_extract)
 
         await _tool_progress(job_id, 45, "Transcribing opening audio...", user_id)
-        from backend.services.whisper_service import whisper_service
-        tx = await whisper_service.transcribe(str(clip_audio))
+        from backend.services.whisper_service import whisper_service, job_download_notice
+        tx = await whisper_service.transcribe(str(clip_audio),
+                                               on_download=job_download_notice(job_id, user_id))
         transcript = (tx.get("text") or "").strip()
         if not transcript:
             raise RuntimeError("No speech detected in the first 10 seconds.")
@@ -1516,8 +1519,9 @@ async def run_tool_metadata(
 
         if in_path:
             await _tool_progress(job_id, 20, "Transcribing audio (~30-60s on CPU)...", user_id)
-            from backend.services.whisper_service import whisper_service
-            tx = await whisper_service.transcribe(str(in_path))
+            from backend.services.whisper_service import whisper_service, job_download_notice
+            tx = await whisper_service.transcribe(str(in_path),
+                                               on_download=job_download_notice(job_id, user_id))
             transcript = (tx.get("text") or "").strip()
             if not transcript:
                 raise RuntimeError(
@@ -1609,10 +1613,11 @@ async def run_tool_auto_chapters(
     try:
         from backend.api.tools import tool_out_path
         from backend.core.ai_provider import get_ai_client
-        from backend.services.whisper_service import whisper_service
+        from backend.services.whisper_service import whisper_service, job_download_notice
 
         await _tool_progress(job_id, 20, "Transcribing audio (~30-60s on CPU)...", user_id)
-        tx = await whisper_service.transcribe(str(in_path))
+        tx = await whisper_service.transcribe(str(in_path),
+                                               on_download=job_download_notice(job_id, user_id))
         segments = tx.get("segments") or []
         if not segments:
             raise RuntimeError(
@@ -1775,10 +1780,11 @@ async def run_tool_subtitles(
     cleanup = [in_path]
     try:
         from backend.api.tools import tool_out_path
-        from backend.services.whisper_service import whisper_service
+        from backend.services.whisper_service import whisper_service, job_download_notice
 
         await _tool_progress(job_id, 20, "Transcribing audio (~30-60s on CPU)...", user_id)
-        tx = await whisper_service.transcribe(str(in_path))
+        tx = await whisper_service.transcribe(str(in_path),
+                                               on_download=job_download_notice(job_id, user_id))
         segments = tx.get("segments") or []
         if not segments:
             raise ValueError("No speech detected — nothing to transcribe.")
@@ -1816,11 +1822,12 @@ async def run_tool_auto_zoom(
     noop = False
     try:
         from backend.api.tools import tool_out_path
-        from backend.services.whisper_service import whisper_service
+        from backend.services.whisper_service import whisper_service, job_download_notice
         from backend.services.ffmpeg_service import apply_auto_zoom
 
         await _tool_progress(job_id, 20, "Transcribing audio (~30-60s on CPU)...", user_id)
-        tx = await whisper_service.transcribe(str(in_path))
+        tx = await whisper_service.transcribe(str(in_path),
+                                               on_download=job_download_notice(job_id, user_id))
         segments = tx.get("segments") or []
         words: list[dict] = []
         for seg in segments:

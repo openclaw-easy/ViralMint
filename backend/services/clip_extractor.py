@@ -1281,8 +1281,10 @@ async def _transcribe_locked(video, user_settings, whisper_quality, force_retran
                     ),
                     loop,
                 )
+        from backend.services.whisper_service import job_download_notice
         transcript_data = await whisper_service.transcribe(
-            audio_path, quality=whisper_quality, on_progress=_tx_progress)
+            audio_path, quality=whisper_quality, on_progress=_tx_progress,
+            on_download=job_download_notice(job_id, user_id) if job_id else None)
     except Exception as e:
         # Whisper crashed (corrupt audio, OOM, model load failure, etc.) — re-raise
         # so the job fails LOUDLY instead of silently downgrading to duration-based
