@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 from backend.config import settings
 from backend.core.exceptions import VideoGenerationError
-from backend.services.video_utils import cover_vf, probe_dimensions, probe_duration
+from backend.services.video_utils import cover_vf, ff_filter_path, probe_dimensions, probe_duration
 
 
 def _tmp(name: str) -> Path:
@@ -206,13 +206,13 @@ async def add_captions(
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video_path),
-            "-vf", f"subtitles={srt_path}:force_style='FontSize={font_size},PrimaryColour=&Hffffff&,OutlineColour=&H000000&,Outline=2,Alignment=2'",
+            "-vf", f"subtitles={ff_filter_path(srt_path)}:force_style='FontSize={font_size},PrimaryColour=&Hffffff&,OutlineColour=&H000000&,Outline=2,Alignment=2'",
             "-c:a", "copy",
             str(output_path),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
-            logger.warning(f"FFmpeg captioning failed: {result.stderr[:300]}")
+            logger.warning(f"FFmpeg captioning failed: {ffmpeg_error(result.stderr)}")
             # Return original video without captions rather than failing
             return video_path
 

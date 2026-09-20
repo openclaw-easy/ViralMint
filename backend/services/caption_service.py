@@ -1026,13 +1026,15 @@ async def burn_captions(
     timeout_s = int(min(max(duration * 3, 600), 5400))
 
     def _burn():
-        # Escape path for FFmpeg filter (colons and backslashes)
-        escaped_ass = str(ass_path.resolve()).replace("\\", "/").replace(":", "\\:")
+        # The Windows drive colon splits an unquoted filter value, and the old
+        # single-backslash escape here failed identically — see ff_filter_path.
+        from backend.services.video_utils import ff_filter_path
+        from backend.services.ffmpeg_service import ffmpeg_error
 
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video_path),
-            "-vf", f"ass={escaped_ass}",
+            "-vf", f"ass={ff_filter_path(ass_path.resolve())}",
             "-c:a", "copy",
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             str(output_path),
@@ -1046,8 +1048,28 @@ async def burn_captions(
             )
             return video_path
         if result.returncode != 0:
-            logger.error(f"ASS caption burn FFmpeg error: {result.stderr[:500]}")
+            # The TAIL of stderr, not the head: the first 500 characters are
+            # ffmpeg's version banner, which is why a failed burn logged no
+            # cause at all.
+            logger.error(
+                "ASS caption burn FFmpeg error (exit %s): %s",
+                result.returncode, ffmpeg_error(result.stderr, 800),
+            )
             return video_path  # Return original on failure
+        # An ffmpeg that exits 0 can still write nothing (its siblings
+        # extract_clip and extract_thumbnail both check). An empty burn is a
+        # failure, and returning the INPUT is the signal every caller already
+        # keys on to know the captions are missing.
+        try:
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                logger.error(
+                    "ASS caption burn exited 0 but produced no bytes at %s "
+                    "— returning the original video", output_path,
+                )
+                return video_path
+        except OSError as e:
+            logger.error("ASS caption burn output unreadable (%s) — returning the original", e)
+            return video_path
         logger.info(f"Captions burned successfully: {output_path}")
         return output_path
 

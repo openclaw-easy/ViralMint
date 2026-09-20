@@ -1185,6 +1185,23 @@ async def run_extract_clips(
                 clip_ids.append(gv.id)
             await db.commit()
 
+        # Tell the USER, not just the log, when a caption burn failed. The job
+        # still reports success — the clips exist and play — and the rows still
+        # save as "ready", so before this the only trace of a failed burn was a
+        # log line: a customer found out by watching the files (rule #14).
+        uncaptioned = sum(
+            1 for c in clips
+            if c.get("caption_status") in ("failed", "extract_failed")
+        )
+        if uncaptioned > 0:
+            await ws_manager.send_constraint_warning(
+                "clip_captions_failed",
+                f"{uncaptioned} of {len(clips)} clips were saved WITHOUT captions "
+                f"— the caption burn failed. The ffmpeg error is in the backend log.",
+                severity="warning",
+                user_id=user_id,
+            )
+
         await update_job_status(
             job_id, "success",
             progress_pct=100,

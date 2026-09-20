@@ -166,3 +166,36 @@ def probe_dimensions(file_path: Path | str) -> tuple[int, int]:
         return int(parts[0]), int(parts[1])
     except Exception:
         return 0, 0
+
+
+def ff_filter_path(p) -> str:
+    r"""Quote a filesystem path for use as a filter option value inside an
+    FFmpeg filtergraph (`ass=`, `subtitles=`, `drawtext=fontfile=/textfile=`).
+
+    A filtergraph string is parsed TWICE: the graph parser splits filters on
+    `,;[]` and consumes one level of backslash escapes, then the filter's own
+    option parser splits the surviving text on `:` (and `=`). A Windows path
+    therefore breaks at the drive colon — `ass=C:/x.ass` reads `C` as the
+    filename and `/x.ass` as the next positional option (`original_size`) —
+    and the single-escaped `C\:/x.ass` fails the SAME way, because the graph
+    parser eats the backslash before the option parser ever sees it. That was
+    the shipped form, so no caption was ever burned on Windows, where the data
+    dir always carries a drive letter.
+
+    The quoted form is the one that survives both passes for every filter:
+    single quotes make the graph parser pass the text through verbatim
+    (terminators AND backslashes included), so an option-level `\:` / `\=`
+    reaches the option parser intact. A quote inside the path cannot live
+    inside the quotes, so it closes them, emits a graph-level `\\\'` (which
+    reaches the option parser as `\'`), and reopens. Backslashes are
+    forward-slashed first, which every ffmpeg on Windows accepts.
+
+    Proven against `ass`, `subtitles` and `drawtext` in both `-vf` and
+    `-filter_complex`, with spaces, apostrophes, `=`, `[x],y;z` and two drive
+    letters in the path — see tests/test_ffmpeg_filter_path.py, which re-runs
+    the real binary when one is installed.
+    """
+    s = str(p).replace("\\", "/")
+    s = s.replace(":", "\\:").replace("=", "\\=")
+    s = s.replace("'", "'\\\\\\''")
+    return f"'{s}'"
