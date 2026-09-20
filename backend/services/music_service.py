@@ -15,6 +15,7 @@ import httpx
 from backend.config import settings
 from backend.core.exceptions import VideoGenerationError
 from backend.services.video_utils import probe_duration
+from backend.services.ffmpeg_service import ffmpeg_error
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,7 @@ async def mix_audio(
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
-            logger.warning(f"Music mixing failed: {result.stderr[:400]}")
+            logger.warning(f"Music mixing failed: {ffmpeg_error(result.stderr, 400)}")
             return voice_path  # Return voice only on failure
 
         return output_path

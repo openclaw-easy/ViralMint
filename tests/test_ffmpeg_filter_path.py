@@ -136,3 +136,36 @@ class TestRealFfmpeg:
         quoted = ff_filter_path("C:/it's=odd/t.txt")
         r = _run(work, "-vf", f"drawtext=textfile={quoted}:fontcolor=white")
         assert r.returncode == 0, r.stderr
+
+
+class TestNoFfmpegErrorIsThrownAway:
+    """ffmpeg prints ~200 characters of version banner BEFORE it says anything
+    useful, so a raw `stderr[:N]` logs a constant string and discards the
+    diagnosis. `ffmpeg_error()` drops the banner and returns the tail.
+
+    This is a drift guard over the whole backend: the class was fixed one call
+    site at a time for a year, which means the next occurrence waits for the next
+    audit. The ONE exemption is yt-dlp's own stderr, which carries no banner.
+    """
+
+    EXEMPT = {"backend/services/ytdlp_service.py"}
+
+    def test_no_module_truncates_ffmpeg_stderr_by_hand(self):
+        import re
+        root = Path(__file__).resolve().parents[1]
+        offenders = []
+        for py in (root / "backend").rglob("*.py"):
+            rel = py.relative_to(root).as_posix()
+            src = py.read_text(encoding="utf-8")
+            for m in re.finditer(r"\b\w+\.stderr\[:\d+\]", src):
+                line = src[:m.start()].count("\n") + 1
+                if rel in self.EXEMPT:
+                    continue
+                # The helper's own docstring quotes the broken form.
+                if "stderr[:200]` logs" in src[max(0, m.start() - 120):m.start() + 60]:
+                    continue
+                offenders.append(f"{rel}:{line} {m.group(0)}")
+        assert not offenders, (
+            "these log ffmpeg's version banner instead of the error — "
+            f"use ffmpeg_error(result.stderr, N): {offenders}"
+        )

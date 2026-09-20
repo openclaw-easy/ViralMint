@@ -14,6 +14,7 @@ from pathlib import Path
 
 from backend.config import settings
 from backend.core.exceptions import VideoGenerationError
+from backend.services.ffmpeg_service import ffmpeg_error
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +279,7 @@ async def mix_sfx_into_audio(
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
-            logger.warning(f"SFX mixing failed, returning original: {result.stderr[:400]}")
+            logger.warning(f"SFX mixing failed, returning original: {ffmpeg_error(result.stderr, 400)}")
             return audio_path
         return output_path
 
@@ -326,6 +327,6 @@ def ensure_sfx_dir():
             if result.returncode == 0:
                 logger.info(f"Generated SFX: {path}")
             else:
-                logger.warning(f"Failed to generate SFX {name}: {result.stderr[:200]}")
+                logger.warning(f"Failed to generate SFX {name}: {ffmpeg_error(result.stderr, 200)}")
         except Exception as e:
             logger.warning(f"SFX generation failed for {name}: {e}")

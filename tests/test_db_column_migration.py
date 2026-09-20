@@ -14,7 +14,7 @@ from backend.database import _add_column_if_missing, _table_columns
 
 # init_db's migration list — the upper bound below must stay well under it, or
 # the assertion stops proving that only missing columns get ALTERed.
-_MIGRATION_CALL_COUNT = 16
+_MIGRATION_CALL_COUNT = 17
 
 
 def test_migration_call_count_constant_is_current():

@@ -29,6 +29,12 @@ import math
 import subprocess
 from pathlib import Path
 
+# The one ffmpeg-stderr formatter. ffmpeg prints ~200 characters of version
+# banner before it says anything useful, so a raw `stderr[:N]` logs a constant
+# string and throws the diagnosis away. Module-level because ~10 runners here
+# need it and ffmpeg_service imports only config + video_utils — no cycle.
+from backend.services.ffmpeg_service import ffmpeg_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -505,7 +511,7 @@ async def run_tool_audio_enhance(job_id: str, in_path: Path, user_id: str = "loc
                     capture_output=True, text=True, timeout=900,
                 )
                 if res.returncode != 0:
-                    raise RuntimeError(f"Audio enhance failed: {res.stderr[:400]}")
+                    raise RuntimeError(f"Audio enhance failed: {ffmpeg_error(res.stderr, 400)}")
                 return
             # Two passes: `-c:v copy` into .mp4 is invalid for VP8/VP9, and
             # .webm is both an accepted extension and what most screen
@@ -601,7 +607,7 @@ async def run_tool_watermark(
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             if res.returncode != 0:
-                raise RuntimeError(f"Watermark render failed: {res.stderr[:400]}")
+                raise RuntimeError(f"Watermark render failed: {ffmpeg_error(res.stderr, 400)}")
         await asyncio.to_thread(_apply)
         if not out_path.exists():
             raise RuntimeError("Watermark rendering failed — the logo or video may be invalid")
@@ -746,7 +752,7 @@ async def run_tool_remove_silence(job_id: str, in_path: Path, user_id: str = "lo
                     f"pieces and run them separately."
                 ) from e
             if res.returncode != 0:
-                raise RuntimeError(f"Silence cut failed: {res.stderr[:400]}")
+                raise RuntimeError(f"Silence cut failed: {ffmpeg_error(res.stderr, 400)}")
         await asyncio.to_thread(_cut)
 
         await _tool_success(job_id, out_path, cleanup, user_id)
@@ -828,7 +834,7 @@ def _crop_to_aspect_sync(src: Path, dst: Path, target_w: int, target_h: int):
     ]
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if res.returncode != 0:
-        raise RuntimeError(f"Clip normalize failed: {res.stderr[:400]}")
+        raise RuntimeError(f"Clip normalize failed: {ffmpeg_error(res.stderr, 400)}")
 
 
 async def run_tool_merge_clips(
@@ -1159,7 +1165,7 @@ async def run_tool_hook_analysis(job_id: str, in_path: Path, user_id: str = "loc
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if res.returncode != 0:
-                raise RuntimeError(f"Opening-audio extract failed: {res.stderr[:400]}")
+                raise RuntimeError(f"Opening-audio extract failed: {ffmpeg_error(res.stderr, 400)}")
         await asyncio.to_thread(_extract)
 
         await _tool_progress(job_id, 45, "Transcribing opening audio...", user_id)
@@ -1337,7 +1343,7 @@ async def run_tool_transform(
                               "-pix_fmt", "yuv420p", "-c:a", "copy", str(out_path)]
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             if res.returncode != 0:
-                raise RuntimeError(f"Transform failed: {res.stderr[:400]}")
+                raise RuntimeError(f"Transform failed: {ffmpeg_error(res.stderr, 400)}")
 
         await _tool_progress(job_id, 40, "Processing...", user_id)
         await asyncio.to_thread(_run)
@@ -1408,7 +1414,7 @@ async def run_tool_music_visualizer(
             )
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             if res.returncode != 0:
-                raise RuntimeError(f"Visualizer render failed: {res.stderr[:400]}")
+                raise RuntimeError(f"Visualizer render failed: {ffmpeg_error(res.stderr, 400)}")
         await asyncio.to_thread(_render)
 
         await _tool_success(job_id, out_path, cleanup, user_id)
@@ -1452,7 +1458,7 @@ async def run_tool_gif(
             )
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if res.returncode != 0:
-                raise RuntimeError(f"GIF palette failed: {res.stderr[:400]}")
+                raise RuntimeError(f"GIF palette failed: {ffmpeg_error(res.stderr, 400)}")
         await asyncio.to_thread(_palette)
 
         await _tool_progress(job_id, 60, "Encoding GIF...", user_id)
@@ -1467,7 +1473,7 @@ async def run_tool_gif(
             )
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
             if res.returncode != 0:
-                raise RuntimeError(f"GIF encode failed: {res.stderr[:400]}")
+                raise RuntimeError(f"GIF encode failed: {ffmpeg_error(res.stderr, 400)}")
         await asyncio.to_thread(_encode)
 
         await _tool_success(job_id, out_path, cleanup, user_id)
@@ -1522,7 +1528,7 @@ async def run_tool_speed(
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             if res.returncode != 0:
-                raise RuntimeError(f"Speed re-encode failed: {res.stderr[:400]}")
+                raise RuntimeError(f"Speed re-encode failed: {ffmpeg_error(res.stderr, 400)}")
         await asyncio.to_thread(_encode)
 
         await _tool_success(job_id, out_path, cleanup, user_id)

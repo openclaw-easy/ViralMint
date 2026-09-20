@@ -74,7 +74,7 @@ async def _stitch_concat(clip_paths: list[Path], output_path: Path) -> Path:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         concat_file.unlink(missing_ok=True)
         if result.returncode != 0:
-            raise VideoGenerationError(f"FFmpeg stitch failed: {result.stderr[:500]}")
+            raise VideoGenerationError(f"FFmpeg stitch failed: {ffmpeg_error(result.stderr, 500)}")
         return output_path
 
     return await asyncio.to_thread(_run)
@@ -132,7 +132,7 @@ async def _stitch_xfade(
         )
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
-            logger.warning(f"xfade stitch failed, falling back to concat: {result.stderr[:400]}")
+            logger.warning(f"xfade stitch failed, falling back to concat: {ffmpeg_error(result.stderr, 400)}")
             # Fallback to simple concat
             concat_file = _tmp("concat.txt")
             concat_file.parent.mkdir(parents=True, exist_ok=True)
@@ -149,7 +149,7 @@ async def _stitch_xfade(
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             concat_file.unlink(missing_ok=True)
             if result.returncode != 0:
-                raise VideoGenerationError(f"FFmpeg stitch failed: {result.stderr[:500]}")
+                raise VideoGenerationError(f"FFmpeg stitch failed: {ffmpeg_error(result.stderr, 500)}")
         return output_path
 
     return await asyncio.to_thread(_run)
@@ -176,7 +176,7 @@ async def add_audio_to_video(
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            raise VideoGenerationError(f"FFmpeg audio merge failed: {result.stderr[:500]}")
+            raise VideoGenerationError(f"FFmpeg audio merge failed: {ffmpeg_error(result.stderr, 500)}")
         return output_path
 
     return await asyncio.to_thread(_merge)
@@ -384,7 +384,7 @@ async def extract_clip(
                 f"Cut it into shorter ranges and retry."
             )
         if result.returncode != 0:
-            raise VideoGenerationError(f"Clip extraction failed: {result.stderr[:500]}")
+            raise VideoGenerationError(f"Clip extraction failed: {ffmpeg_error(result.stderr, 500)}")
         if not output_path.exists() or output_path.stat().st_size < 1000:
             raise VideoGenerationError(f"Clip extraction produced empty or invalid file: {output_path}")
         return output_path
@@ -502,7 +502,7 @@ async def generate_text_video(
             if result.returncode == 0 and clip_path.exists():
                 tmp_clips.append(clip_path)
             else:
-                logger.warning(f"Text clip {idx} failed: {result.stderr[:300]}")
+                logger.warning(f"Text clip {idx} failed: {ffmpeg_error(result.stderr, 300)}")
             img_path.unlink(missing_ok=True)
 
         if not tmp_clips:
@@ -524,7 +524,7 @@ async def generate_text_video(
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
-            raise VideoGenerationError(f"FFmpeg concat failed: {result.stderr[:300]}")
+            raise VideoGenerationError(f"FFmpeg concat failed: {ffmpeg_error(result.stderr, 300)}")
 
         # Merge audio if available
         if audio_path and audio_path.exists():
@@ -774,7 +774,7 @@ async def generate_kenburns_video(
             if result.returncode == 0 and clip_path.exists():
                 tmp_clips.append(clip_path)
             else:
-                logger.warning(f"Ken Burns clip {idx} failed: {result.stderr[:300]}")
+                logger.warning(f"Ken Burns clip {idx} failed: {ffmpeg_error(result.stderr, 300)}")
 
         if not tmp_clips:
             raise VideoGenerationError("All Ken Burns clips failed to generate")
@@ -821,7 +821,7 @@ async def generate_kenburns_video(
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
                 # Fallback: simple concat without crossfade
-                logger.warning(f"xfade stitch failed, falling back to concat: {result.stderr[:300]}")
+                logger.warning(f"xfade stitch failed, falling back to concat: {ffmpeg_error(result.stderr, 300)}")
                 concat_file = _tmp("kb_concat.txt")
                 with open(concat_file, "w") as f:
                     for clip in tmp_clips:
@@ -836,7 +836,7 @@ async def generate_kenburns_video(
                 ]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                 if result.returncode != 0:
-                    raise VideoGenerationError(f"Ken Burns stitch failed: {result.stderr[:300]}")
+                    raise VideoGenerationError(f"Ken Burns stitch failed: {ffmpeg_error(result.stderr, 300)}")
                 concat_file.unlink(missing_ok=True)
 
         # Merge audio if provided
@@ -914,7 +914,7 @@ async def generate_single_kenburns_clip(
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         if result.returncode != 0 or not output_path.exists():
             raise VideoGenerationError(
-                f"Ken Burns clip failed: {result.stderr[:300]}"
+                f"Ken Burns clip failed: {ffmpeg_error(result.stderr, 300)}"
             )
         return output_path
 

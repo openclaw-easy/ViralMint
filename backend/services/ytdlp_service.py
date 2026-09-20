@@ -556,7 +556,9 @@ def _extract_audio_locally(video_path: Path, audio_dir: Path, filename_stem: str
         )
         if result.returncode == 0 and audio_path.exists() and audio_path.stat().st_size > 0:
             return audio_path
-        logger.warning(f"FFmpeg audio extraction returned {result.returncode}: {result.stderr[:200]}")
+        from backend.services.ffmpeg_service import ffmpeg_error
+        logger.warning("FFmpeg audio extraction returned %s: %s",
+                       result.returncode, ffmpeg_error(result.stderr, 200))
     except subprocess.TimeoutExpired:
         logger.warning(f"FFmpeg audio extraction timed out for {video_path}")
     except FileNotFoundError:
