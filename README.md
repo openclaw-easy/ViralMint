@@ -51,7 +51,7 @@ All on your machine. Bring your own API keys. No SaaS in the middle. No telemetr
 | 📱 **Runs from your phone** | Two-way chat with the planner over Telegram, WhatsApp, Discord, or Slack — and job alerts in the same thread. |
 | 🆓 **Free out of the box** | Local Whisper, Edge TTS (400+ voices), royalty-free music, Pexels stock, and 22 built-in tools (most of them pure FFmpeg + Whisper) — the heavy lifting costs $0. Pay only for the AI you choose to plug in. |
 
-<sub>Battle-tested: a **2,400-test pytest suite** runs on every commit, plus a browser harness that drives the real app end to end. AGPL-3.0 — fork it, modify it, build a business on it.</sub>
+<sub>Battle-tested: a **2,500-test pytest suite** runs on every commit, plus a browser harness that drives the real app end to end. AGPL-3.0 — fork it, modify it, build a business on it.</sub>
 
 ---
 
@@ -333,7 +333,7 @@ ViralMint/
 │       ├── hooks/                  # WebSocket, settings, jobs, source video
 │       └── store/                  # Zustand global state
 │
-├── tests/                          # pytest suite (2,400+ tests)
+├── tests/                          # pytest suite (2,500+ tests)
 ├── storage/                        # Downloaded videos, audio, generated output (gitignored)
 │
 ├── requirements.txt
@@ -380,15 +380,19 @@ Stars are the single biggest thing that helps this project — they attract cont
 
 **[⭐ Star openclaw-easy/ViralMint](https://github.com/openclaw-easy/ViralMint)**
 
-<!-- Star-history is a LINK, not an embedded <img>, on purpose: GitHub
-     restricted the stargazers API on 2026-06-30 (star data is readable
-     only by a repo's own admins/collaborators), which broke star-history's
-     server-side rendering for public README embeds — the inline SVG now
-     returns "rate-limited / not available" for anonymous visitors. A link
-     always works and never shows a broken image. If star-history's
-     encrypted-token embed becomes viable again, this can go back to a
-     <picture> block — but NEVER embed a raw github_pat_ token in the URL
-     (it would be public + abused); only star-history's encrypted token. -->
+<!-- Star-history chart. The repo slug is LOWERCASE on purpose: the
+     mixed-case URL answers 301, and GitHub's image proxy caches whatever the
+     first fetch returned. Re-probe before touching this:
+     curl -s -o /dev/null -w '%{http_code}' 'https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date'
+     NEVER put a raw github_pat_ token in this URL (it would be public). -->
+<a href="https://star-history.com/#openclaw-easy/ViralMint&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date" />
+    <img alt="ViralMint star history chart" src="https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date" width="600" />
+  </picture>
+</a>
+
 **[📈 See ViralMint's star history →](https://star-history.com/#openclaw-easy/ViralMint&Date)**
 
 <br/>

@@ -51,7 +51,7 @@
 | 📱 **スマホから操作** | Telegram・WhatsApp・Discord・Slack でプランナーと双方向チャット — 同じスレッドでジョブ通知も届きます。 |
 | 🆓 **すぐに無料で使える** | ローカル Whisper、Edge TTS（400以上の音声）、ロイヤリティフリー音楽、Pexels ストック、22の内蔵ツール（ほとんどは FFmpeg + Whisper だけで動作） — 重い処理はすべて $0。プラグインする AI のぶんだけ課金されます。 |
 
-<sub>実戦仕込み: 毎コミットで **2,400テストの pytest スイート** と、実アプリをエンドツーエンドで操作するブラウザハーネスが走ります。AGPL-3.0 — フォークして、改変して、その上でビジネスを構築できます。</sub>
+<sub>実戦仕込み: 毎コミットで **2,500テストの pytest スイート** と、実アプリをエンドツーエンドで操作するブラウザハーネスが走ります。AGPL-3.0 — フォークして、改変して、その上でビジネスを構築できます。</sub>
 
 ---
 
@@ -330,7 +330,7 @@ ViralMint/
 │       ├── hooks/                  # WebSocket, settings, jobs, source video
 │       └── store/                  # Zustand global state
 │
-├── tests/                          # pytest suite (2,400+ tests)
+├── tests/                          # pytest suite (2,500+ tests)
 ├── storage/                        # Downloaded videos, audio, generated output (gitignored)
 │
 ├── requirements.txt
@@ -377,15 +377,19 @@ ViralMint は **GNU Affero General Public License v3.0**（[LICENSE](LICENSE)）
 
 **[⭐ openclaw-easy/ViralMint にスター](https://github.com/openclaw-easy/ViralMint)**
 
-<!-- Star-history is a LINK, not an embedded <img>, on purpose: GitHub
-     restricted the stargazers API on 2026-06-30 (star data is readable
-     only by a repo's own admins/collaborators), which broke star-history's
-     server-side rendering for public README embeds — the inline SVG now
-     returns "rate-limited / not available" for anonymous visitors. A link
-     always works and never shows a broken image. If star-history's
-     encrypted-token embed becomes viable again, this can go back to a
-     <picture> block — but NEVER embed a raw github_pat_ token in the URL
-     (it would be public + abused); only star-history's encrypted token. -->
+<!-- Star-history chart. The repo slug is LOWERCASE on purpose: the
+     mixed-case URL answers 301, and GitHub's image proxy caches whatever the
+     first fetch returned. Re-probe before touching this:
+     curl -s -o /dev/null -w '%{http_code}' 'https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date'
+     NEVER put a raw github_pat_ token in this URL (it would be public). -->
+<a href="https://star-history.com/#openclaw-easy/ViralMint&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date" />
+    <img alt="ViralMint スター履歴チャート" src="https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date" width="600" />
+  </picture>
+</a>
+
 **[📈 ViralMint のスター履歴を見る →](https://star-history.com/#openclaw-easy/ViralMint&Date)**
 
 <br/>

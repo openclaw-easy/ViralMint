@@ -51,7 +51,7 @@
 | 📱 **用手机随时随地掌控** | 通过 Telegram、WhatsApp、Discord 或 Slack 与规划智能体（Planner）双向对话——任务提醒也发到同一个会话里。 |
 | 🆓 **开箱即免费** | 本地 Whisper、Edge TTS（400+ 语音）、免版税音乐、Pexels 素材，以及 22 个内置工具（大多只靠 FFmpeg + Whisper）——最重的活儿花费 $0。只为你主动选择接入的 AI 付费。 |
 
-<sub>经过实战检验：一套 **2,400 个测试的 pytest 测试集** 在每次提交时运行，另有一套浏览器测试装置端到端驱动真实应用。AGPL-3.0——尽管 fork、修改，并在其之上创业。</sub>
+<sub>经过实战检验：一套 **2,500 个测试的 pytest 测试集** 在每次提交时运行，另有一套浏览器测试装置端到端驱动真实应用。AGPL-3.0——尽管 fork、修改，并在其之上创业。</sub>
 
 ---
 
@@ -330,7 +330,7 @@ ViralMint/
 │       ├── hooks/                  # WebSocket, settings, jobs, source video
 │       └── store/                  # Zustand global state
 │
-├── tests/                          # pytest suite (2,400+ tests)
+├── tests/                          # pytest suite (2,500+ tests)
 ├── storage/                        # Downloaded videos, audio, generated output (gitignored)
 │
 ├── requirements.txt
@@ -377,15 +377,19 @@ Star 是对这个项目帮助最大的一件事——它能吸引贡献者、解
 
 **[⭐ 给 openclaw-easy/ViralMint 点 Star](https://github.com/openclaw-easy/ViralMint)**
 
-<!-- Star-history is a LINK, not an embedded <img>, on purpose: GitHub
-     restricted the stargazers API on 2026-06-30 (star data is readable
-     only by a repo's own admins/collaborators), which broke star-history's
-     server-side rendering for public README embeds — the inline SVG now
-     returns "rate-limited / not available" for anonymous visitors. A link
-     always works and never shows a broken image. If star-history's
-     encrypted-token embed becomes viable again, this can go back to a
-     <picture> block — but NEVER embed a raw github_pat_ token in the URL
-     (it would be public + abused); only star-history's encrypted token. -->
+<!-- Star-history chart. The repo slug is LOWERCASE on purpose: the
+     mixed-case URL answers 301, and GitHub's image proxy caches whatever the
+     first fetch returned. Re-probe before touching this:
+     curl -s -o /dev/null -w '%{http_code}' 'https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date'
+     NEVER put a raw github_pat_ token in this URL (it would be public). -->
+<a href="https://star-history.com/#openclaw-easy/ViralMint&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date" />
+    <img alt="ViralMint Star 历史图表" src="https://api.star-history.com/svg?repos=openclaw-easy/viralmint&type=Date" width="600" />
+  </picture>
+</a>
+
 **[📈 查看 ViralMint 的 Star 历史 →](https://star-history.com/#openclaw-easy/ViralMint&Date)**
 
 <br/>
