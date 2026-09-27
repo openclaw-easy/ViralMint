@@ -4,7 +4,7 @@
 
 [project]
 name = "viralmint"
-version = "1.0.0"
+version = "1.2.0"
 description = "Open-source video pipeline (clipper, AI video & more) — scout trends, clip long videos, generate captioned shorts, design motion graphics. Local-first, BYOK."
 readme = "README.md"
 requires-python = ">=3.11"
