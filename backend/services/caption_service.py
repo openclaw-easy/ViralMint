@@ -77,6 +77,84 @@ def insert_emojis_into_words(words: list[dict], style: str = "moderate") -> list
 
     return words
 
+
+# ── Emoji glyphs in BURNED captions ───────────────────────────────────────────
+#
+# libass (FreeType) cannot draw colour-bitmap emoji fonts — Apple Color Emoji
+# is `sbix`, Noto Color Emoji is `CBDT` — and its per-glyph fallback lands on
+# exactly those on macOS/Linux, so every AutoEmoji burned as an empty box
+# ("A video ▢ with 10"; AutoEmoji is ON by default via
+# `caption_emoji_style="moderate"`). Windows' Segoe UI Emoji has outlines
+# and may have drawn, but nothing guaranteed it.
+#
+# The fix ships ONE monochrome outline emoji font with the backend and makes
+# every emoji run in an ASS event name it explicitly (`{\fnNoto Emoji}…`),
+# with the font's folder handed to libass as `fontsdir=` (`ass_filter`). Same
+# glyphs on all three OSes, no dependence on what the user has installed.
+#
+# caption_fonts/NotoEmoji-Bold.ttf = Google "Noto Emoji" (monochrome, SIL OFL
+# 1.1 — see caption_fonts/OFL.txt; no Reserved Font Name), the static wght=700
+# instance of google/fonts ofl/notoemoji/NotoEmoji[wght].ttf @ b979dba4
+# (fontTools varLib.instancer, 885 KB vs 1.98 MB for the variable font).
+#
+# If the file is missing (a stripped build), emoji are NOT burned at all:
+# `emojify_ass_text` drops them and `generate_captions_ass` skips AutoEmoji.
+# Tofu is never the answer.
+EMOJI_FONT_DIR = Path(__file__).resolve().parent / "caption_fonts"
+EMOJI_FONT_FILE = EMOJI_FONT_DIR / "NotoEmoji-Bold.ttf"
+EMOJI_FONT_NAME = "Noto Emoji"
+
+
+def emoji_font_available() -> bool:
+    return EMOJI_FONT_FILE.is_file()
+
+
+# One emoji "run": keycap sequences (digit/#/* + FE0F? + U+20E3) as a unit so
+# the base digit and its keycap never split across two fonts, then runs of
+# pictographic code points plus their joiners/modifiers (VS16, ZWJ, tags).
+# Ranges are the emoji-bearing blocks Noto Emoji covers; © ® ™ are left alone
+# on purpose — the caption font draws those as text.
+_EMOJI_CHARS = (
+    "‼⁉ℹ↔-↙↩↪⌚⌛⌨⏏"
+    "⏩-⏺Ⓜ▪▫▶◀◻-◾☀-➿"
+    "⤴⤵⬅-⬇⬛⬜⭐⭕〰〽㊗㊙"
+    "\U0001F000-\U0001FAFF"
+)
+_EMOJI_JOINERS = "️‍\U000E0020-\U000E007F"
+_EMOJI_RUN_RE = re.compile(
+    rf"[0-9#*]️?⃣"
+    rf"|[{_EMOJI_CHARS}][{_EMOJI_CHARS}{_EMOJI_JOINERS}]*"
+)
+
+
+def emojify_ass_text(text: str, base_font: str) -> str:
+    """Route every emoji run in (already brace-escaped) caption text to the
+    bundled outline emoji font, switching back to `base_font` after it.
+
+    Must run AFTER `_ass_safe` (it emits override blocks) and only at event
+    emission — the line grouper's char budget measures the visible text.
+    Without the bundled font the runs are removed instead, so a burn never
+    carries a glyph libass would draw as a box.
+    """
+    if not text or not _EMOJI_RUN_RE.search(text):
+        return text
+    if not emoji_font_available():
+        return " ".join(_EMOJI_RUN_RE.sub("", text).split())
+    return _EMOJI_RUN_RE.sub(
+        lambda m: f"{{\\fn{EMOJI_FONT_NAME}}}{m.group(0)}{{\\fn{base_font}}}", text,
+    )
+
+
+def ass_filter(ass_path: Path) -> str:
+    """The `ass=` filter for burning a file this module wrote — with the
+    bundled emoji font's folder as `fontsdir=` so `{\\fnNoto Emoji}` resolves.
+    Both paths go through `ff_filter_path` (Windows drive colon)."""
+    from backend.services.video_utils import ff_filter_path
+    f = f"ass={ff_filter_path(Path(ass_path).resolve())}"
+    if emoji_font_available():
+        f += f":fontsdir={ff_filter_path(EMOJI_FONT_DIR)}"
+    return f
+
 # ── Caption Style Presets ──────────────────────────────────────────────────────
 
 # Style names that mean "don't burn captions at all".
@@ -697,7 +775,7 @@ def _sanitize_hook_text(raw: str) -> str:
     return text[:cut].rstrip(" ,;:.") + "…"
 
 
-def _build_hook_event(hook_text: str, hook_duration: float) -> str:
+def _build_hook_event(hook_text: str, hook_duration: float, font: str | None = None) -> str:
     """Return a single ASS Dialogue line rendering the hook at top-center
     with fade-in/fade-out. Returns empty string if hook_text is blank."""
     clean = _sanitize_hook_text(hook_text)
@@ -708,6 +786,8 @@ def _build_hook_event(hook_text: str, hook_duration: float) -> str:
     centis = int(round(end_s * 100))
     end_ts = f"0:00:{centis // 100:02d}.{centis % 100:02d}"
     # \fad(in_ms, out_ms) is native ASS fade animation — no FFmpeg filter needed.
+    if font:
+        clean = emojify_ass_text(clean, font)
     return f"Dialogue: 0,0:00:00.00,{end_ts},Hook,,0,0,0,,{{\\fad(300,500)}}{clean}\n"
 
 
@@ -899,6 +979,7 @@ def _generate_ass_events(words: list[dict], style: dict) -> str:
     max_words = style.get("words_per_group", 6)
     highlight = style.get("highlight_color", "&H0000FFFF")
     primary = style.get("primary_color", "&H00FFFFFF")
+    font = style.get("font") or "Arial Bold"
     lines = _group_words_into_lines(words, max_words, _max_chars_for(style))
     events = []
 
@@ -928,6 +1009,10 @@ def _generate_ass_events(words: list[dict], style: dict) -> str:
             bounds.append(max(float(w["start"]), bounds[-1]))
         bounds.append(max(line_end, bounds[-1]))
 
+        # Emoji runs name the bundled outline emoji font (see
+        # `emojify_ass_text`) — libass would otherwise draw them as boxes.
+        texts = [emojify_ass_text(w["text"], font) for w in line]
+
         for active_idx in range(len(line)):
             seg_start, seg_end = bounds[active_idx], bounds[active_idx + 1]
             if seg_end <= seg_start:
@@ -936,9 +1021,9 @@ def _generate_ass_events(words: list[dict], style: dict) -> str:
             parts = []
             for j, w in enumerate(line):
                 if j == active_idx:
-                    parts.append(f"{{\\1c{highlight}\\b1}}{w['text']}{{\\1c{primary}\\b0}}")
+                    parts.append(f"{{\\1c{highlight}\\b1}}{texts[j]}{{\\1c{primary}\\b0}}")
                 else:
-                    parts.append(w["text"])
+                    parts.append(texts[j])
 
             text = " ".join(parts)
             start_ts = _format_ass_time(seg_start)
@@ -997,16 +1082,21 @@ async def generate_captions_ass(
     else:  # 16:9
         resolution = (1920, 1080)
 
-    hook_event = _build_hook_event(hook_text, hook_duration) if hook_text else ""
-
     # Extract word-level timestamps
     words = _extract_word_timestamps(segments)
-    if not words and not hook_event:
+    if not words and not _sanitize_hook_text(hook_text or ""):
         logger.warning("No words found in segments — generating empty caption file")
         output_path.write_text("")
         return output_path
 
-    # Auto-insert emojis based on keyword matching
+    # Auto-insert emojis based on keyword matching. Without the bundled
+    # outline emoji font every one would burn as a box — skip them instead.
+    if emoji_style != "none" and not emoji_font_available():
+        logger.warning(
+            "Emoji caption font missing (%s) — AutoEmoji disabled for this burn",
+            EMOJI_FONT_FILE,
+        )
+        emoji_style = "none"
     words = insert_emojis_into_words(words, emoji_style) if words else []
 
     # Script-aware font fallback: if the caption/hook text needs a script the
@@ -1017,6 +1107,12 @@ async def generate_captions_ass(
     fallback_font = resolve_caption_font(style_config["font"], full_text)
     if fallback_font != style_config["font"]:
         style_config = {**style_config, "font": fallback_font}
+
+    # Built after the font is final: the hook's emoji switch back to it.
+    hook_event = (
+        _build_hook_event(hook_text, hook_duration, font=style_config["font"])
+        if hook_text else ""
+    )
 
     # Build ASS file. include_hook_style only when we'll actually emit a hook event.
     header = _build_ass_header(
@@ -1091,13 +1187,12 @@ async def burn_captions(
     def _burn():
         # The Windows drive colon splits an unquoted filter value, and the old
         # single-backslash escape here failed identically — see ff_filter_path.
-        from backend.services.video_utils import ff_filter_path
         from backend.services.ffmpeg_service import ffmpeg_error
 
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video_path),
-            "-vf", f"ass={ff_filter_path(ass_path.resolve())}",
+            "-vf", ass_filter(ass_path),
             "-c:a", "copy",
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             str(output_path),
