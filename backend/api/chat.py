@@ -278,8 +278,12 @@ async def chat_websocket(websocket: WebSocket):
             elif msg_type == "job_cancel":
                 job_id = msg.get("job_id")
                 if job_id:
-                    from backend.agents.job_helper import update_job_status
-                    await update_job_status(job_id, "cancelled")
+                    # Conditional: only a job that is still live is cancelled.
+                    # update_job_status allows terminal→terminal writes (the
+                    # boot sweep self-heals through them), so a late cancel
+                    # used to rewrite an already-finished job as "cancelled".
+                    from backend.agents.job_helper import cancel_if_live
+                    await cancel_if_live(job_id)
 
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket, user_id)

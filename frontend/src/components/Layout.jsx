@@ -344,9 +344,18 @@ export default function Layout() {
         }}
         onCancel={async (jobId) => {
           try {
-            await http.delete(`/api/jobs/${jobId}`)
+            const { data } = await http.delete(`/api/jobs/${jobId}`)
             removeJob(jobId)
-            showSnackbar("Job cancelled", "info")
+            // Cancellation is cooperative: the row flips at once, but a
+            // transfer or ffmpeg pass already in flight finishes on its own.
+            // A bare "Job cancelled" reads as a completed stop and invites a
+            // duplicate, so when the server reports best_effort, say so.
+            showSnackbar(
+              data?.best_effort
+                ? "Cancelling — the step already running will finish on its own"
+                : "Job cancelled",
+              "info",
+            )
           } catch (e) {
             showSnackbar(e.response?.data?.detail || "Could not cancel that job", "error")
           } finally {
@@ -358,13 +367,27 @@ export default function Layout() {
           // by design, so a running render is never destroyed by a stray click.
           // Removing a running row therefore takes two calls.
           try {
-            await http.delete(`/api/jobs/${job.id}`)
+            const { data } = await http.delete(`/api/jobs/${job.id}`)
             if (job.state === "running") {
               removeJob(job.id)
-              // The second call removes the now-cancelled row. A 409 means it
-              // backs a Library file — surface that rather than swallow it.
-              await http.delete(`/api/jobs/${job.id}`).catch(() => {})
-              showSnackbar("Job cancelled and removed", "info")
+              if (data?.best_effort) {
+                // The step in flight is still running and will write its
+                // outcome (or its error) to this row. Deleting now would throw
+                // that away, so leave the row; it can be removed once it stops.
+                showSnackbar(
+                  "Cancelling — the step already running will finish on its own. Remove it once it stops.",
+                  "info",
+                )
+              } else {
+                // Never started, so nothing will write to the row — remove it.
+                // A 409 means it backs a Library file; say so rather than swallow it.
+                try {
+                  await http.delete(`/api/jobs/${job.id}`)
+                  showSnackbar("Job cancelled and removed", "info")
+                } catch (e2) {
+                  showSnackbar(e2.response?.data?.detail || "Job cancelled, but could not remove it", "warning")
+                }
+              }
             } else {
               showSnackbar("Job removed", "info")
             }

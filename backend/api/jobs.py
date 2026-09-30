@@ -5,11 +5,12 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from backend.database import AsyncSessionLocal
 from backend.models.job import Job
 from backend.agents.job_helper import update_job_status
+from backend.core.task_runner import runner_active
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -117,6 +118,11 @@ async def get_job(job_id: str):
         "input_json": j.input_json,
         "output_json": j.output_json,
         "estimated_cost_usd": j.estimated_cost_usd,
+        # True while the job's runner is still executing in this process —
+        # including AFTER a cancel flipped `status` to "cancelled". The one
+        # field that says when in-flight work has actually ended; wait on it
+        # before starting a replacement for a cancelled job.
+        "runner_active": runner_active(j.id),
         "started_at": j.started_at.isoformat() if j.started_at else None,
         "completed_at": j.completed_at.isoformat() if j.completed_at else None,
         "created_at": j.created_at.isoformat() if j.created_at else None,
@@ -134,9 +140,71 @@ async def delete_job(job_id: str):
             raise HTTPException(status_code=404, detail="Job not found")
 
         if j.status in ("running", "pending"):
-            j.status = "cancelled"
+            # A runner that was admitted but has not yet written "running" is
+            # already doing work — count it as running, or its cancel would
+            # claim a completeness it does not have.
+            was_running = j.status == "running" or runner_active(job_id)
+            # Conditional flip: only a job that is STILL live gets cancelled.
+            # A plain read-then-assign overwrote a job that finished in
+            # between — the user got "cancelled" for work that had already
+            # succeeded and been reported as complete.
+            flipped = await db.execute(
+                update(Job)
+                .where(Job.id == job_id, Job.status.in_(("running", "pending")))
+                .values(status="cancelled")
+                .execution_options(synchronize_session=False)
+            )
             await db.commit()
-            return {"message": "Job cancelled"}
+            if flipped.rowcount == 0:
+                await db.refresh(j)
+                return {
+                    "message": f"Job already finished ({j.status}) — nothing to cancel",
+                    "cancelled": False,
+                    "best_effort": False,
+                    "status": j.status,
+                }
+            # Cancellation is COOPERATIVE, and the response has to admit it.
+            #
+            # Flipping the row is instant. Stopping the work is not: yt-dlp
+            # transfers and ffmpeg passes run in threads Python cannot
+            # interrupt, so a running job finishes whatever step is already in
+            # flight (the row stays "cancelled"). A flat "Job cancelled" reads
+            # as a completed stop — a user saw the download land minutes later
+            # and had already started a duplicate by then.
+            #
+            # `best_effort` is False for a PENDING job on purpose: nothing had
+            # started, so that cancel really is complete. Always reporting
+            # best_effort would be its own inaccuracy and would train clients
+            # to ignore the field.
+            if was_running:
+                return {
+                    "message": "Job cancelled — a step already in flight may still finish",
+                    "cancelled": True,
+                    "best_effort": True,
+                    "detail": (
+                        "The job is marked cancelled and no further steps will "
+                        "start. Work already running (a download transfer, an "
+                        "ffmpeg pass) cannot be interrupted and will finish on "
+                        "its own. Poll the job until `runner_active` is false "
+                        "before starting a replacement, or you may end up with "
+                        "a duplicate."
+                    ),
+                }
+            return {
+                "message": "Job cancelled before it started",
+                "cancelled": True,
+                "best_effort": False,
+            }
+
+        # A cancelled job whose runner is still finishing its in-flight step
+        # keeps its row: the runner is about to write the outcome there — what
+        # landed, or why it failed — and deleting it first throws that away.
+        if runner_active(j.id):
+            raise HTTPException(
+                status_code=409,
+                detail="That job is still finishing the step it was on when you "
+                       "cancelled it — remove it once it stops.",
+            )
 
         # A successful tool run is not a log entry — it IS the Library item for
         # the file it wrote, and the asset endpoint resolves that file BY THIS
@@ -174,17 +242,32 @@ async def bulk_delete_jobs(body: BulkDeleteRequest):
     deleted = 0
     cancelled = 0
     kept_library = 0
+    kept_draining = 0
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(Job).where(Job.id.in_(body.job_ids)))
         jobs = result.scalars().all()
         for j in jobs:
             if j.status in ("running", "pending"):
-                j.status = "cancelled"
-                cancelled += 1
+                # Conditional, like delete_job: a job that finished between
+                # the SELECT and this write keeps its real terminal status
+                # instead of being rewritten as cancelled.
+                flipped = await db.execute(
+                    update(Job)
+                    .where(Job.id == j.id, Job.status.in_(("running", "pending")))
+                    .values(status="cancelled")
+                    .execution_options(synchronize_session=False)
+                )
+                if flipped.rowcount:
+                    cancelled += 1
+            elif runner_active(j.id):
+                # Cancelled but still draining its in-flight step — keep the
+                # row so the runner's outcome lands (see delete_job).
+                kept_draining += 1
             elif is_library_item(j):
                 kept_library += 1
             else:
                 await db.delete(j)
                 deleted += 1
         await db.commit()
-    return {"deleted": deleted, "cancelled": cancelled, "kept_library": kept_library}
+    return {"deleted": deleted, "cancelled": cancelled, "kept_library": kept_library,
+            "kept_draining": kept_draining}

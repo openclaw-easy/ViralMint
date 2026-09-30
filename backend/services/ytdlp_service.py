@@ -7,10 +7,18 @@ import logging
 import platform
 import re
 import shutil
+import threading
 import time
 from pathlib import Path
 from backend.config import settings
-from backend.core.exceptions import DownloadError, VideoUnavailableError, RateLimitError
+from backend.core.exceptions import (
+    DownloadError,
+    DownloadStalledError,
+    DownloadTimeoutError,
+    RateLimitError,
+    VideoUnavailableError,
+)
+from backend.core.executors import PoolExhaustedError, download_pool
 from backend.core.http_utils import get_user_agent
 
 logger = logging.getLogger(__name__)
@@ -578,6 +586,10 @@ def _cleanup_subtitle_files(output_dir: Path, filename_stem: str):
 
 def _cleanup_partial_files(output_dir: Path, filename_stem: str):
     """Remove leftover .part files from failed/interrupted downloads."""
+    # An empty stem globs `*.part` — every in-flight download's part-files in
+    # the directory, not just this one's.
+    if not filename_stem:
+        return
     cleaned = 0
     for f in output_dir.glob(f"{filename_stem}*.part"):
         try:
@@ -587,6 +599,323 @@ def _cleanup_partial_files(output_dir: Path, filename_stem: str):
             pass
     if cleaned:
         logger.info(f"Cleaned up {cleaned} partial file(s) for {filename_stem}")
+
+
+# ── Stall detection ─────────────────────────────────────────────────────────
+#
+# The wall-clock `wait_for` that used to wrap a download was not a progress
+# check, and it did not stop anything either. yt-dlp's retry budget (socket
+# timeouts, retries with exponential backoff, fragment retries, times the
+# rungs of FORMAT_FALLBACK_CHAIN) can consume the whole cap without a single
+# byte arriving — a job sat at "Downloading…" for the full budget with no
+# error — and when the timeout finally fired, `asyncio.wait_for` could not
+# cancel the thread: it kept running, holding a worker of the ONE executor
+# every `asyncio.to_thread` call in the app shares. Enough of those and every
+# request that touches `to_thread` hangs until a restart.
+#
+# So downloads run on their own bounded pool (backend/core/executors.py), and
+# progress is measured here. `_DownloadProgress` is written by yt-dlp's hooks
+# on the worker thread and read by `_await_with_stall_guard` on the event
+# loop, hence the lock.
+
+# How often the guard wakes to compare notes with the tracker. Small enough
+# to react promptly, large enough to be free next to a network transfer.
+_STALL_POLL_S = 1.0
+
+# How often the guard stats the attempt's files on disk. A glob of the videos
+# directory is cheap but not free on a large Library, and the stall budget is
+# measured in minutes, so a coarser cadence loses nothing.
+_DISK_POLL_S = 10.0
+
+# Wall-clock cap, named so it is visible and patchable in a test rather than
+# buried as a literal at the call site. Same 20 minutes as before.
+VIDEO_HARD_TIMEOUT_S = 1200
+
+
+def _stem_footprint(*locations: tuple[Path, str | None]) -> int:
+    """Total bytes of every file named `<stem>*` in each (dir, stem) pair.
+
+    Covers what a download attempt writes under its stem: `.part` files,
+    HLS `.part-FragN` fragments, `.f<id>.<ext>` DASH streams, `.temp.*`
+    merge output, the final file, and the `_audio.mp3` extracted after it.
+    A stem that is still a yt-dlp template (`%(id)s`) or absent cannot be
+    globbed and is skipped. Never raises — a stat racing a rename or a
+    cleanup is simply not counted.
+    """
+    total = 0
+    for directory, stem in locations:
+        if not stem or "%" in stem:
+            continue
+        try:
+            for f in Path(directory).glob(f"{glob.escape(stem)}*"):
+                try:
+                    total += f.stat().st_size
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    return total
+
+
+def _now() -> float:
+    """Monotonic clock for the stall guard's WALL-CLOCK budget.
+
+    Indirected purely so a test can fast-forward the cap without
+    monkeypatching `time.monotonic` itself — that module is shared with
+    asyncio's own scheduler, so patching it corrupts the event loop's timers
+    and the test stops testing anything.
+    """
+    return time.monotonic()
+
+
+class _DownloadProgress:
+    """Byte-level progress of one download attempt, shared thread↔loop.
+
+    `idle_seconds()` returns None while a postprocessor is running. That is
+    the single most important behaviour here: an ffmpeg merge of a long 4K
+    file reports no download progress for many minutes, and killing a
+    *finished* download during its merge would throw away exactly the work
+    the user waited for. During postprocessing only the hard wall clock
+    applies.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self, *, queued: bool = False) -> None:
+        """Start a fresh attempt.
+
+        `queued=True` means the work has been handed to a pool but no worker
+        has picked it up yet: the stall clock stays OFF until
+        `mark_started()`. A download waiting for a free worker cannot move a
+        byte, and charging that wait to the stall budget would fail queued
+        downloads as "stalled" before yt-dlp ever ran (the pool's own
+        admission timeout bounds the wait instead).
+        """
+        with self._lock:
+            self._bytes = 0
+            self._peak = 0
+            self._last_activity = time.monotonic()
+            self._postprocessing = False
+            self._started = not queued
+            self._disk = None
+
+    def mark_started(self) -> None:
+        """A worker thread picked the attempt up — start the stall clock."""
+        with self._lock:
+            self._started = True
+            self._last_activity = time.monotonic()
+
+    @property
+    def bytes_downloaded(self) -> int:
+        """The most bytes seen in this attempt — for reporting, not detection."""
+        with self._lock:
+            return self._peak
+
+    def note_bytes(self, downloaded: int) -> None:
+        """Record a byte count from a progress event.
+
+        Any CHANGE is progress; only a repeat of the exact same number is not.
+
+        The distinction matters both ways:
+
+        * A repeated identical count is what a retrying fragment reports. If
+          that counted as movement, a wedged download would look permanently
+          healthy and the watchdog would never fire.
+        * A count that goes DOWN is a NEW FILE starting, not a stall.
+          `downloaded_bytes` is per-file, and two routine cases restart it at
+          zero inside a single attempt: a DASH pull downloads the video
+          stream and then begins the audio stream from 0, and each rung of
+          FORMAT_FALLBACK_CHAIN restarts from 0 in the same `_download` call.
+          Requiring the count to GROW would freeze the clock for the whole of
+          the second file and kill a healthy download as "stalled".
+        """
+        if not isinstance(downloaded, int) or downloaded <= 0:
+            return
+        with self._lock:
+            if downloaded != self._bytes:
+                self._bytes = downloaded
+                self._peak = max(self._peak, downloaded)
+                self._last_activity = time.monotonic()
+
+    def note_disk(self, footprint: int) -> None:
+        """Record the attempt's on-disk footprint; any CHANGE is progress.
+
+        The second, hook-independent progress signal. Not every stage of a
+        download reports through progress hooks: yt-dlp's `FFmpegFD`
+        (non-native HLS, protocol `m3u8`) emits exactly one hook — `finished`,
+        at the very end — and the local audio extract and the bestaudio
+        re-download that run after the video lands have none at all. All of
+        them write files under the attempt's stem, so bytes landing on disk
+        are the ground truth. The first sample only sets the baseline.
+        """
+        with self._lock:
+            if self._disk is not None and footprint != self._disk:
+                self._last_activity = time.monotonic()
+            self._disk = footprint
+
+    def note_event(self) -> None:
+        """Record non-byte activity (a status transition, a finished file)."""
+        with self._lock:
+            self._last_activity = time.monotonic()
+
+    def enter_postprocessing(self) -> None:
+        with self._lock:
+            self._postprocessing = True
+            self._last_activity = time.monotonic()
+
+    def exit_postprocessing(self) -> None:
+        """A postprocessor finished — that is real activity, so bump the clock."""
+        with self._lock:
+            self._postprocessing = False
+            self._last_activity = time.monotonic()
+
+    def clear_postprocessing(self) -> None:
+        """Un-stick the suspension WITHOUT counting as activity.
+
+        Called on every `downloading` event: bytes flowing means we are past
+        postprocessing, and a postprocessor that started and then errored (a
+        common reason to fall through to the next format rung) would
+        otherwise leave the flag pinned and every later rung unwatched.
+
+        Deliberately does NOT touch `_last_activity`: yt-dlp fires
+        `downloading` hooks during retries without necessarily moving a
+        byte, and only `note_bytes` decides whether that was progress.
+        """
+        with self._lock:
+            self._postprocessing = False
+
+    def idle_seconds(self) -> float | None:
+        """Seconds since the last sign of life, or None while not measurable
+        (still queued for a worker, or a postprocessor is running)."""
+        with self._lock:
+            if self._postprocessing or not self._started:
+                return None
+            return time.monotonic() - self._last_activity
+
+
+def _make_postprocessor_hook(tracker: "_DownloadProgress"):
+    """yt-dlp postprocessor hook that suspends the stall watchdog.
+
+    Fires around each postprocessor (Merger, FFmpegExtractAudio, embedders):
+    `started` then `finished`, run sequentially rather than nested, so a
+    plain boolean is enough. If a postprocessor starts and never reports
+    finishing, only the hard wall clock applies — the same bound as before
+    this watchdog existed. Never raises.
+    """
+    def _hook(d):
+        try:
+            status = (d or {}).get("status")
+            if status in ("started", "processing"):
+                tracker.enter_postprocessing()
+            elif status == "finished":
+                tracker.exit_postprocessing()
+            else:
+                # Unknown status from a future yt-dlp: a sign of life, but it
+                # must never be able to pin the watchdog off.
+                tracker.note_event()
+        except Exception:  # noqa: BLE001
+            pass
+    return _hook
+
+
+def _make_progress_hook(tracker: "_DownloadProgress"):
+    """yt-dlp progress hook that feeds the stall tracker. Never raises."""
+    def _hook(d):
+        try:
+            d = d or {}
+            if d.get("status") == "downloading":
+                tracker.clear_postprocessing()
+                tracker.note_bytes(d.get("downloaded_bytes") or 0)
+            else:
+                # 'finished' / 'error' are still signs of life.
+                tracker.note_event()
+        except Exception:  # noqa: BLE001
+            pass
+    return _hook
+
+
+async def _await_with_stall_guard(
+    awaitable,
+    tracker: "_DownloadProgress",
+    *,
+    hard_timeout: float,
+    stall_timeout: float,
+    url: str,
+    label: str = "Download",
+    footprint=None,
+):
+    """Await a download, failing early if it stops moving bytes.
+
+    `footprint`, when given, is a zero-arg callable returning the attempt's
+    bytes on disk (see `_stem_footprint`), sampled every `_DISK_POLL_S`; any
+    change counts as progress.
+
+    Two independent bounds:
+      * `stall_timeout` — no progress for this long (suspended while a
+        postprocessor runs). Raises DownloadStalledError.
+      * `hard_timeout` — total wall clock, regardless of progress. Raises
+        DownloadTimeoutError.
+
+    Cancelling the task does NOT kill the worker thread — Python cannot.
+    The download pool logs the abandonment and keeps the slot accounted for
+    until yt-dlp really returns (see backend/core/executors.py). What this
+    buys is that the JOB fails honestly and promptly, and that the stuck
+    thread can only ever hold a download worker, never the request path's.
+    """
+    task = asyncio.ensure_future(awaitable)
+    deadline = _now() + hard_timeout
+    next_disk_poll = 0.0
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=_STALL_POLL_S)
+            if done:
+                try:
+                    return task.result()
+                except PoolExhaustedError as e:
+                    # Not a DownloadError, so the callers' error handling would
+                    # not recognise it and the raw RuntimeError text would land
+                    # verbatim in the job's error message.
+                    raise DownloadError(str(e)) from e
+
+            if _now() >= deadline:
+                raise DownloadTimeoutError(
+                    f"{label} timed out after {hard_timeout / 60:.0f} minutes. "
+                    f"The video may be too large or the connection too slow."
+                )
+
+            if footprint is not None and time.monotonic() >= next_disk_poll:
+                next_disk_poll = time.monotonic() + _DISK_POLL_S
+                try:
+                    # Off the loop: a glob over a large videos directory is a
+                    # real directory scan, and it always returns, so the
+                    # default executor is the right place for it.
+                    tracker.note_disk(int(await asyncio.to_thread(footprint)))
+                except Exception:  # noqa: BLE001 — a probe must never fail the download
+                    pass
+
+            idle = tracker.idle_seconds()
+            if idle is not None and idle >= stall_timeout:
+                got_mb = tracker.bytes_downloaded / 1024 / 1024
+                idle_txt = (
+                    f"{idle / 60:.0f} minutes" if idle >= 120 else f"{idle:.0f} seconds"
+                )
+                logger.warning(
+                    "[DOWNLOAD_STALLED] idle=%.0fs received=%.1fMB url=%s",
+                    idle, got_mb, url[:80],
+                )
+                raise DownloadStalledError(
+                    f"Download stalled: no data for {idle_txt} "
+                    f"({got_mb:.1f} MB received). The source accepted the "
+                    f"connection but stopped sending — yt-dlp kept retrying "
+                    f"without receiving bytes. This is usually the host "
+                    f"throttling or refusing the transfer; trying again, or a "
+                    f"different source URL, normally clears it."
+                )
+    finally:
+        if not task.done():
+            task.cancel()
 
 
 async def download_video(
@@ -633,6 +962,13 @@ async def download_video(
     _opt_postprocessors = _opt_overrides.pop("_vm_postprocessors", [])
     _format_chain = _dlopts.format_chain(_opts) or FORMAT_FALLBACK_CHAIN
 
+    # Byte-level progress, written by the hooks on the worker thread and read
+    # by the stall guard on the loop. This is what makes "0 MB for 20 minutes"
+    # a detectable state rather than an invisible one.
+    _progress = _DownloadProgress()
+    _progress_hook = _make_progress_hook(_progress)
+    _pp_hook = _make_postprocessor_hook(_progress)
+
     # Wait out any active rate-limit cooldown before starting
     cooldown = _check_cooldown()
     if cooldown > 0:
@@ -640,6 +976,23 @@ async def download_video(
         await asyncio.sleep(cooldown)
 
     def _download():
+        """Run one download, sweeping part-files on EVERY exit path.
+
+        The per-attempt handlers in `_download_inner` clean up on most error
+        paths, but an unclassified exception (a bug, an OSError from a full
+        disk) bypasses them all. The `finally` here runs regardless and is
+        itself guarded, so a cleanup failure can never mask the original
+        exception.
+        """
+        try:
+            return _download_inner()
+        finally:
+            try:
+                _cleanup_partial_files(output_dir, file_stem)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Final-stage partial-file cleanup failed (non-fatal): %s", e)
+
+    def _download_inner():
         import yt_dlp
 
         video_path = None
@@ -667,6 +1020,12 @@ async def download_video(
             "writeautomaticsub": True,
             "subtitleslangs": ["en", "zh", "ja", "ko", "es", "fr", "de", "pt", "ru", "ar"],
             "subtitlesformat": "srt/vtt/best",
+            # Feed the stall watchdog. The postprocessor hook SUSPENDS it
+            # while an ffmpeg merge runs — a merge of a long file reports no
+            # download progress for minutes, and the watchdog must never kill
+            # a download that has already fully arrived.
+            "progress_hooks": [_progress_hook],
+            "postprocessor_hooks": [_pp_hook],
         }
 
         # Use cached browser cookies (avoids repeated Keychain prompts on macOS)
@@ -954,10 +1313,34 @@ async def download_video(
             "option_postprocessors_dropped": opt_pps_dropped,
         }
 
-    try:
-        return await asyncio.wait_for(asyncio.to_thread(_download), timeout=1200)  # 20 min max per video
-    except asyncio.TimeoutError:
-        raise DownloadError("Download timed out after 20 minutes. The video may be too large or the connection too slow.")
+    def _footprint() -> int:
+        # The video stem in the videos dir, plus the audio the attempt
+        # extracts after it lands (`<stem>_audio.mp3`) — both stages of one
+        # attempt write only under this stem.
+        return _stem_footprint(
+            (output_dir, file_stem),
+            (settings.AUDIO_DIR, file_stem),
+        )
+
+    # The stall clock starts when the pool ADMITS the call (`on_admit`), not
+    # while it queues for a free worker — a queued download cannot move a
+    # byte, and admission waits are longest exactly when workers are held by
+    # earlier stalls.
+    #
+    # A DownloadStalledError / DownloadTimeoutError out of here is TERMINAL
+    # for the caller: we stopped awaiting a thread Python cannot stop. That
+    # thread is still inside `_download`, and its `finally` will eventually
+    # delete `<stem>*.part` — so a second attempt into the same output stem
+    # would have its part-files deleted out from under it. Recovering needs a
+    # different output stem, not a retry.
+    _progress.reset(queued=True)
+    return await _await_with_stall_guard(
+        download_pool.run(_download, on_admit=_progress.mark_started), _progress,
+        hard_timeout=VIDEO_HARD_TIMEOUT_S,
+        stall_timeout=settings.DOWNLOAD_STALL_TIMEOUT_S,
+        url=url,
+        footprint=_footprint,
+    )
 
 
 def _collect_subtitles(output_dir: Path, video_id: str) -> list[dict] | None:
@@ -1109,7 +1492,9 @@ async def get_video_info(url: str, flat: bool = False) -> dict:
             return ydl.extract_info(url, download=False)
 
     try:
-        return await asyncio.to_thread(_info)
+        # yt-dlp can fail to return, so it never runs on the shared default
+        # executor (see backend/core/executors.py).
+        return await download_pool.run(_info)
     except Exception as e:
         logger.error(f"Failed to get video info: {e}")
         return {}
@@ -1169,7 +1554,7 @@ async def list_channel_videos(url: str, max_videos: int = 5) -> list[dict]:
         return results
 
     try:
-        return await asyncio.to_thread(_list)
+        return await download_pool.run(_list)
     except Exception as e:
         logger.error(f"Failed to list channel videos: {e}")
         return []

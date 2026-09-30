@@ -115,7 +115,7 @@ class TestCancelledNeverBecomesSuccess:
         job.progress_pct = 50
         return job
 
-    async def _write(self, job, status):
+    async def _write(self, job, status, **kw):
         from backend.agents import job_helper
         session = MagicMock()
         result = MagicMock()
@@ -130,17 +130,21 @@ class TestCancelledNeverBecomesSuccess:
                 return False
 
         with patch("backend.agents.job_helper.AsyncSessionLocal", return_value=_CM()):
-            await job_helper.update_job_status("j" * 8, status)
+            await job_helper.update_job_status("j" * 8, status, **kw)
         return job
 
     async def test_cancelled_to_success_is_refused(self):
         job = await self._write(self._job("cancelled"), "success")
         assert job.status == "cancelled"
 
-    async def test_cancelled_to_failed_still_lands(self):
-        """A job that cancels and then errors must not look clean."""
-        job = await self._write(self._job("cancelled"), "failed")
-        assert job.status == "failed"
+    async def test_cancelled_then_failed_keeps_both(self):
+        """A job that cancels and then errors must not look clean — but it
+        must not turn into a red "failed" for work the user already stopped
+        either. The status stays "cancelled"; the reason is recorded."""
+        job = await self._write(self._job("cancelled"), "failed",
+                                error_message="HTTP Error 403")
+        assert job.status == "cancelled"
+        assert job.error_message == "HTTP Error 403"
 
     async def test_failed_to_success_still_lands(self):
         """The zombie sweep depends on exactly this to self-heal a mis-swept job

@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+from backend.core.executors import transcribe_pool
+
 logger = logging.getLogger(__name__)
 
 WHISPER_QUALITY_MAP = {
@@ -235,7 +237,7 @@ class WhisperService:
         """
         model_name = WHISPER_QUALITY_MAP.get(quality, "small")
         if cls.is_model_cached(quality):
-            return await asyncio.to_thread(cls.load, quality)
+            return await transcribe_pool.run(cls.load, quality)
 
         # Notify BEFORE taking the lock: a second job arriving during the
         # download must get its own notice, not sit silently behind the first.
@@ -252,14 +254,14 @@ class WhisperService:
         async with lock:
             # Re-check: we may have just waited out another caller's download.
             if cls.is_model_cached(quality):
-                return await asyncio.to_thread(cls.load, quality)
+                return await transcribe_pool.run(cls.load, quality)
             logger.info(
                 "Whisper %s model not cached — downloading (%s) into %s",
                 model_name, size or "unknown size", cls._hub_dir(),
             )
             _download_state[quality] = {"downloading": True, "error": None}
             try:
-                model = await asyncio.to_thread(cls.load, quality)
+                model = await transcribe_pool.run(cls.load, quality)
             except Exception as e:
                 msg = str(e)[:300] or type(e).__name__
                 _download_state[quality] = {"downloading": False, "error": msg}
@@ -455,7 +457,10 @@ class WhisperService:
             }
 
         try:
-            return await asyncio.to_thread(_run)
+            # Whisper has no internal wall clock, so it runs on its own pool: a
+            # decode that never returns can hold a transcription worker, never
+            # one of the request path's (backend/core/executors.py).
+            return await transcribe_pool.run(_run)
         finally:
             type(self)._last_used = time.monotonic()
             type(self)._arm_evictor()

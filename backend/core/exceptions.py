@@ -51,6 +51,34 @@ class VideoUnavailableError(DownloadError):
     """Video is private, deleted, or region-blocked."""
     pass
 
+class DownloadTimeoutError(DownloadError):
+    """The download exceeded its wall-clock cap and was abandoned.
+
+    Like DownloadStalledError this is an ABANDONMENT: the worker thread is
+    still running (Python cannot cancel it) and still owns the part-files in
+    the output directory. Callers must treat it as terminal and must not
+    start another attempt into the same output dir — see the note on
+    `ytdlp_service._await_with_stall_guard`.
+    """
+    pass
+
+class DownloadStalledError(DownloadError):
+    """The transfer stopped moving bytes for longer than the stall budget.
+
+    Distinct from a plain timeout: the wall clock had not run out, the
+    download simply stopped making progress. yt-dlp's own retry budget
+    (socket timeouts and retries with exponential backoff, times the
+    format-fallback ladder) can burn well over an hour without delivering a
+    single byte, and nothing in it measures progress.
+
+    A DownloadError subclass so the batch runner's per-URL error collection
+    and the UI error mapping route it without changes — but, like
+    DownloadTimeoutError, it is TERMINAL inside `download_video`: the
+    abandoned worker thread is still running and still owns the part-files,
+    so a retry into the same output directory would race it.
+    """
+    pass
+
 
 # ── Job lifecycle ─────────────────────────────────────────────────────────────
 class JobCancelledError(ViralMintError):

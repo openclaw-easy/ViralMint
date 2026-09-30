@@ -13,6 +13,7 @@ import time
 from typing import Optional
 
 from backend.config import settings
+from backend.core.executors import download_pool
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +210,9 @@ async def search_tiktok_profiles(query: str, max_results: int = 5) -> list[dict]
 
         return results
 
-    results = await asyncio.to_thread(_search)
+    # yt-dlp can fail to return — its own pool, never the shared default
+    # executor (backend/core/executors.py).
+    results = await download_pool.run(_search)
 
     # Enrich with scraped profile data (follower count, avatar)
     for r in results:
@@ -380,7 +383,9 @@ async def get_youtube_channel(
             "total": len(videos),
         }
 
-    result = await asyncio.to_thread(_fetch)
+    # May fall back to yt-dlp (_fetch_via_ytdlp), which can fail to return —
+    # so this runs on the download pool, not the shared default executor.
+    result = await download_pool.run(_fetch)
     _cache_set(cache_key, result)
     return result
 
@@ -650,7 +655,7 @@ async def get_tiktok_channel(profile_url: str, max_videos: int = 200) -> dict:
         }
 
     try:
-        result = await asyncio.to_thread(_fetch)
+        result = await download_pool.run(_fetch)   # yt-dlp — see search_tiktok_profiles
         # Enrich user info with scraped profile data (follower count, avatar)
         scraped = await _scrape_tiktok_profile(profile_url)
         if scraped and result.get("user"):

@@ -51,6 +51,12 @@ async def run_download(job_id: str, scout_result_ids: list[str], user_id: str = 
     from backend.agents.analyzer import AnalyzerAgent
     try:
         await DownloadAgent().run(job_id=job_id, scout_result_ids=scout_result_ids, user_id=user_id)
+        # A cancelled download is settled by the agent itself — don't start a
+        # (long) analysis pass the user already said no to.
+        from backend.agents.job_helper import job_cancelled
+        if await job_cancelled(job_id):
+            logger.info("TASK CANCELLED download | job=%s (analysis skipped)", job_id[:8])
+            return
         await AnalyzerAgent().run(job_id=job_id, user_id=user_id)
         logger.info("TASK DONE  download | job=%s", job_id[:8])
     except Exception as e:
@@ -95,6 +101,25 @@ async def run_generate(
         logger.error(f"TASK FAIL  generate | job={job_id[:8]}: {e}", exc_info=True)
         from backend.agents.job_helper import update_job_status
         await update_job_status(job_id, "failed", error_message=str(e))
+
+
+async def _settle_if_cancelled(job_id: str, err: Exception, what: str) -> bool:
+    """Finish a runner that raised, when the user had already cancelled it.
+
+    Cancellation is cooperative, so the in-flight transfer routinely fails
+    AFTER the cancel. The status stays "cancelled", the failure is kept as the
+    reason, and no red job_failed toast goes out for work the user already
+    stopped. Returns True when it handled the job; False means "a real
+    failure".
+    """
+    from backend.agents.job_helper import job_cancelled, update_job_status
+    from backend.core.exceptions import JobCancelledError
+    if not await job_cancelled(job_id):
+        return False
+    logger.info("TASK CANCELLED %s | job=%s (ended with: %s)", what, job_id[:8], err)
+    await update_job_status(job_id, "cancelled", error_message=(
+        None if isinstance(err, JobCancelledError) else str(err)))
+    return True
 
 
 async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = "local",
@@ -198,11 +223,19 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
         # lands during the LAST transfer — the only transfer, for a one-URL
         # batch, which is the common case — is never seen by the loop gate.
         if cancelled or await job_cancelled(job_id):
+            # The STATUS stays "cancelled" — that is what the user asked for.
+            # But the reason is kept: this branch used to drop `error_summary`
+            # entirely, so a job that was cancelled AND failed reported no
+            # error at all. A cancel arriving while a doomed transfer is in
+            # flight is the COMMON case, not an edge one, because the transfer
+            # cannot be interrupted and only surfaces its error minutes later.
+            step = f"Cancelled — {len(downloaded_ids)}/{total} downloaded before stopping"
+            if errors:
+                step += f" ({len(errors)} also failed — see details)"
             await update_job_status(
                 job_id, "cancelled",
-                current_step=(
-                    f"Cancelled — {len(downloaded_ids)}/{total} downloaded before stopping"
-                ),
+                current_step=step,
+                error_message=error_summary,   # None when nothing failed
                 output_data={"downloaded_ids": downloaded_ids, "total": total,
                              "videos": video_summaries, "cancelled": True},
             )
@@ -247,6 +280,8 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
         }, user_id)
 
     except Exception as e:
+        if await _settle_if_cancelled(job_id, e, "batch_download"):
+            return
         logger.error(f"Batch download task failed: {e}", exc_info=True)
         from backend.agents.job_helper import update_job_status as _update
         await _update(job_id, "failed", error_message=str(e))
@@ -272,6 +307,8 @@ async def run_download_url(job_id: str, url: str, title: str = "", user_id: str 
             await _download_single_url(job_id, url, title, user_id)
 
     except Exception as e:
+        if await _settle_if_cancelled(job_id, e, "download_url"):
+            return
         logger.error(f"URL download task failed: {e}", exc_info=True)
         from backend.agents.job_helper import update_job_status as _update
         await _update(job_id, "failed", error_message=str(e))
@@ -304,6 +341,10 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
     downloaded_ids = []
     rate_limited = False
     cancelled = False
+    # Per-video failures, kept so the job can say WHY. They used to be logged
+    # and dropped, so a channel whose every video failed reported only "All
+    # video downloads failed".
+    errors: list[str] = []
     for i, video in enumerate(videos):
         video_url = video.get("url", "")
         video_title = video.get("title", "")
@@ -339,6 +380,7 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
                 downloaded_ids.append(dl["id"])
         except RateLimitError as e:
             rate_limited = True
+            errors.append(f"Video {i + 1}/{total} '{video_title[:40]}': {e}")
             logger.warning(f"Rate limited on channel video {i + 1}/{total}, skipping remaining: {e}")
             await ws_manager.send_constraint_warning(
                 constraint="rate_limit",
@@ -347,16 +389,27 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
                 user_id=user_id,
             )
         except Exception as e:
+            errors.append(f"Video {i + 1}/{total} '{video_title[:40]}': {e}")
             logger.warning(f"Failed to download {video_url}: {e}")
             continue
 
+    error_summary = (
+        f"Failed {len(errors)}/{total} download(s):\n" + "\n".join(errors)
+        if errors else None
+    )
+
     # Cancel wins over both the failure and the success write below, and is
     # re-polled so a cancel during the last transfer is honoured too (see the
-    # same gate in run_batch_download_urls).
+    # same gate in run_batch_download_urls). The failures are kept as the
+    # reason — a cancelled job that also failed must not read as clean.
     if cancelled or await job_cancelled(job_id):
+        step = f"Cancelled — {len(downloaded_ids)}/{total} downloaded before stopping"
+        if errors:
+            step += f" ({len(errors)} also failed — see details)"
         await update_job_status(
             job_id, "cancelled",
-            current_step=f"Cancelled — {len(downloaded_ids)}/{total} downloaded before stopping",
+            current_step=step,
+            error_message=error_summary,
             output_data={"downloaded_ids": downloaded_ids, "url": url,
                          "total": total, "cancelled": True},
         )
@@ -366,7 +419,7 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
         raise Exception(
             "YouTube is rate-limiting downloads from this IP. Try again in 10-15 minutes."
             if rate_limited else
-            "All video downloads failed"
+            (error_summary or "All video downloads failed")
         )
 
     # Analyze all downloaded videos
@@ -381,6 +434,7 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
         progress_pct=100,
         current_step=f"Downloaded and analyzed {len(downloaded_ids)} videos",
         output_data={"downloaded_ids": downloaded_ids, "url": url, "total": total},
+        error_message=error_summary,
     )
     await ws_manager.send({
         "type": "job_complete",
@@ -460,6 +514,8 @@ async def _download_single_video_to_db(job_id: str, url: str, title: str, user_i
     from datetime import datetime
     from pathlib import Path
 
+    from backend.core.exceptions import DownloadStalledError, DownloadTimeoutError
+
     video_id = str(uuid4())[:12]
 
     try:
@@ -471,6 +527,12 @@ async def _download_single_video_to_db(job_id: str, url: str, title: str, user_i
             # None for every pre-existing caller → byte-identical download.
             options=options,
         )
+    except (DownloadStalledError, DownloadTimeoutError):
+        # ABANDONED, not failed: the worker thread is still running and still
+        # owns `<video_id>*.part`, which its own cleanup will delete later. A
+        # retry into the same stem would have its part-files deleted out from
+        # under it — so no AI URL-fix retry here.
+        raise
     except Exception as first_error:
         # AI-assisted retry: ask AI to fix the URL and try once more
         from backend.core.ai_retry import ai_fix_url
@@ -1376,11 +1438,59 @@ async def run_upload(
 _task_semaphore = asyncio.Semaphore(3)  # max 3 concurrent heavy tasks
 
 
+# Job ids whose runner coroutine is executing RIGHT NOW in this process.
+# `Job.status` cannot answer "is work still happening?": a cancel flips the row
+# to the terminal "cancelled" at once, while the runner keeps going until the
+# in-flight step (a yt-dlp transfer, an ffmpeg pass) returns. Clients told to
+# "wait before starting a replacement" need a signal that actually ends when
+# the work does — this is it (surfaced as `runner_active` on GET /api/jobs/{id}).
+_active_runners: set[str] = set()
+
+
+def runner_active(job_id: str | None) -> bool:
+    """True while `job_id`'s runner is still executing in this process."""
+    return bool(job_id) and job_id in _active_runners
+
+
+def _job_id_of(coro) -> str | None:
+    """The `job_id` argument of a not-yet-started runner coroutine.
+
+    Every job runner takes `job_id` as a parameter, and an unstarted
+    coroutine's frame already holds its bound arguments — so the dispatch
+    wrapper can gate and track jobs without changing every dispatch call
+    site. Anything unexpected yields None, which only disables the gate.
+    """
+    try:
+        value = coro.cr_frame.f_locals.get("job_id")
+    except Exception:  # noqa: BLE001
+        return None
+    return value if isinstance(value, str) and value else None
+
+
 async def _run_with_limit(coro):
-    """Run a coroutine with concurrency limiting."""
+    """Run a coroutine with concurrency limiting.
+
+    A job cancelled while it QUEUED for a slot never starts: the cancel API
+    answers `best_effort: false` ("cancelled before it started") for a pending
+    job, and before this gate that was untrue — the queued runner still ran
+    the whole download / ffmpeg pass once a slot came free.
+    """
+    job_id = _job_id_of(coro)
     try:
         async with _task_semaphore:
-            await coro
+            if job_id:
+                from backend.agents.job_helper import job_cancelled
+                if await job_cancelled(job_id):
+                    coro.close()   # never started — nothing to unwind
+                    logger.info("TASK SKIPPED | job=%s was cancelled while queued",
+                                job_id[:8])
+                    return
+                _active_runners.add(job_id)
+            try:
+                await coro
+            finally:
+                if job_id:
+                    _active_runners.discard(job_id)
     except Exception as e:
         # Last-resort catch — individual task runners should handle their own errors,
         # but if something leaks through, log it instead of crashing silently.

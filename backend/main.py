@@ -65,6 +65,14 @@ async def _watch_handoff_jobs(poll_seconds: int = 60, watch_ids=None):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup + shutdown lifecycle."""
+    # FIRST, before anything can call asyncio.to_thread: give the default
+    # executor an explicit size and name. Installing it later would strand
+    # work already running on CPython's implicit pool. yt-dlp and Whisper get
+    # their own pools (backend/core/executors.py) so a wedged download can
+    # never starve the request path.
+    from backend.core.executors import install_default_executor
+    install_default_executor()
+
     await init_db()
 
     # Watch the running/pending jobs the boot sweep left alone (a fresh
@@ -231,6 +239,13 @@ async def lifespan(app: FastAPI):
     try:
         from backend.messaging.manager import messaging
         await messaging.stop_all()
+    except Exception:
+        pass
+
+    # Never waits: a wedged download is exactly what shutdown must not block on.
+    try:
+        from backend.core.executors import shutdown_pools
+        shutdown_pools()
     except Exception:
         pass
 

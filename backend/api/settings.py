@@ -357,6 +357,13 @@ async def get_health():
     from backend.services.youtube_quota import _usage_today, DAILY_LIMIT
     health["youtube_quota"] = {"used": _usage_today.get("count", 0), "limit": DAILY_LIMIT}
 
+    # Occupancy of the download / transcription thread pools. A non-zero
+    # `abandoned` is the one clear "this process wants a restart" signal: a
+    # stalled download or Whisper call that was given up on is still holding
+    # its worker thread (Python cannot kill a thread).
+    from backend.core.executors import all_pool_stats
+    health["thread_pools"] = all_pool_stats()
+
     return health
 
 

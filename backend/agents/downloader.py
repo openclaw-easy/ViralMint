@@ -13,9 +13,14 @@ from backend.models.scout_result import ScoutResult
 from backend.models.downloaded_video import DownloadedVideo
 from backend.services.ytdlp_service import download_video
 from backend.core.ws_manager import ws_manager
-from backend.agents.job_helper import update_job_status
+from backend.agents.job_helper import job_cancelled, update_job_status
 from backend.config import settings
-from backend.core.exceptions import RateLimitError, VideoUnavailableError
+from backend.core.exceptions import (
+    DownloadStalledError,
+    DownloadTimeoutError,
+    RateLimitError,
+    VideoUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +60,19 @@ class DownloadAgent:
         downloaded = []
         errors = []  # Collect actual error details per video
         rate_limited = False
+        cancelled = False
 
         for i, sr_id in enumerate(scout_result_ids):
+            # Cooperative cancellation, polled before each transfer: the one
+            # in flight cannot be interrupted and is kept, but nothing after it
+            # starts. This runner never polled, so a cancelled scout download
+            # pulled every video anyway.
+            if await job_cancelled(job_id):
+                cancelled = True
+                logger.info("DOWNLOAD CANCELLED | job=%s (stopped before %d/%d)",
+                            job_id[:8], i + 1, total)
+                break
+
             # If we hit a rate limit, skip remaining videos — they'll all fail too
             if rate_limited:
                 errors.append(f"Video {i + 1}/{total}: Skipped (rate-limited)")
@@ -159,6 +175,16 @@ class DownloadAgent:
                 errors.append(error_detail)
                 logger.warning(f"Video unavailable {sr_id}: {e}")
 
+            except (DownloadStalledError, DownloadTimeoutError) as e:
+                # An ABANDONED download: its worker thread is still running and
+                # still owns `<video_id>*.part` — its cleanup will delete them
+                # later. The AI URL-fix retry below writes into that same stem,
+                # so it must not run here; the error is recorded and the batch
+                # moves on.
+                error_detail = f"Video {i + 1}/{total} '{sr.title[:40] if sr else sr_id[:8]}': {e}"
+                errors.append(error_detail)
+                logger.warning(f"Download abandoned {sr_id}: {e}")
+
             except Exception as first_error:
                 error_detail = f"Video {i + 1}/{total} '{sr.title[:40] if sr else sr_id[:8]}': {first_error}"
 
@@ -241,6 +267,22 @@ class DownloadAgent:
         error_summary = None
         if errors:
             error_summary = f"Failed {len(errors)}/{total} download(s):\n" + "\n".join(errors)
+
+        # Re-polled after the loop: a cancel landing during the LAST transfer is
+        # never seen by the loop gate. The status stays "cancelled", the reason
+        # is kept, and neither job_complete nor job_failed goes out for work
+        # the user already stopped.
+        if cancelled or await job_cancelled(job_id):
+            step = f"Cancelled — {len(downloaded)}/{total} downloaded before stopping"
+            if errors:
+                step += f" ({len(errors)} also failed — see details)"
+            await update_job_status(
+                job_id, "cancelled",
+                current_step=step,
+                error_message=error_summary,
+                output_data={"downloaded_ids": downloaded, "cancelled": True},
+            )
+            return downloaded
 
         if len(downloaded) == 0 and total > 0:
             user_msg = (

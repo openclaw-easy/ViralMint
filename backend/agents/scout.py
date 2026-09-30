@@ -617,7 +617,13 @@ class ScoutAgent:
         # "0 results" UI is sufficient feedback.
         SEARCH_HARD_TIMEOUT_S = 60
         try:
-            info = await asyncio.wait_for(asyncio.to_thread(_search), timeout=SEARCH_HARD_TIMEOUT_S)
+            # On the download pool, not asyncio.to_thread: `wait_for` cannot
+            # cancel a thread, so a search that hits the timeout keeps its
+            # worker until yt-dlp returns on its own. On the shared default
+            # executor enough of those starve every request in the app; here
+            # they can only ever hold a download worker (backend/core/executors.py).
+            from backend.core.executors import download_pool
+            info = await asyncio.wait_for(download_pool.run(_search), timeout=SEARCH_HARD_TIMEOUT_S)
         except asyncio.TimeoutError:
             logger.warning(
                 f"yt-dlp search for {platform} ({search_prefix}) hit "

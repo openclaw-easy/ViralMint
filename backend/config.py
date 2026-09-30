@@ -52,6 +52,22 @@ class Settings(BaseSettings):
     # ── Database ──────────────────────────────────────
     DATABASE_URL: str = f"sqlite+aiosqlite:///{DATA_DIR / 'viralmint.db'}"
 
+    # ── Downloads ─────────────────────────────────────
+    # Fail a download that has moved ZERO bytes for this long.
+    #
+    # The wall-clock cap in download_video is not a progress check: yt-dlp's
+    # retry budget (socket timeouts and retries with exponential backoff,
+    # times the format-fallback ladder) can fill it without ever delivering a
+    # byte, and the job then sat at "Downloading…" with no error at all.
+    #
+    # 600s is deliberately conservative. Legitimate zero-byte gaps do exist —
+    # YouTube's player-client cascade and yt-dlp's own retry sleeps — and
+    # killing a healthy slow start is a worse failure than reporting late.
+    # The watchdog also stands down entirely while a postprocessor (the
+    # ffmpeg merge) is running. Lower it if you would rather hear about a
+    # dead source sooner.
+    DOWNLOAD_STALL_TIMEOUT_S: int = 600
+
     # ── AI Providers (BYOK) ───────────────────────────
     # Set at least one. OpenRouter unlocks Claude / GPT / Gemini / Llama
     # / Mistral through a single key — handy if you want to mix premium
