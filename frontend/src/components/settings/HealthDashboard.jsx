@@ -15,14 +15,14 @@ const STATUS_ICON = {
   running: CheckCircleIcon, ok: CheckCircleIcon, valid: CheckCircleIcon,
   expiring_soon: WarningIcon, expired: ErrorIcon,
   not_configured: HelpOutlineIcon, not_running: ErrorIcon, not_found: ErrorIcon,
-  unknown_age: WarningIcon,
+  unknown_age: WarningIcon, stuck: ErrorIcon,
 }
 
 const STATUS_COLOR = {
   running: "success", ok: "success", valid: "success",
   expiring_soon: "warning", expired: "error",
   not_configured: "default", not_running: "error", not_found: "error",
-  unknown_age: "warning",
+  unknown_age: "warning", stuck: "error",
 }
 
 export default function HealthDashboard() {
@@ -53,7 +53,19 @@ export default function HealthDashboard() {
   )
   if (!health) return <Typography sx={{ color: "error.main", fontSize: "0.85rem" }}>Failed to load health status</Typography>
 
+  // Download / transcription worker pools. A non-zero "abandoned" means a
+  // stalled download or transcription was given up on while its thread kept
+  // running — Python cannot kill a thread, so only a restart frees it.
+  const pools = Array.isArray(health.thread_pools) ? health.thread_pools : null
+  const stuck = pools ? pools.reduce((n, p) => n + (p.abandoned || 0), 0) : 0
+  const view = pools ? { ...health, workers: { status: stuck ? "stuck" : "ok" } } : health
+
   const items = [
+    ...(pools ? [{
+      label: "Background workers", key: "workers",
+      description: "Downloads and transcription",
+      extra: stuck ? `${stuck} stuck — restart ViralMint to free ${stuck === 1 ? "it" : "them"}` : null,
+    }] : []),
     { label: "ImageMagick", key: "imagemagick", description: "Required for caption rendering" },
     { label: "yt-dlp", key: "ytdlp", description: "Video downloader", extra: health.ytdlp?.version ? `v${health.ytdlp.version}` : null },
     { label: "Douyin Cookie", key: "douyin_cookie", description: "Douyin scouting access", extra: health.douyin_cookie?.age_days != null ? `${health.douyin_cookie.age_days}d old` : null },
@@ -79,7 +91,7 @@ export default function HealthDashboard() {
       {/* Status items */}
       <Stack spacing={0.75}>
         {items.map(item => {
-          const data = health[item.key]
+          const data = view[item.key]
           const status = data?.status || "not_configured"
           const color = STATUS_COLOR[status] || "default"
           const Icon = STATUS_ICON[status] || HelpOutlineIcon
