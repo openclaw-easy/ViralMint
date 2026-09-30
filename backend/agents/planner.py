@@ -294,6 +294,28 @@ _followup_sink: contextvars.ContextVar[list | None] = contextvars.ContextVar(
 )
 
 
+def _messaging_turns(history: list[dict] | None, message: str) -> list[dict]:
+    """Recent phone turns + the new message, in a shape every provider accepts.
+
+    The history can open with a notification (an assistant turn) and hold two
+    notifications in a row; Anthropic rejects a conversation that starts with
+    the assistant or repeats a role, so consecutive turns are merged and a
+    leading assistant turn gets a neutral user turn in front of it.
+    """
+    turns: list[dict] = []
+    for m in [*(history or []), {"role": "user", "content": message}]:
+        role, content = m.get("role"), (m.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        if turns and turns[-1]["role"] == role:
+            turns[-1]["content"] += "\n\n" + content
+        else:
+            turns.append({"role": role, "content": content})
+    if turns and turns[0]["role"] == "assistant":
+        turns.insert(0, {"role": "user", "content": "(earlier in this chat)"})
+    return turns
+
+
 class PlannerAgent:
     def __init__(self):
         self.intelligence = UserIntelligence()
@@ -531,12 +553,17 @@ class PlannerAgent:
         message: str,
         user_settings,
         user_id: str = "local",
+        history: list[dict] | None = None,
     ) -> str:
         """
         Non-streaming sibling of handle_message() for messaging channels
         (Telegram, WhatsApp, Discord, Slack) that can't push WebSocket tokens.
         Builds the same system prompt and dispatches the same <action> blocks,
         but returns the full response string with action blocks stripped.
+
+        `history` is the recent phone conversation (MessagingManager.history_for),
+        notifications included — without it a bare "yes" or "generate" in reply
+        to the bot's own question reaches the model with no context.
         """
         logger.info("PLANNER handle_message_text | user=%s | msg=%s", user_id, message[:100])
 
@@ -602,7 +629,7 @@ class PlannerAgent:
 
         try:
             full_response = await ai.chat(
-                messages=[{"role": "user", "content": message}],
+                messages=_messaging_turns(history, message),
                 system=system,
                 max_tokens=1024,
             )

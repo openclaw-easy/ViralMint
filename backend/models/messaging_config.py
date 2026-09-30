@@ -11,11 +11,11 @@ class MessagingConfig(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
     user_id = Column(String(36), default="local", index=True)
-    channel = Column(String(20), nullable=False)   # telegram | whatsapp | slack | feishu
+    channel = Column(String(20), nullable=False)   # telegram | whatsapp | discord | slack
 
     # Channel-specific credentials (all encrypted)
     bot_token_encrypted = Column(String, nullable=True)   # Telegram bot token
-    chat_id = Column(String, nullable=True)               # Telegram chat_id (set after /start)
+    chat_id = Column(String, nullable=True)               # Telegram chat_id (set when the owner pairs)
     api_key_encrypted = Column(String, nullable=True)     # WhatsApp/Slack API key
     webhook_url_encrypted = Column(String, nullable=True) # Slack/Feishu webhook URL
 

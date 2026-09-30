@@ -18,7 +18,10 @@ Setup UX:
   1. Create a Discord application + bot at https://discord.com/developers/applications
   2. Copy the bot token, paste into ViralMint → Connect
   3. Add bot to a server via the invite URL we return, OR just start a DM
-  4. DM the bot — we capture the user's Discord ID on first message
+  4. DM the bot the pairing code shown on the Messaging page — that Discord account
+     becomes the owner. Until then the bot runs nothing; afterwards it answers
+     only its owner's DMs (it used to bind whoever DMed
+     last and run their text as the owner).
 """
 from __future__ import annotations
 
@@ -34,7 +37,10 @@ from backend.core.crypto import decrypt_safe, encrypt
 from backend.core.ws_manager import ws_manager
 from backend.database import AsyncSessionLocal
 from backend.messaging._shared import (
+    UNPAIRED_REPLY,
     deactivate_config,
+    matches_pair_code,
+    new_pair_code,
     persist_chat_id,
     send_with_retry,
     split_text,
@@ -78,6 +84,7 @@ class _UserBot:
         self.chat_id = chat_id
         self.bot_username = bot_username
         self.bot_invite_url = bot_invite_url
+        self.pair_code: Optional[str] = None if chat_id else new_pair_code()
         self._task: Optional[asyncio.Task] = None
 
     async def start(self, token: str, ready_timeout: float = 15.0) -> None:
@@ -91,14 +98,17 @@ class _UserBot:
             )
             if ready_task in done:
                 return
-            if self._task in done:
-                exc = self._task.exception()
-                if exc:
-                    raise exc
+            failure: BaseException = RuntimeError("Discord bot failed to become ready within 15s")
+            if self._task in done and self._task.exception():
+                failure = self._task.exception()
         finally:
             if not ready_task.done():
                 ready_task.cancel()
-        raise RuntimeError("Discord bot failed to become ready within 15s")
+        # A client that never became ready must not be left running. Nothing
+        # tracks it (it never reaches _bots), yet its on_message stays live —
+        # it used to connect later and answer DMs nobody could stop.
+        await self.stop()
+        raise failure
 
     async def stop(self) -> None:
         try:
@@ -119,6 +129,9 @@ class DiscordChannel(MessagingChannel):
     def __init__(self) -> None:
         self._bots: dict[str, _UserBot] = {}
         self._planner_callback: Optional[PlannerCallback] = None
+        # One connect / disconnect / boot start at a time — overlapping ones
+        # each started a gateway client and every DM got two replies.
+        self._lock = asyncio.Lock()
 
     def set_planner_callback(self, callback: PlannerCallback) -> None:
         self._planner_callback = callback
@@ -143,18 +156,19 @@ class DiscordChannel(MessagingChannel):
                 logger.warning("Discord config %s has no valid token", cfg.id)
                 continue
             try:
-                await self._spin_up_bot(
-                    cfg.user_id,
-                    token,
-                    chat_id=int(cfg.chat_id) if cfg.chat_id else None,
-                )
+                async with self._lock:
+                    await self._spin_up_bot(
+                        cfg.user_id,
+                        token,
+                        chat_id=int(cfg.chat_id) if cfg.chat_id else None,
+                    )
             except Exception as e:
                 logger.warning("Failed to start Discord bot for user=%s: %s", cfg.user_id, e)
 
     async def stop(self) -> None:
-        for bot in list(self._bots.values()):
-            await bot.stop()
+        bots = list(self._bots.values())
         self._bots.clear()
+        await asyncio.gather(*(b.stop() for b in bots), return_exceptions=True)
 
     async def is_configured(self, user_id: str) -> bool:
         bot = self._bots.get(user_id)
@@ -214,47 +228,56 @@ class DiscordChannel(MessagingChannel):
         bot_username = username if discrim in ("0", None) else f"{username}#{discrim}"
         bot_invite_url = _build_invite_url(bot_id)
 
-        # Tear down any existing bot
-        existing = self._bots.pop(user_id, None)
-        if existing:
-            await existing.stop()
+        async with self._lock:
+            existing = self._bots.pop(user_id, None)
+            if existing:
+                await existing.stop()
 
-        async with AsyncSessionLocal() as db:
-            row = await db.execute(
-                select(MessagingConfig).where(
-                    MessagingConfig.user_id == user_id,
-                    MessagingConfig.channel == "discord",
+            async with AsyncSessionLocal() as db:
+                row = await db.execute(
+                    select(MessagingConfig).where(
+                        MessagingConfig.user_id == user_id,
+                        MessagingConfig.channel == "discord",
+                    )
                 )
-            )
-            cfg = row.scalar_one_or_none()
-            if cfg:
-                cfg.bot_token_encrypted = encrypt(token)
-                cfg.is_active = True
-                cfg.connected_at = datetime.utcnow()
-            else:
-                cfg = MessagingConfig(
-                    user_id=user_id,
-                    channel="discord",
-                    bot_token_encrypted=encrypt(token),
-                    is_active=True,
-                    connected_at=datetime.utcnow(),
-                )
-                db.add(cfg)
-            await db.commit()
-            chat_id = int(cfg.chat_id) if cfg.chat_id else None
+                cfg = row.scalar_one_or_none()
+                if cfg:
+                    # A different bot must be paired again — the owner binding
+                    # belongs to the bot it was made with.
+                    if decrypt_safe(cfg.bot_token_encrypted or "") != token:
+                        cfg.chat_id = None
+                    cfg.bot_token_encrypted = encrypt(token)
+                    cfg.is_active = True
+                    cfg.connected_at = datetime.utcnow()
+                else:
+                    cfg = MessagingConfig(
+                        user_id=user_id,
+                        channel="discord",
+                        bot_token_encrypted=encrypt(token),
+                        is_active=True,
+                        connected_at=datetime.utcnow(),
+                    )
+                    db.add(cfg)
+                await db.commit()
+                chat_id = int(cfg.chat_id) if cfg.chat_id else None
 
-        await self._spin_up_bot(user_id, token, chat_id=chat_id)
-        return {
-            "bot_username": bot_username,
-            "bot_invite_url": bot_invite_url,
-            "chat_id": str(chat_id) if chat_id else None,
-        }
+            try:
+                await self._spin_up_bot(user_id, token, chat_id=chat_id)
+            except Exception as e:
+                # The token was valid over REST, but the gateway did not come
+                # up — a 400 the user can act on, not a raw 500.
+                raise ValueError(f"The bot token works, but Discord's gateway didn't connect: {e}")
+            st = self.status(user_id)
+            st["bot_username"] = st.get("bot_username") or bot_username
+            st["bot_invite_url"] = st.get("bot_invite_url") or bot_invite_url
+            return st
 
     async def disconnect(self, user_id: str) -> bool:
-        bot = self._bots.pop(user_id, None)
-        if bot:
-            await bot.stop()
-        await deactivate_config(user_id, "discord", clear_tokens=True)
+        async with self._lock:
+            bot = self._bots.pop(user_id, None)
+            if bot:
+                await bot.stop()
+            await deactivate_config(user_id, "discord", clear_tokens=True)
         return True
 
     async def send_test(self, user_id: str) -> bool:
@@ -283,6 +306,7 @@ class DiscordChannel(MessagingChannel):
                 "bot_username": None,
                 "chat_id": None,
                 "bot_invite_url": None,
+                "pair_code": None,
             }
         ready = bot.client.is_ready()
         return {
@@ -292,6 +316,7 @@ class DiscordChannel(MessagingChannel):
             "bot_username": bot.bot_username,
             "chat_id": str(bot.chat_id) if bot.chat_id else None,
             "bot_invite_url": bot.bot_invite_url,
+            "pair_code": bot.pair_code if not bot.chat_id else None,
         }
 
     # ── Internals ─────────────────────────────────────────────────────────────
@@ -335,8 +360,16 @@ class DiscordChannel(MessagingChannel):
                 return
 
             bot = self._bots.get(user_id)
-            if bot and bot.chat_id != message.author.id:
+            if not bot:
+                return
+            if bot.chat_id != message.author.id:
+                if bot.chat_id:
+                    return          # someone other than the owner: silence
+                if not matches_pair_code(message.content, bot.pair_code):
+                    await message.channel.send(UNPAIRED_REPLY)
+                    return
                 bot.chat_id = message.author.id
+                bot.pair_code = None
                 await persist_chat_id(user_id, "discord", str(message.author.id))
                 await ws_manager.send(
                     {
@@ -346,6 +379,12 @@ class DiscordChannel(MessagingChannel):
                     },
                     user_id,
                 )
+                await message.channel.send("🎬 ViralMint connected! DM me any time.")
+                return
+
+            # An attachment-only DM has no text for the agent to act on.
+            if not (message.content or "").strip():
+                return
 
             if not self._planner_callback:
                 await message.channel.send("Planner not ready yet — try again in a moment.")

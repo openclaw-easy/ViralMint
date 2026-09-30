@@ -209,9 +209,15 @@ async def lifespan(app: FastAPI):
                     select(UserSettings).where(UserSettings.user_id == user_id)
                 )
                 user_settings = row.scalar_one_or_none()
-            return await _planner.handle_message_text(
+            # The recent phone conversation, including the notifications we
+            # pushed — a bare "yes" / "generate" means nothing without it.
+            reply = await _planner.handle_message_text(
                 message=text, user_settings=user_settings, user_id=user_id,
+                history=messaging.history_for(user_id),
             )
+            messaging.remember(user_id, "user", text)
+            messaging.remember(user_id, "assistant", reply)
+            return reply
 
         messaging.set_planner_callback(_planner_callback)
         await messaging.start_all()

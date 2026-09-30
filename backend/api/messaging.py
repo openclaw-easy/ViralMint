@@ -31,12 +31,12 @@ USER_ID = "local"
 CHANNELS = ("telegram", "whatsapp", "discord", "slack")
 
 # One-liner shown when send_test returns False for a channel — tells the user
-# what they still need to do (send /start, scan QR, DM the bot, etc).
+# what they still need to do (pair the bot, scan the QR, etc).
 NOT_CONNECTED_HINTS: dict[str, str] = {
-    "telegram": "Could not send — make sure you've sent /start to the bot.",
-    "whatsapp": "Could not send — WhatsApp not paired yet. Scan the QR code first.",
-    "discord":  "Could not send — DM your bot first to finish setup.",
-    "slack":    "Could not send — DM your bot first to finish setup.",
+    "telegram": "Could not send — link the bot to your account first (the Messaging page).",
+    "whatsapp": "Could not send — WhatsApp is not paired or is offline. Scan the QR code first.",
+    "discord":  "Could not send — DM your bot the pairing code shown on the Messaging page first.",
+    "slack":    "Could not send — DM your bot the pairing code shown on the Messaging page first.",
 }
 
 

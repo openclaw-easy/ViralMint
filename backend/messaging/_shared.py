@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
@@ -65,6 +66,52 @@ def split_text(text: str, limit: int) -> list[str]:
     if buf:
         out.append(buf)
     return out
+
+
+# ── Owner pairing ────────────────────────────────────────────────────────────
+#
+# A bot token lets ANYONE message the bot: Telegram bot usernames are public
+# and searchable, a Discord bot can be DMed by anyone who shares (or invites it
+# to) a server, and every Slack workspace member can DM an installed app. The
+# old handshake bound whoever wrote first — and re-bound on every message from
+# a new sender — then ran their text through the agent as the owner: a
+# stranger could spend the owner's AI API credits, start downloads and clip cuts,
+# read their Library, and take over where job notifications went
+# (a P0 security fix).
+#
+# Now a freshly connected bot is bound only by a one-time code that the
+# desktop app shows on the Messaging page. Until then it runs nothing; after
+# that it answers its owner and ignores everyone else.
+
+# No 0/O or 1/I/L — the code is read off a screen and typed on a phone.
+_PAIR_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+PAIR_CODE_LEN = 6
+
+UNPAIRED_REPLY = (
+    "This bot is private. To link it, send the pairing code shown in "
+    "ViralMint → Messaging."
+)
+
+
+def new_pair_code() -> str:
+    return "".join(secrets.choice(_PAIR_ALPHABET) for _ in range(PAIR_CODE_LEN))
+
+
+def matches_pair_code(text: str | None, code: str | None) -> bool:
+    """True when `text` is the pairing code — spacing, dashes and case aside.
+
+    Accepts the code on its own or as the last word ("/start ABC123",
+    "code: abc-123"), so a user who pastes it with a little text around it
+    still pairs. Constant-time compare on the normalised value.
+    """
+    if not text or not code:
+        return False
+    words = re.findall(r"[A-Za-z0-9-]+", text)
+    if not words:
+        return False
+    candidate = words[-1].replace("-", "").upper()
+    whole = re.sub(r"[\s-]", "", text).upper()
+    return secrets.compare_digest(candidate, code) or secrets.compare_digest(whole, code)
 
 
 # ── MessagingConfig helpers ──────────────────────────────────────────────────
@@ -174,17 +221,44 @@ async def send_with_retry(
             if not retry_once:
                 await _notify_delivery_failed(channel_name, user_id, first_err, idx, total)
                 return False
+            # A rate limit says how long to wait (Telegram RetryAfter.retry_after,
+            # Slack's Retry-After, discord.py's HTTPException.retry_after); a
+            # flat half-second retry just trips it again. Capped so a
+            # notification never holds its task for minutes.
+            wait = _retry_after(first_err)
+            delay = min(max(retry_delay, wait), MAX_RETRY_AFTER_S) if wait else retry_delay
             logger.warning(
                 "messaging send failed ch=%s user=%s chunk=%d/%d — retrying in %.1fs: %s",
-                channel_name, user_id, idx + 1, total, retry_delay, first_err,
+                channel_name, user_id, idx + 1, total, delay, first_err,
             )
             try:
-                await asyncio.sleep(retry_delay)
+                await asyncio.sleep(delay)
                 await send_fn(chunk)
             except Exception as retry_err:
                 await _notify_delivery_failed(channel_name, user_id, retry_err, idx, total)
                 return False
     return True
+
+
+MAX_RETRY_AFTER_S = 30.0
+
+
+def _retry_after(err: BaseException) -> float:
+    """Seconds a rate-limit error asks us to wait, or 0."""
+    raw = getattr(err, "retry_after", None)
+    if raw is None:
+        resp = getattr(err, "response", None)
+        headers = getattr(resp, "headers", None) or {}
+        try:
+            raw = headers.get("Retry-After") or headers.get("retry-after")
+        except Exception:
+            raw = None
+    try:
+        if hasattr(raw, "total_seconds"):
+            return float(raw.total_seconds())
+        return float(raw) if raw is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 async def _notify_delivery_failed(
@@ -207,7 +281,7 @@ async def _notify_delivery_failed(
             constraint=f"{channel_name}_delivery",
             message=(
                 f"A {channel_name.title()} message didn't reach your device. "
-                f"Check your connection or re-pair under Settings → Messaging."
+                f"Check your connection or re-pair on the Messaging page."
             ),
             severity="warning",
             wizard_id=channel_name,

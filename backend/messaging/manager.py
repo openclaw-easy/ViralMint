@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections import deque
 from typing import Awaitable, Callable, Optional
 
 from backend.messaging.base import (
@@ -21,11 +23,48 @@ logger = logging.getLogger(__name__)
 # planner callback: async (text, user_id) -> full response string
 PlannerCallback = Callable[[str, str], Awaitable[str]]
 
+# Conversation memory for chat from a phone. Every inbound message used to
+# reach the agent with `history=[]`, so the replies our own notifications ask
+# for ("reply *download top 5*", "want me to retry?") and any plain "yes" to a
+# question the bot just asked arrived with no context at all. The last few
+# turns — including the notifications we pushed — are kept per user, in
+# memory, and passed back in as history. Memory is enough: this is a local
+# single-user app, and a stale thread after a restart is harmless.
+HISTORY_MAX_MESSAGES = 16
+# A reply hours later is a new conversation, not an answer to the old one.
+HISTORY_TTL_S = 6 * 3600
+
 
 class MessagingManager:
     def __init__(self) -> None:
         self._channels: list[MessagingChannel] = []
         self._planner_callback: Optional[PlannerCallback] = None
+        self._history: dict[str, deque] = {}
+
+    # ── Conversation memory ─────────────────────────────────────────────────
+
+    def remember(self, user_id: str, role: str, content: str) -> None:
+        """Append one turn to the user's phone conversation."""
+        content = (content or "").strip()
+        if not content or role not in ("user", "assistant"):
+            return
+        buf = self._history.setdefault(user_id, deque(maxlen=HISTORY_MAX_MESSAGES))
+        buf.append((time.monotonic(), role, content))
+
+    def history_for(self, user_id: str) -> list[dict]:
+        """The recent turns as OpenAI-style messages, oldest first.
+
+        Turns older than HISTORY_TTL_S are dropped, and a leading assistant
+        turn is fine (a notification can open the thread) — the agent reads
+        it as context for whatever the user says next.
+        """
+        buf = self._history.get(user_id)
+        if not buf:
+            return []
+        cutoff = time.monotonic() - HISTORY_TTL_S
+        while buf and buf[0][0] < cutoff:
+            buf.popleft()
+        return [{"role": role, "content": content} for _t, role, content in buf]
 
     def register(self, channel: MessagingChannel) -> None:
         self._channels.append(channel)
@@ -77,30 +116,23 @@ class MessagingManager:
     async def notify(self, event: NotificationEvent, user_id: str = "local", **kwargs) -> None:
         """Fan out a notification to every configured channel. Never raises."""
         payload = _build_payload(event, kwargs)
-        logger.info(
-            "notify | event=%s user=%s channels=%d",
-            event.value, user_id, len(self._channels),
-        )
         delivered = 0
         for ch in self._channels:
             try:
                 configured = await ch.is_configured(user_id)
-                logger.info(
-                    "notify | event=%s ch=%s configured=%s",
-                    event.value, ch.channel_name, configured,
-                )
                 if not configured:
                     continue
                 ok = await ch.send(user_id, payload)
-                logger.info(
-                    "notify | event=%s ch=%s sent=%s",
-                    event.value, ch.channel_name, ok,
-                )
+                logger.debug("notify | event=%s ch=%s sent=%s", event.value, ch.channel_name, ok)
                 if ok:
                     delivered += 1
             except Exception as e:
                 logger.warning(f"Notify failed via {ch.channel_name}: {e}", exc_info=True)
-        logger.info("notify | event=%s delivered=%d", event.value, delivered)
+        if delivered:
+            logger.info("notify | event=%s delivered=%d", event.value, delivered)
+            # The user will reply to THIS ("download top 5", "retry"), so it
+            # has to be part of the conversation the next turn sees.
+            self.remember(user_id, "assistant", f"{payload.title}\n{payload.body}")
 
 
 def _build_payload(event: NotificationEvent, data: dict) -> NotificationPayload:
@@ -171,7 +203,9 @@ def _build_payload(event: NotificationEvent, data: dict) -> NotificationPayload:
             body=(
                 f"⚠️ The {job_type} job didn't finish.\n"
                 f"_{err}_\n\n"
-                "Want me to retry? Reply *retry* or open ViralMint for details."
+                # No "reply retry": the notice carries the job type and error,
+                # not what to re-run, so the agent could not honour it.
+                "Open ViralMint for the details, or tell me what you'd like to try next."
             ),
             data=data,
         )

@@ -182,6 +182,71 @@ class TestBuildPayload:
         assert "youtube, tiktok" in p.body
         assert "How LLMs Work" in p.body and "87.5" in p.body
 
+
+
+# ── conversation memory (2026-09-24 audit) ──────────────────────────────────
+#
+# Every message from a phone reached the agent with history=[], so the
+# replies our own notifications invite ("download top 5", a bare "yes")
+# arrived with no context.
+
+class TestConversationMemory:
+    def test_turns_come_back_oldest_first(self):
+        m = MessagingManager()
+        m.remember("u", "assistant", "Scout done — 30 videos")
+        m.remember("u", "user", "download top 5")
+        assert m.history_for("u") == [
+            {"role": "assistant", "content": "Scout done — 30 videos"},
+            {"role": "user", "content": "download top 5"},
+        ]
+        assert m.history_for("someone-else") == []
+
+    def test_blank_and_unknown_roles_are_ignored(self):
+        m = MessagingManager()
+        m.remember("u", "user", "   ")
+        m.remember("u", "system", "nope")
+        assert m.history_for("u") == []
+
+    def test_history_is_bounded(self):
+        from backend.messaging import manager as mod
+        m = MessagingManager()
+        for i in range(mod.HISTORY_MAX_MESSAGES + 5):
+            m.remember("u", "user", f"m{i}")
+        h = m.history_for("u")
+        assert len(h) == mod.HISTORY_MAX_MESSAGES
+        assert h[-1]["content"] == f"m{mod.HISTORY_MAX_MESSAGES + 4}"
+
+    def test_stale_turns_expire(self, monkeypatch):
+        from backend.messaging import manager as mod
+        m = MessagingManager()
+        now = [1000.0]
+        monkeypatch.setattr(mod.time, "monotonic", lambda: now[0])
+        m.remember("u", "user", "old")
+        now[0] += mod.HISTORY_TTL_S + 1
+        m.remember("u", "user", "new")
+        assert [x["content"] for x in m.history_for("u")] == ["new"]
+
+    @pytest.mark.asyncio
+    async def test_a_delivered_notification_joins_the_conversation(self):
+        m = MessagingManager()
+        m.register(_channel("telegram", configured=True, send_ok=True))
+        await m.notify(NotificationEvent.SCOUT_COMPLETE, "u", total=30, niche="cooking")
+        h = m.history_for("u")
+        assert len(h) == 1 and h[0]["role"] == "assistant" and "cooking" in h[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_an_undelivered_notification_does_not(self):
+        m = MessagingManager()
+        m.register(_channel("telegram", configured=False))
+        await m.notify(NotificationEvent.SCOUT_COMPLETE, "u", total=30)
+        assert m.history_for("u") == []
+
+
+class TestHonestCopy:
+
+    def test_failure_notice_does_not_promise_a_retry(self):
+        body = _build_payload(NotificationEvent.JOB_FAILED, {"job_type": "download", "error": "x"}).body
+        assert "retry" not in body.lower()
     def test_scout_complete_defaults(self):
         p = _build_payload(NotificationEvent.SCOUT_COMPLETE, {})
         assert "your niche" in p.body

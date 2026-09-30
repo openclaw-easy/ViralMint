@@ -14,9 +14,15 @@ Both are stored per-user on MessagingConfig:
 
 Inbound direct messages (message.im) are routed to the PlannerAgent via the
 callback wired by MessagingManager.set_planner_callback().
+
+Ownership: every workspace member can DM an installed app,
+and the old handshake re-bound to whoever DMed last and ran their text as the
+owner. Now the DM that sends the pairing code shown on the Messaging page becomes the
+owner's channel; every other DM is ignored.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
@@ -27,7 +33,10 @@ from backend.core.crypto import decrypt_safe, encrypt
 from backend.core.ws_manager import ws_manager
 from backend.database import AsyncSessionLocal
 from backend.messaging._shared import (
+    UNPAIRED_REPLY,
     deactivate_config,
+    matches_pair_code,
+    new_pair_code,
     persist_chat_id,
     send_with_retry,
     split_text,
@@ -62,6 +71,11 @@ PlannerCallback = Callable[[str, str], Awaitable[str]]
 
 SLACK_MSG_LIMIT = 3500
 
+# slack-sdk's aiohttp SocketModeClient.connect() retries every failure forever
+# (log, sleep, try again). With a revoked app token that made the connect
+# request never return. The token is now checked first; this bounds the rest.
+SOCKET_CONNECT_TIMEOUT_S = 20.0
+
 
 class _UserBot:
     def __init__(
@@ -79,9 +93,14 @@ class _UserBot:
         self.chat_id = chat_id          # DM channel id (starts with "D")
         self.bot_user_id = bot_user_id  # Slack user id of the bot (starts with "U"/"B")
         self.team_name = team_name
+        self.pair_code: Optional[str] = None if chat_id else new_pair_code()
 
     async def start(self) -> None:
-        await self.socket_client.connect()
+        try:
+            await asyncio.wait_for(self.socket_client.connect(), timeout=SOCKET_CONNECT_TIMEOUT_S)
+        except BaseException:
+            await self.stop()
+            raise
 
     async def stop(self) -> None:
         try:
@@ -100,6 +119,9 @@ class SlackChannel(MessagingChannel):
     def __init__(self) -> None:
         self._bots: dict[str, _UserBot] = {}
         self._planner_callback: Optional[PlannerCallback] = None
+        # One connect / disconnect / boot start at a time — overlapping ones
+        # each opened a socket and every DM got two replies.
+        self._lock = asyncio.Lock()
 
     def set_planner_callback(self, callback: PlannerCallback) -> None:
         self._planner_callback = callback
@@ -125,19 +147,20 @@ class SlackChannel(MessagingChannel):
                 logger.warning("Slack config %s missing token(s)", cfg.id)
                 continue
             try:
-                await self._spin_up_bot(
-                    cfg.user_id,
-                    bot_token=bot_token,
-                    app_token=app_token,
-                    chat_id=cfg.chat_id or None,
-                )
+                async with self._lock:
+                    await self._spin_up_bot(
+                        cfg.user_id,
+                        bot_token=bot_token,
+                        app_token=app_token,
+                        chat_id=cfg.chat_id or None,
+                    )
             except Exception as e:
                 logger.warning("Failed to start Slack bot for user=%s: %s", cfg.user_id, e)
 
     async def stop(self) -> None:
-        for bot in list(self._bots.values()):
-            await bot.stop()
+        bots = list(self._bots.values())
         self._bots.clear()
+        await asyncio.gather(*(b.stop() for b in bots), return_exceptions=True)
 
     async def is_configured(self, user_id: str) -> bool:
         bot = self._bots.get(user_id)
@@ -183,57 +206,71 @@ class SlackChannel(MessagingChannel):
         except Exception as e:
             raise ValueError(f"Slack rejected bot token: {e}")
 
-        bot_user_id = auth.get("user_id") or auth.get("bot_id") or ""
-        team_name = auth.get("team") or ""
+        # Validate the APP-LEVEL token too, before anything is torn down.
+        # auth.test only checks the bot token, and a bad app token made the
+        # socket connect retry forever — the request never returned, after
+        # the working bot had already been stopped.
+        try:
+            opened = await AsyncWebClient(token=app_token).apps_connections_open()
+            if not opened.get("ok"):
+                raise ValueError(opened.get("error") or "rejected")
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"Slack rejected the app-level token: {e}")
 
-        # Tear down any existing bot
-        existing = self._bots.pop(user_id, None)
-        if existing:
-            await existing.stop()
+        async with self._lock:
+            existing = self._bots.pop(user_id, None)
+            if existing:
+                await existing.stop()
 
-        async with AsyncSessionLocal() as db:
-            row = await db.execute(
-                select(MessagingConfig).where(
-                    MessagingConfig.user_id == user_id,
-                    MessagingConfig.channel == "slack",
+            async with AsyncSessionLocal() as db:
+                row = await db.execute(
+                    select(MessagingConfig).where(
+                        MessagingConfig.user_id == user_id,
+                        MessagingConfig.channel == "slack",
+                    )
                 )
-            )
-            cfg = row.scalar_one_or_none()
-            if cfg:
-                cfg.bot_token_encrypted = encrypt(bot_token)
-                cfg.api_key_encrypted = encrypt(app_token)
-                cfg.is_active = True
-                cfg.connected_at = datetime.utcnow()
-            else:
-                cfg = MessagingConfig(
-                    user_id=user_id,
-                    channel="slack",
-                    bot_token_encrypted=encrypt(bot_token),
-                    api_key_encrypted=encrypt(app_token),
-                    is_active=True,
-                    connected_at=datetime.utcnow(),
-                )
-                db.add(cfg)
-            await db.commit()
-            chat_id = cfg.chat_id or None
+                cfg = row.scalar_one_or_none()
+                if cfg:
+                    # A different app must be paired again — the DM channel
+                    # belongs to the bot it was made with.
+                    if decrypt_safe(cfg.bot_token_encrypted or "") != bot_token:
+                        cfg.chat_id = None
+                    cfg.bot_token_encrypted = encrypt(bot_token)
+                    cfg.api_key_encrypted = encrypt(app_token)
+                    cfg.is_active = True
+                    cfg.connected_at = datetime.utcnow()
+                else:
+                    cfg = MessagingConfig(
+                        user_id=user_id,
+                        channel="slack",
+                        bot_token_encrypted=encrypt(bot_token),
+                        api_key_encrypted=encrypt(app_token),
+                        is_active=True,
+                        connected_at=datetime.utcnow(),
+                    )
+                    db.add(cfg)
+                await db.commit()
+                chat_id = cfg.chat_id or None
 
-        await self._spin_up_bot(
-            user_id,
-            bot_token=bot_token,
-            app_token=app_token,
-            chat_id=chat_id,
-        )
-        return {
-            "bot_user_id": bot_user_id,
-            "team_name": team_name,
-            "chat_id": chat_id,
-        }
+            try:
+                await self._spin_up_bot(
+                    user_id,
+                    bot_token=bot_token,
+                    app_token=app_token,
+                    chat_id=chat_id,
+                )
+            except Exception as e:
+                raise ValueError(f"Slack's socket didn't connect: {str(e) or type(e).__name__}")
+            return self.status(user_id)
 
     async def disconnect(self, user_id: str) -> bool:
-        bot = self._bots.pop(user_id, None)
-        if bot:
-            await bot.stop()
-        await deactivate_config(user_id, "slack", clear_tokens=True)
+        async with self._lock:
+            bot = self._bots.pop(user_id, None)
+            if bot:
+                await bot.stop()
+            await deactivate_config(user_id, "slack", clear_tokens=True)
         return True
 
     async def send_test(self, user_id: str) -> bool:
@@ -262,6 +299,7 @@ class SlackChannel(MessagingChannel):
                 "bot_user_id": None,
                 "team_name": None,
                 "chat_id": None,
+                "pair_code": None,
             }
         return {
             "connected": bool(bot.chat_id),
@@ -270,6 +308,7 @@ class SlackChannel(MessagingChannel):
             "bot_user_id": bot.bot_user_id,
             "team_name": bot.team_name,
             "chat_id": bot.chat_id,
+            "pair_code": bot.pair_code if not bot.chat_id else None,
         }
 
     # ── Internals ─────────────────────────────────────────────────────────────
@@ -339,9 +378,16 @@ class SlackChannel(MessagingChannel):
             if not bot:
                 return
 
-            # Capture the DM channel on first message
+            # Only the owner's DM channel drives the app. Each person's DM
+            # with the bot is its own channel, so the channel id identifies them.
             if bot.chat_id != channel_id:
+                if bot.chat_id:
+                    return          # another workspace member: silence
+                if not matches_pair_code(text, bot.pair_code):
+                    await bot.web_client.chat_postMessage(channel=channel_id, text=UNPAIRED_REPLY)
+                    return
                 bot.chat_id = channel_id
+                bot.pair_code = None
                 await persist_chat_id(user_id, "slack", channel_id)
                 await ws_manager.send(
                     {
@@ -351,6 +397,9 @@ class SlackChannel(MessagingChannel):
                     },
                     user_id,
                 )
+                await bot.web_client.chat_postMessage(
+                    channel=channel_id, text=":clapper: ViralMint connected! DM me any time.")
+                return
 
             if not self._planner_callback:
                 await bot.web_client.chat_postMessage(

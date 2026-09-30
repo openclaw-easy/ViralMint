@@ -6,7 +6,7 @@ WhatsApp messaging channel via neonize (Python bindings to Go's whatsmeow).
 Uses QR-scan linked-device pairing — the same flow as WhatsApp Web. neonize
 ships a ~30MB native library; no Node sidecar, no Meta Cloud API business
 verification. Session credentials auto-persist in a per-user SQLite file at
-`storage/messaging/whatsapp_{user_id}.db`.
+`<DATA_DIR>/storage/messaging/whatsapp_{user_id}.db` (0600).
 
 Lifecycle:
   - start():     resume every active MessagingConfig row (re-connects sessions paired previously)
@@ -16,6 +16,14 @@ Lifecycle:
 
 Inbound messages route to the PlannerAgent through the same callback Telegram
 uses: async (text, user_id) -> str.
+
+Ownership: a linked device sees EVERY chat on the phone.
+The old handler ran any contact's or group's message through the agent as the
+owner, answered them, and re-pointed notifications at whoever wrote last. Now
+the only input is what the owner writes in their own "Message yourself" chat:
+IsFromMe, in the chat addressed to the paired account's own phone JID or LID
+(from client.get_me()). Everything else is ignored, and inbound messages
+never move the notification target.
 
 Ban risk: linked-device pairing on a personal WhatsApp number is grey-area
 under ToS. The UI surfaces this clearly before the user scans.
@@ -33,6 +41,7 @@ from typing import Awaitable, Callable, Optional
 
 from sqlalchemy import select
 
+from backend.config import settings
 from backend.core.ws_manager import ws_manager
 from backend.database import AsyncSessionLocal
 from backend.messaging._shared import (
@@ -56,7 +65,14 @@ PlannerCallback = Callable[[str, str], Awaitable[str]]
 # WhatsApp accepts much longer messages than Telegram; keep headroom.
 WA_MSG_LIMIT = 4000
 
-_SESSION_DIR = Path("storage") / "messaging"
+def _session_dir() -> Path:
+    """Where WhatsApp session files live — inside DATA_DIR.
+
+    This used to be `Path("storage") / "messaging"`, relative to the working
+    directory. In a dev run that happens to be DATA_DIR; in the packaged app
+    the launcher starts the backend inside the app bundle, so the session was
+    written into the bundle and every update deleted it."""
+    return settings.STORAGE_ROOT / "messaging"
 
 
 # ── Lazy neonize import ──────────────────────────────────────────────────────
@@ -102,9 +118,42 @@ def _import_neonize() -> Optional[dict]:
 
 
 def _session_path(user_id: str) -> Path:
-    _SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    d = _session_dir()
+    d.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^a-zA-Z0-9_-]", "_", user_id or "local")
-    return _SESSION_DIR / f"whatsapp_{safe}.db"
+    path = d / f"whatsapp_{safe}.db"
+    # One-time move from the old working-directory location.
+    legacy = Path.cwd() / "storage" / "messaging" / path.name
+    if not path.exists() and legacy.exists() and legacy.resolve() != path.resolve():
+        try:
+            for suffix in ("", "-wal", "-shm"):
+                src = legacy.with_name(legacy.name + suffix)
+                if src.exists():
+                    src.replace(path.with_name(path.name + suffix))
+            logger.info("Moved WhatsApp session %s → %s", legacy, path)
+        except OSError as e:
+            logger.warning("Could not move WhatsApp session from %s: %s", legacy, e)
+    return path
+
+
+def _remove_session(path: Path) -> None:
+    """Delete a session database and its SQLite side files."""
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        f = path.with_name(path.name + suffix)
+        try:
+            if f.exists():
+                f.unlink()
+        except OSError as e:
+            logger.warning("Could not delete WhatsApp session file %s: %s", f, e)
+
+
+def _restrict(path: Path) -> None:
+    """The session holds the linked device's keys in plaintext — owner-only."""
+    try:
+        if path.exists():
+            path.chmod(0o600)
+    except OSError:
+        pass
 
 
 # ── Per-user state ───────────────────────────────────────────────────────────
@@ -120,8 +169,17 @@ class _UserClient:
         self.factory = factory
         self.session_path = session_path
         self.chat_id: Optional[str] = None   # self-JID; destination for notifications
+        # The paired account's own identities (phone number user part, LID user
+        # part) from client.get_me(). Inbound is accepted only from the chat
+        # addressed to one of these.
+        self.self_ids: set[str] = set()
+        # Connection state from ConnectedEv / DisconnectedEv / LoggedOutEv.
+        # neonize's `is_connected` / `is_logged_in` return an un-awaited
+        # coroutine — always truthy — so they could never say "offline".
+        self.online: bool = False
         self.paired: bool = False
         self.qr_seen: bool = False           # True after on_qr fires; used by pair-timeout watchdog
+        self.phone_user: Optional[str] = None  # own phone number (user part), from get_me()
         self.connect_task: Optional[asyncio.Task] = None
         self.pair_watchdog: Optional[asyncio.Task] = None
         # Ring buffer of message IDs we sent, to suppress our own echoes on the
@@ -137,23 +195,41 @@ class _UserClient:
         return bool(msg_id) and str(msg_id) in self.sent_ids
 
     async def stop(self) -> None:
+        """Stop the client and release its worker thread.
+
+        neonize's connect runs the blocking Go `Neonize()` call on a worker
+        thread that only returns when Go is told to STOP. `disconnect()` alone
+        never did that, so every session parked a thread until exit (and
+        could hold interpreter shutdown open). `client.stop()` is the call that
+        ends it; cancelling the connect task sends the same signal as a
+        fallback. Every step is bounded — this runs during app shutdown.
+        """
+        self.online = False
         try:
             if self.pair_watchdog and not self.pair_watchdog.done():
                 self.pair_watchdog.cancel()
             if self.client is not None:
-                try:
-                    if self.client.is_connected:
-                        await self.client.disconnect()
-                except Exception:
-                    pass
+                for step in (self.client.disconnect, self.client.stop):
+                    try:
+                        await asyncio.wait_for(step(), timeout=5)
+                    except Exception:
+                        pass
             if self.connect_task and not self.connect_task.done():
                 self.connect_task.cancel()
                 try:
-                    await self.connect_task
-                except (asyncio.CancelledError, Exception):
+                    await asyncio.wait_for(self.connect_task, timeout=5)
+                except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                     pass
         except Exception as e:
             logger.warning("WhatsApp stop error for user=%s: %s", self.user_id, e)
+
+    def is_owner_message(self, is_from_me: bool, chat_user: Optional[str],
+                         reply_user: Optional[str]) -> bool:
+        """The owner writing in their own "Message yourself" chat — and only that."""
+        if not is_from_me or not self.self_ids:
+            return False
+        return bool((chat_user and chat_user in self.self_ids)
+                    or (reply_user and reply_user in self.self_ids))
 
 
 # ── Channel ──────────────────────────────────────────────────────────────────
@@ -165,6 +241,11 @@ class WhatsAppChannel(MessagingChannel):
     def __init__(self) -> None:
         self._clients: dict[str, _UserClient] = {}
         self._planner_callback: Optional[PlannerCallback] = None
+        # One pair / unpair / resume at a time. Two overlapping pairings each
+        # deleted the session file under the other's live client, and the
+        # loser kept running unreachable, with its own inbound handler.
+        self._lock = asyncio.Lock()
+        self._background: set[asyncio.Task] = set()
 
     # ── MessagingManager wiring ──────────────────────────────────────────────
 
@@ -191,29 +272,27 @@ class WhatsAppChannel(MessagingChannel):
         for cfg in configs:
             path = _session_path(cfg.user_id)
             if not path.exists():
-                # Session file was deleted out-of-band — mark inactive, skip
-                logger.info("WhatsApp session file missing for user=%s; skipping resume", cfg.user_id)
+                # The session is gone (deleted, or lost with an old app bundle):
+                # there is nothing to resume, so stop claiming it is active.
+                logger.info("WhatsApp session file missing for user=%s; marking inactive", cfg.user_id)
+                await deactivate_config(cfg.user_id, "whatsapp", clear_tokens=False)
                 continue
             try:
-                await self._spin_up(cfg.user_id, chat_id=cfg.chat_id)
+                async with self._lock:
+                    await self._spin_up(cfg.user_id, chat_id=cfg.chat_id)
             except Exception as e:
                 logger.warning("Failed to resume WhatsApp for user=%s: %s", cfg.user_id, e)
 
     async def stop(self) -> None:
-        for uc in list(self._clients.values()):
-            await uc.stop()
+        clients = list(self._clients.values())
         self._clients.clear()
+        await asyncio.gather(*(uc.stop() for uc in clients), return_exceptions=True)
 
     # ── MessagingChannel API ─────────────────────────────────────────────────
 
     async def is_configured(self, user_id: str) -> bool:
         uc = self._clients.get(user_id)
-        if not uc or not uc.paired or not uc.chat_id:
-            return False
-        try:
-            return bool(uc.client.is_connected and uc.client.is_logged_in)
-        except Exception:
-            return False
+        return bool(uc and uc.paired and uc.online and uc.chat_id)
 
     async def send(self, user_id: str, payload: NotificationPayload) -> bool:
         uc = self._clients.get(user_id)
@@ -259,40 +338,37 @@ class WhatsAppChannel(MessagingChannel):
                 "Reinstall backend dependencies (pip install -r requirements.txt)."
             )
 
-        # Tear down any existing client for this user
-        existing = self._clients.pop(user_id, None)
-        if existing:
-            await existing.stop()
+        async with self._lock:
+            existing = self._clients.pop(user_id, None)
+            if existing:
+                # Unlink the old device from the phone too, or it stays listed
+                # under Linked Devices forever.
+                if existing.paired:
+                    try:
+                        await asyncio.wait_for(existing.client.logout(), timeout=5)
+                    except Exception as e:
+                        logger.debug("WhatsApp logout before re-pair failed: %s", e)
+                await existing.stop()
 
-        # Wipe the session file so we get a fresh QR instead of resuming
-        path = _session_path(user_id)
-        try:
-            if path.exists():
-                path.unlink()
-        except Exception as e:
-            logger.warning("Could not delete WhatsApp session %s: %s", path, e)
-
-        await self._spin_up(user_id, chat_id=None, fresh_pair=True)
+            # Wipe the session so we get a fresh QR instead of resuming.
+            _remove_session(_session_path(user_id))
+            await self._spin_up(user_id, chat_id=None, fresh_pair=True)
         return {"awaiting_qr": True}
 
     async def disconnect(self, user_id: str) -> bool:
-        uc = self._clients.pop(user_id, None)
-        if uc:
-            try:
-                if uc.client.is_connected and uc.client.is_logged_in:
-                    await uc.client.logout()
-            except Exception as e:
-                logger.debug("WhatsApp logout failed for user=%s: %s", user_id, e)
-            await uc.stop()
+        async with self._lock:
+            uc = self._clients.pop(user_id, None)
+            if uc:
+                if uc.paired:
+                    try:
+                        await asyncio.wait_for(uc.client.logout(), timeout=5)
+                    except Exception as e:
+                        logger.debug("WhatsApp logout failed for user=%s: %s", user_id, e)
+                await uc.stop()
+                # Remove the session so a reconnect needs a fresh pair.
+                _remove_session(uc.session_path)
 
-            # Remove the session file so re-connect requires a fresh pair
-            try:
-                if uc.session_path.exists():
-                    uc.session_path.unlink()
-            except Exception as e:
-                logger.warning("Could not delete WhatsApp session %s: %s", uc.session_path, e)
-
-        await deactivate_config(user_id, "whatsapp", clear_tokens=False)
+            await deactivate_config(user_id, "whatsapp", clear_tokens=False)
         await ws_manager.send({"type": "whatsapp_disconnected", "user_id": user_id}, user_id)
         return True
 
@@ -328,15 +404,14 @@ class WhatsAppChannel(MessagingChannel):
                 "chat_id": None,
             }
 
-        try:
-            connected = bool(uc.client.is_connected and uc.client.is_logged_in)
-        except Exception:
-            connected = False
-
         return {
-            "connected": bool(connected and uc.paired and uc.chat_id),
+            "connected": bool(uc.online and uc.paired and uc.chat_id),
             "installed": True,
             "pairing": not uc.paired,
+            # Paired but not online (boot before ConnectedEv, sleep, a network
+            # drop): neonize reconnects on its own. The UI must NOT offer the
+            # QR button here — re-pairing logs out a working session.
+            "paired": bool(uc.paired),
             "chat_id": uc.chat_id,
         }
 
@@ -405,10 +480,17 @@ class WhatsAppChannel(MessagingChannel):
 
     async def _run_connect(self, uc: _UserClient) -> None:
         try:
-            await uc.client.connect()
+            # connect() only STARTS neonize's own task and returns it; awaiting
+            # that task is what surfaces a connection error (it used to be
+            # dropped unread), and cancelling us now cancels it — which makes
+            # neonize tell Go to stop.
+            inner = await uc.client.connect()
+            if isinstance(inner, asyncio.Future):
+                await inner
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            uc.online = False
             logger.warning("WhatsApp connect loop ended for user=%s: %s", uc.user_id, e)
 
     def _register_handlers(self, uc: _UserClient, neo: dict) -> None:
@@ -437,9 +519,12 @@ class WhatsAppChannel(MessagingChannel):
         # ── ConnectedEv — pairing succeeded or session resumed.
         async def on_connected(_client, _ev) -> None:
             uc.paired = True
+            uc.online = True
             if uc.pair_watchdog and not uc.pair_watchdog.done():
                 uc.pair_watchdog.cancel()
-            self_jid = _extract_self_jid(_client)
+            _restrict(uc.session_path)
+            await self._learn_self(uc)
+            self_jid = _extract_self_jid(_client) or uc.phone_user
             if self_jid:
                 uc.chat_id = self_jid
                 await self._persist_connection(user_id, self_jid)
@@ -461,8 +546,10 @@ class WhatsAppChannel(MessagingChannel):
                     resp = await _client.send_message(
                         jid,
                         "*ViralMint connected!* 🎬\n\n"
-                        "You'll get alerts here when scouts, downloads, and uploads finish.\n"
-                        "Or just message me: _download https://..._ or _scout cooking videos_.",
+                        "You'll get a message here when scouts, downloads and videos finish.\n"
+                        "To talk to me, write in this chat (Message yourself): "
+                        "_download https://..._ or _scout cooking videos_. "
+                        "Messages from anyone else are never read.",
                     )
                     uc.note_sent(getattr(resp, "ID", None))
                 except Exception as e:
@@ -470,6 +557,7 @@ class WhatsAppChannel(MessagingChannel):
 
         # ── DisconnectedEv — transient; neonize reconnects itself.
         async def on_disconnected(_client, _ev) -> None:
+            uc.online = False
             await ws_manager.send(
                 {"type": "whatsapp_disconnected", "user_id": user_id, "reason": "disconnected"},
                 user_id,
@@ -479,7 +567,22 @@ class WhatsAppChannel(MessagingChannel):
         async def on_logged_out(_client, _ev) -> None:
             logger.info("WhatsApp logged out for user=%s", user_id)
             uc.paired = False
+            uc.online = False
             uc.chat_id = None
+            # A retired client (configure()/disconnect() already replaced or
+            # dropped it) must not touch shared state: the session file path
+            # and the DB row now belong to whatever runs next — deleting them
+            # here could wipe a fresh pairing mid-flight.
+            if self._clients.get(user_id) is not uc:
+                return
+            # The session is dead: drop the client so status() stops reporting
+            # "pairing" with no QR coming, stop it, and delete its keys.
+            self._clients.pop(user_id, None)
+            # Held until done: a bare create_task can be garbage-collected
+            # mid-flight (asyncio keeps only a weak reference).
+            task = asyncio.create_task(self._retire_logged_out(uc))
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
             async with AsyncSessionLocal() as db:
                 row = await db.execute(
                     select(MessagingConfig).where(
@@ -507,6 +610,7 @@ class WhatsAppChannel(MessagingChannel):
                 user_part = getattr(ident, "User", None) if ident else None
                 if user_part and (not status or status.upper().endswith("SUCCESS")):
                     uc.paired = True
+                    uc.self_ids.add(str(user_part))
                     if not uc.chat_id:
                         uc.chat_id = str(user_part)
                         await self._persist_connection(user_id, uc.chat_id)
@@ -515,7 +619,7 @@ class WhatsAppChannel(MessagingChannel):
 
         # ── MessageEv — inbound chat → planner.
         async def on_message(_client, message) -> None:
-            text, reply_user, reply_server, is_from_me, msg_id = _extract_message(message)
+            text, reply_user, reply_server, is_from_me, msg_id, chat_user = _extract_message(message)
 
             # On a linked device we see our own outbound messages come back with
             # IsFromMe=True. The only reliable way to tell those apart from the
@@ -525,18 +629,27 @@ class WhatsAppChannel(MessagingChannel):
                 return
             if not text:
                 return
+            # The owner's own "Message yourself" chat is the only input. A
+            # linked device sees every chat on the phone: contacts, groups, and
+            # the owner's own messages TO other people.
+            # Only the owner's own messages can pass; skip the get_me() round
+            # trip for everyone else's chatter on the phone.
+            if not is_from_me:
+                return
+            if not uc.self_ids:
+                await self._learn_self(uc)
+            if not uc.is_owner_message(is_from_me, chat_user, reply_user):
+                return
             if not self._planner_callback:
                 return
 
-            logger.info(
-                "WhatsApp inbound user=%s from=%s@%s self=%s id=%s: %s",
-                user_id, reply_user, reply_server, is_from_me, msg_id, text[:120],
-            )
+            logger.info("WhatsApp inbound user=%s id=%s: %s", user_id, msg_id, text[:120])
 
-            # Persist a phone-JID chat_id the first time we see one. Earlier
-            # builds stored the LID here, which the phone-namespace server
-            # can't route.
-            if reply_user and reply_server:
+            # Keep the phone-JID form of the owner's own chat as the
+            # notification target (earlier builds stored the LID, which the
+            # phone-namespace server can't route). Only ever the owner's own
+            # identity — never whoever happened to write.
+            if reply_user and reply_server and reply_user in uc.self_ids:
                 combined = f"{reply_user}@{reply_server}"
                 if uc.chat_id != combined:
                     uc.chat_id = combined
@@ -592,6 +705,25 @@ class WhatsAppChannel(MessagingChannel):
         except Exception as e:
             logger.warning("Could not register WhatsApp event handlers: %s", e)
 
+    async def _learn_self(self, uc: "_UserClient") -> None:
+        """Record the paired account's own phone and LID user parts."""
+        try:
+            me = await asyncio.wait_for(uc.client.get_me(), timeout=10)
+        except Exception as e:
+            logger.warning("WhatsApp get_me failed for user=%s: %s", uc.user_id, e)
+            return
+        for jid in (getattr(me, "JID", None), getattr(me, "LID", None)):
+            user_part = getattr(jid, "User", None) if jid is not None else None
+            if user_part:
+                uc.self_ids.add(str(user_part))
+        phone = getattr(getattr(me, "JID", None), "User", None)
+        if phone:
+            uc.phone_user = str(phone)
+
+    async def _retire_logged_out(self, uc: "_UserClient") -> None:
+        await uc.stop()
+        _remove_session(uc.session_path)
+
     async def _persist_connection(self, user_id: str, chat_id: str) -> None:
         async with AsyncSessionLocal() as db:
             row = await db.execute(
@@ -646,9 +778,10 @@ def _extract_self_jid(client) -> Optional[str]:
 
 def _extract_message(
     message,
-) -> tuple[str, Optional[str], Optional[str], bool, Optional[str]]:
-    """Pull (text, reply_user, reply_server, is_from_me, msg_id) out of a
-    neonize MessageEv.
+) -> tuple[str, Optional[str], Optional[str], bool, Optional[str], Optional[str]]:
+    """Pull (text, reply_user, reply_server, is_from_me, msg_id, chat_user) out
+    of a neonize MessageEv. `chat_user` is the conversation's own address — in
+    the owner's self-chat, the owner's phone number or LID.
 
     Why reply_user + reply_server instead of a single JID string: WhatsApp's
     multi-device protocol uses two parallel address spaces — phone JIDs
@@ -663,6 +796,7 @@ def _extract_message(
     reply_server: Optional[str] = None
     is_from_me = False
     msg_id: Optional[str] = None
+    chat_user_out: Optional[str] = None
 
     try:
         info = getattr(message, "Info", None)
@@ -679,6 +813,8 @@ def _extract_message(
 
                 chat_user = getattr(chat, "User", None) if chat else None
                 chat_server = getattr(chat, "Server", None) if chat else None
+                if chat_user:
+                    chat_user_out = str(chat_user)
 
                 # Default: reply to whoever sent it, on their native server.
                 if chat_user:
@@ -709,7 +845,7 @@ def _extract_message(
                             f"device={getattr(j, 'Device', None)!r}"
                         )
 
-                    logger.info(
+                    logger.debug(
                         "WhatsApp routing | chat=[%s] sender=[%s] "
                         "sender_alt=[%s] recip_alt=[%s] addr_mode=%r "
                         "| chose reply_user=%r reply_server=%r",
@@ -742,7 +878,7 @@ def _extract_message(
     except Exception:
         pass
 
-    return text.strip(), reply_user, reply_server, is_from_me, msg_id
+    return text.strip(), reply_user, reply_server, is_from_me, msg_id, chat_user_out
 
 
 def _parse_stored_chat_id(raw: str) -> tuple[str, str]:
