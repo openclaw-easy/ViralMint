@@ -32,14 +32,17 @@ export default function ScoutTab({ jobs, scoutResults, scoutTotal = 0, onFetchRe
 
       {scoutResults.length > 0 ? (
         <>
-          <ScoutResults results={scoutResults} onRefresh={() => onFetchResults(selectedJobId, 0, rowsPerPage)} />
+          <ScoutResults results={scoutResults}
+            onRefresh={() => onFetchResults(selectedJobId, page * rowsPerPage, rowsPerPage)} />
+          {/* The job filter travels with every page turn — page 2 of one
+              scout run used to fetch page 2 of ALL results. */}
           <TablePagination
             component="div"
             count={scoutTotal}
             page={page}
-            onPageChange={onPageChange}
+            onPageChange={(e, p) => onPageChange(e, p, selectedJobId)}
             rowsPerPage={rowsPerPage}
-            onRowsPerPageChange={onRowsPerPageChange}
+            onRowsPerPageChange={(e) => onRowsPerPageChange(e, selectedJobId)}
             rowsPerPageOptions={[20, 50, 100]}
             sx={{ borderTop: 1, borderColor: "divider", mt: 1 }}
           />

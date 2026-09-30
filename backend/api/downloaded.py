@@ -1689,16 +1689,21 @@ async def stream_downloaded(video_id: str, request: Request):
             select(DownloadedVideo).where(DownloadedVideo.id == video_id)
         )
         video = result.scalar_one_or_none()
-    if not video or not video.video_path:
+    if not video or not (video.video_path or video.audio_path):
         raise HTTPException(status_code=404, detail="Video not found")
 
+    # The video file when it exists, else the row's audio file. The Library
+    # files an audio-only download under Audio and hands out THIS url as its
+    # stream_url (library_index._downloaded_items), so a row whose mp4 is gone
+    # but whose mp3 remains must still play — it 404'd before.
+    candidates = [c for c in (video.video_path, video.audio_path) if c]
+    path = next((Path(c).resolve() for c in candidates if Path(c).exists()), None)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Video file not found on disk")
     # Validate path is within storage directory (prevent path traversal)
     from backend.config import settings as app_settings
-    path = Path(video.video_path).resolve()
     if not path.is_relative_to(app_settings.STORAGE_ROOT.resolve()):
         raise HTTPException(status_code=403, detail="Access denied")
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Video file not found on disk")
 
     from backend.api.videos import serve_media_with_range
     return serve_media_with_range(path, request, filename=path.name)

@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Box, Typography, Button, ButtonGroup, IconButton, Stack, Paper, Dialog, DialogTitle, DialogContent, DialogActions } from "@mui/material"
+import { Box, Typography, Button, ButtonGroup, IconButton, Stack, Drawer, Dialog, DialogTitle, DialogContent, DialogActions } from "@mui/material"
 import GridViewIcon from "@mui/icons-material/GridView"
 import TableRowsIcon from "@mui/icons-material/TableRows"
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline"
@@ -142,12 +142,21 @@ export default function ScoutResults({ results, onSelect, onRefresh }) {
         </DialogActions>
       </Dialog>
 
-      {/* Detail panel */}
+      {/* Detail panel — a right-hand drawer. It used to render BELOW the whole
+          results grid, so clicking a card in a long list opened something
+          thousands of pixels down the page and the click appeared to do
+          nothing. */}
+      <Drawer
+        anchor="right"
+        open={!!selectedResult}
+        onClose={() => setSelectedResult(null)}
+        slotProps={{ paper: { sx: { width: { xs: "100%", sm: 560 }, maxWidth: "100%", p: 2 } } }}
+      >
       {selectedResult && (
-        <Paper elevation={0} sx={{ mt: 2, p: 2, border: 1, borderColor: "divider" }}>
+        <Box data-testid="scout-detail">
           <Stack direction="row" justifyContent="space-between" alignItems="start">
             <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography variant="h6">{selectedResult.title}</Typography>
+              <Typography variant="h6" sx={{ wordBreak: "break-word" }}>{selectedResult.title}</Typography>
               {selectedResult.platform === "news" ? (
                 <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.5 }}>
                   <Chip icon={<NewspaperIcon />} label="NEWS" size="small" variant="outlined" color="warning" />
@@ -162,7 +171,7 @@ export default function ScoutResults({ results, onSelect, onRefresh }) {
                 </Typography>
               )}
             </Box>
-            <IconButton size="small" onClick={() => setSelectedResult(null)}>
+            <IconButton size="small" aria-label="Close details" onClick={() => setSelectedResult(null)}>
               <CloseIcon />
             </IconButton>
           </Stack>
@@ -218,13 +227,15 @@ export default function ScoutResults({ results, onSelect, onRefresh }) {
                 ) : null
               })()}
             </Box>
-          ) : selectedResult.video_id ? (
+          ) : (selectedResult.video_id || selectedResult.video_url) ? (
             <Box sx={{ mt: 1.5 }}>
-              <VideoEmbed platform={selectedResult.platform} videoId={selectedResult.video_id} videoUrl={selectedResult.video_url} />
+              <VideoEmbed platform={selectedResult.platform} videoId={selectedResult.video_id}
+                videoUrl={selectedResult.video_url} thumbnailUrl={selectedResult.thumbnail_url} />
             </Box>
           ) : null}
-        </Paper>
+        </Box>
       )}
+      </Drawer>
     </Box>
   )
 }

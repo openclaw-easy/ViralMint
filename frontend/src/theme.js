@@ -80,6 +80,17 @@ export default function createAppTheme(mode) {
           "*::-webkit-scrollbar-thumb:hover": {
             background: isDark ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.18)",
           },
+          // Accessibility — a visible focus ring on keyboard-focused
+          // interactive elements. MUI's ButtonBase resets `outline: 0` and
+          // relies on a faint focus ripple, which many surfaces here hide, so
+          // Tab left no visible trace. :focus-visible keeps mouse clicks from
+          // drawing it. Components with a bespoke focus style still win on
+          // specificity.
+          "a:focus-visible, button:focus-visible, [role='button']:focus-visible, [tabindex]:focus-visible": {
+            outline: `2px solid ${alpha(P, isDark ? 0.9 : 0.8)}`,
+            outlineOffset: 2,
+            borderRadius: 8,
+          },
         },
       },
       MuiButton: {
@@ -114,6 +125,14 @@ export default function createAppTheme(mode) {
           },
           containedPrimary: {
             background: `linear-gradient(135deg, ${P}, #e88a5a)`,
+            // The gradient is a background-IMAGE, so MUI's disabled colour
+            // never showed through: a disabled primary button looked enabled
+            // on every page.
+            "&.Mui-disabled": {
+              background: isDark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)",
+              color: isDark ? "rgba(255,255,255,0.38)" : "rgba(0,0,0,0.38)",
+              boxShadow: "none",
+            },
             "&:hover": {
               background: `linear-gradient(135deg, #b85838, #d47a4e)`,
               boxShadow: `${s.md}, ${s.glow}`,

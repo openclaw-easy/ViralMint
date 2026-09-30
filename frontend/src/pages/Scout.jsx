@@ -97,10 +97,10 @@ export default function Scout() {
               if (offset === 0) setPage(0)
               fetchResults(jobId, offset, limit)
             }}
-            onPageChange={(_, p) => { setPage(p); fetchResults(null, p * rowsPerPage, rowsPerPage) }}
-            onRowsPerPageChange={(e) => {
+            onPageChange={(_, p, jobId) => { setPage(p); fetchResults(jobId || null, p * rowsPerPage, rowsPerPage) }}
+            onRowsPerPageChange={(e, jobId) => {
               const rpp = parseInt(e.target.value, 10)
-              setRowsPerPage(rpp); setPage(0); fetchResults(null, 0, rpp)
+              setRowsPerPage(rpp); setPage(0); fetchResults(jobId || null, 0, rpp)
             }}
           />
         )}

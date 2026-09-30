@@ -188,7 +188,14 @@ export default function AssetDrawer({
             <Box sx={{ px: 2, pt: 2, flexShrink: 0 }}>
               <Box sx={{
                 borderRadius: "12px", overflow: "hidden", position: "relative",
-                bgcolor: "background.subtle", height: 200,
+                bgcolor: "background.subtle",
+                // An image gets a real stage: at a fixed 200 px a 3:4 poster
+                // rendered ~149 px wide with the drawer empty below it. The
+                // stage takes the image's own height (min 200, max ~420) so a
+                // landscape image doesn't float in blurred bands.
+                ...(item.media === "image" && item.thumb_url
+                  ? { minHeight: 200, maxHeight: "min(420px, 50vh)" }
+                  : { height: 200 }),
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}>
                 {item.media === "image" && item.thumb_url ? (
@@ -198,8 +205,12 @@ export default function AssetDrawer({
                       width: "calc(100% + 24px)", height: "calc(100% + 24px)",
                       objectFit: "cover", filter: "blur(20px) brightness(0.8)",
                     }} />
-                    <Box component="img" src={item.thumb_url} alt=""
-                      sx={{ position: "relative", maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+                    {/* The file itself, not the 400 px poster — the stage is
+                        now big enough to show the difference. */}
+                    <Box component="img" src={item.stream_url || item.thumb_url} alt=""
+                      decoding="async"
+                      onError={(e) => { if (item.thumb_url && e.currentTarget.src.indexOf(item.thumb_url) === -1) e.currentTarget.src = item.thumb_url }}
+                      sx={{ position: "relative", display: "block", maxWidth: "100%", maxHeight: "min(420px, 50vh)", objectFit: "contain" }} />
                   </>
                 ) : item.media === "video" ? (
                   <Box component="video" src={item.stream_url} controls preload="metadata"
