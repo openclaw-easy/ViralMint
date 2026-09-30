@@ -51,7 +51,7 @@ All on your machine. Bring your own API keys. No SaaS in the middle. No telemetr
 | 📱 **Runs from your phone** | Two-way chat with the planner over Telegram, WhatsApp, Discord, or Slack — and job alerts in the same thread. |
 | 🆓 **Free out of the box** | Local Whisper, Edge TTS (400+ voices), royalty-free music, Pexels stock, and 22 built-in tools (most of them pure FFmpeg + Whisper) — the heavy lifting costs $0. Pay only for the AI you choose to plug in. |
 
-<sub>Battle-tested: a **2,500-test pytest suite** runs on every commit, plus a browser harness that drives the real app end to end. AGPL-3.0 — fork it, modify it, build a business on it.</sub>
+<sub>Battle-tested: a **2,800-test pytest suite** runs on every commit, plus a browser harness that drives the real app end to end. AGPL-3.0 — fork it, modify it, build a business on it.</sub>
 
 ---
 
@@ -333,7 +333,7 @@ ViralMint/
 │       ├── hooks/                  # WebSocket, settings, jobs, source video
 │       └── store/                  # Zustand global state
 │
-├── tests/                          # pytest suite (2,500+ tests)
+├── tests/                          # pytest suite (2,800+ tests)
 ├── storage/                        # Downloaded videos, audio, generated output (gitignored)
 │
 ├── requirements.txt

@@ -51,7 +51,7 @@
 | 📱 **スマホから操作** | Telegram・WhatsApp・Discord・Slack でプランナーと双方向チャット — 同じスレッドでジョブ通知も届きます。 |
 | 🆓 **すぐに無料で使える** | ローカル Whisper、Edge TTS（400以上の音声）、ロイヤリティフリー音楽、Pexels ストック、22の内蔵ツール（ほとんどは FFmpeg + Whisper だけで動作） — 重い処理はすべて $0。プラグインする AI のぶんだけ課金されます。 |
 
-<sub>実戦仕込み: 毎コミットで **2,500テストの pytest スイート** と、実アプリをエンドツーエンドで操作するブラウザハーネスが走ります。AGPL-3.0 — フォークして、改変して、その上でビジネスを構築できます。</sub>
+<sub>実戦仕込み: 毎コミットで **2,800テストの pytest スイート** と、実アプリをエンドツーエンドで操作するブラウザハーネスが走ります。AGPL-3.0 — フォークして、改変して、その上でビジネスを構築できます。</sub>
 
 ---
 
@@ -330,7 +330,7 @@ ViralMint/
 │       ├── hooks/                  # WebSocket, settings, jobs, source video
 │       └── store/                  # Zustand global state
 │
-├── tests/                          # pytest suite (2,500+ tests)
+├── tests/                          # pytest suite (2,800+ tests)
 ├── storage/                        # Downloaded videos, audio, generated output (gitignored)
 │
 ├── requirements.txt

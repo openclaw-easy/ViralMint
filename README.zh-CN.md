@@ -51,7 +51,7 @@
 | 📱 **用手机随时随地掌控** | 通过 Telegram、WhatsApp、Discord 或 Slack 与规划智能体（Planner）双向对话——任务提醒也发到同一个会话里。 |
 | 🆓 **开箱即免费** | 本地 Whisper、Edge TTS（400+ 语音）、免版税音乐、Pexels 素材，以及 22 个内置工具（大多只靠 FFmpeg + Whisper）——最重的活儿花费 $0。只为你主动选择接入的 AI 付费。 |
 
-<sub>经过实战检验：一套 **2,500 个测试的 pytest 测试集** 在每次提交时运行，另有一套浏览器测试装置端到端驱动真实应用。AGPL-3.0——尽管 fork、修改，并在其之上创业。</sub>
+<sub>经过实战检验：一套 **2,800 个测试的 pytest 测试集** 在每次提交时运行，另有一套浏览器测试装置端到端驱动真实应用。AGPL-3.0——尽管 fork、修改，并在其之上创业。</sub>
 
 ---
 
@@ -330,7 +330,7 @@ ViralMint/
 │       ├── hooks/                  # WebSocket, settings, jobs, source video
 │       └── store/                  # Zustand global state
 │
-├── tests/                          # pytest suite (2,500+ tests)
+├── tests/                          # pytest suite (2,800+ tests)
 ├── storage/                        # Downloaded videos, audio, generated output (gitignored)
 │
 ├── requirements.txt
