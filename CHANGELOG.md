@@ -6,6 +6,81 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Security
+- **Messaging bots answer their owner and nobody else.** A connected
+  Telegram, Discord, Slack or WhatsApp bot used to run ANY sender's message
+  through the planner as you — spending your AI credits, starting downloads,
+  reading your Library — and moved your job notifications to whoever wrote
+  last. Telegram bot names are public, anyone in a shared Discord server can
+  DM a bot, every Slack workspace member can DM an app, and a linked WhatsApp
+  device sees every chat on the phone. Now Telegram, Discord and Slack link
+  only to the account that sends the one-time **pairing code** shown on the
+  Messaging page (Telegram's bot link carries it, so one tap pairs), and
+  ignore everyone else. WhatsApp only listens to your own "Message yourself"
+  chat. Bots you already connected keep working.
+
+### Changed
+- **Cancelling a running job tells you the truth.** A download transfer or an
+  ffmpeg pass cannot be interrupted mid-flight, so a cancelled job may finish
+  its current step minutes later. The app used to say "Job cancelled" as if
+  it had stopped, which invited starting a duplicate; it now says the step
+  already running will finish on its own, and the API returns `best_effort`
+  plus a `runner_active` flag that stays true until the work has really
+  ended. A job cancelled while it was still queued never starts.
+- **Chat from your phone remembers the conversation.** A plain "yes" or
+  "generate" in reply to the bot's own question — or to a notification it
+  sent — used to reach the planner with no context at all.
+- **Scout details open in a side drawer** instead of below the whole results
+  grid, where a click in a long list appeared to do nothing.
+
+### Fixed
+- **A stuck download can no longer freeze the whole app.** A download that
+  stopped receiving data used to sit at "Downloading…" for its full 20-minute
+  timeout with no error — and because the timeout could not stop the
+  download's thread, enough of them left every other request in the app
+  hanging until a restart. Downloads and transcription now run on their own
+  worker pools, a download that moves no data for 10 minutes fails with a
+  clear message saying how much arrived (`DOWNLOAD_STALL_TIMEOUT_S` to
+  change it), and a finished download is never killed while it is being
+  merged. Settings → Health shows if any worker is stuck.
+- **A cancelled download still says why it failed.** When a transfer failed
+  after you cancelled it — the common case, since it can't be interrupted —
+  the job showed no error at all, or flipped to a red "failed" for something
+  you had already stopped. It now stays cancelled and keeps the reason.
+  Channel downloads report which videos failed and why instead of "All video
+  downloads failed", and cancelling a scout download actually stops it
+  instead of pulling every video and then analysing them.
+- **Emoji in burned-in captions are real emoji, not empty boxes.** Caption
+  emoji are on by default, and every one rendered as ▢ because the caption
+  renderer can't draw colour emoji fonts. ViralMint now ships an outline
+  emoji font (Noto Emoji, SIL OFL) and uses it for every emoji in a caption.
+- **Clipper keyboard fixes.** Space no longer toggles playback twice after you
+  click the player, shortcuts work as soon as you pick a source (not only
+  after clicking inside the bench), and a pending cut's ✕ can be reached and
+  pressed from the keyboard.
+- **Deleting a pending cut keeps your place.** Selection jumped to the first
+  cut in the list, re-cueing the preview frames to the top of the video; it
+  now moves to the neighbouring cut.
+- **Auto-cut's quote respects the minimum length you set.** "Min 60s" on a
+  14-minute video still promised "up to 28 clips" — 28 minutes of material
+  out of 14. The estimate now caps the count exactly as the extractor does.
+- **Pictures keep their shape.** Scout's preview cut a third off every
+  YouTube thumbnail and showed TikTok as a black box; Clipper's source list
+  cropped portrait videos to a strip; the Library drawer showed images at
+  thumbnail size. All three now show the whole picture.
+- **Scout's pager keeps the run you picked** — page 2 of one scout run used
+  to show page 2 of all results.
+- **An audio-only download plays in the Library** instead of a broken player.
+- **Keyboard focus is visible, and disabled buttons look disabled.**
+- **Messaging reliability.** Overlapping connects no longer start two bots at
+  once; a bad Slack app token is rejected before your working bot is
+  stopped; a Discord bot that never comes online is closed instead of left
+  running; Telegram retries a failed start, honours rate limits, and no
+  longer sends a message twice after a timeout; WhatsApp's connection state
+  is read correctly, its session is stored in your data folder (it was lost
+  on every update), and a paired channel whose link dropped shows
+  "Reconnecting…" instead of screens whose buttons threw the pairing away.
+
 ## [1.2.0] — 2026-09-27
 
 ### Added
