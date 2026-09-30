@@ -171,14 +171,17 @@ function SourceVideoCard({ video, clipCount, isSelected, onClick, onPreview }) {
       {/* Thumbnail */}
       <Box sx={{
         width: "100%", aspectRatio: "16/9", borderRadius: 2, overflow: "hidden",
-        bgcolor: "action.hover", mb: 1, position: "relative",
+        // Black, because the image is CONTAINed below rather than cropped: a
+        // portrait source was centre-cropped to a letterbox strip in the one
+        // place you pick between sources.
+        bgcolor: "#000", mb: 1, position: "relative",
       }}>
         {(video.video_path || video.thumbnail_url) ? (
           <Box component="img"
             src={video.video_path ? `/api/downloaded/${video.id}/thumbnail` : video.thumbnail_url}
             alt=""
             loading="lazy" decoding="async"
-            sx={{ width: "100%", height: "100%", objectFit: "cover" }}
+            sx={{ width: "100%", height: "100%", objectFit: "contain" }}
             onError={e => { e.target.style.display = "none" }} />
         ) : (
           <Box sx={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -1230,7 +1233,7 @@ export default function ClipStudio() {
         open={!!previewVideo}
         onClose={() => setPreviewVideo(null)}
         maxWidth="md"
-        PaperProps={{ sx: { bgcolor: "#000", width: "auto" } }}
+        slotProps={{ paper: { sx: { bgcolor: "#000", width: "auto" } } }}
       >
         <DialogContent sx={{ p: 0, lineHeight: 0 }}>
           {previewVideo && (

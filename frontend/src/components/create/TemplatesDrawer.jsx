@@ -15,7 +15,7 @@ export default function TemplatesDrawer({ open, onClose, mode = "stock", onApply
       anchor="right"
       open={open}
       onClose={onClose}
-      PaperProps={{ sx: { width: { xs: "100%", sm: 460 }, maxWidth: "100%" } }}
+      slotProps={{ paper: { sx: { width: { xs: "100%", sm: 460 }, maxWidth: "100%" } } }}
     >
       <Box sx={{ px: 2, py: 1.5, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>

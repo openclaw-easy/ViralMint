@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2025-2026 ViralMint Contributors
 import { Box, Typography } from "@mui/material"
+import { onActivate } from "../../../utils/a11y"
 import CloseIcon from "@mui/icons-material/Close"
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesomeOutlined"
 
@@ -136,7 +137,12 @@ export default function RangeBlock({
         <Box
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => { e.stopPropagation(); onRemove() }}
-          role="button"
+          // Reachable and pressable: it was a role="button" with no tabIndex
+          // and no key handler, so a keyboard user could neither land on it
+          // nor fire it. (⌫ on the selected range is the faster path; this is
+          // the one that matches what the mouse sees.)
+          role="button" tabIndex={0}
+          onKeyDown={onActivate((e) => { e.stopPropagation(); onRemove() })}
           aria-label={`Remove range ${index + 1}`}
           sx={{
             position: "absolute", bottom: 3, right: EDGE_PX + 2,

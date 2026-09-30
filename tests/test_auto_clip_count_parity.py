@@ -64,3 +64,20 @@ def test_the_endpoint_uses_the_helper_rather_than_its_own_arithmetic():
     assert "auto_clip_count(duration)" in src
     assert "duration // 30" not in src, (
         "the inline formula is back — it is the copy this helper replaced")
+
+
+def test_the_min_length_floor_matches_the_extractor():
+    """A named "Min (s)" caps the quoted count at duration // floor.
+
+    The dialog mirrors clip_extractor's `min_clip_floor = max(10,
+    int(min_duration))`. If the backend's floor moves and the dialog's
+    doesn't, the quote stops being an upper bound on what the run can cut.
+    """
+    backend = Path("backend/services/clip_extractor.py").read_text()
+    m = re.search(r"min_clip_floor = max\((\d+), int\(min_duration\)\)", backend)
+    assert m, "clip_extractor's min_clip_floor rule changed — update autoClipCount.js too"
+    js = JS.read_text()
+    assert f"Math.max({m.group(1)}, minDurationSeconds)" in js, (
+        f"backend floors a named minimum at {m.group(1)}s; autoClipCount.js does not"
+    )
+    assert "duration_based_max = max(1, duration // min_clip_floor)" in backend

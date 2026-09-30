@@ -384,6 +384,16 @@ export default function SourceBench({
   }
 
   // ── Keyboard ───────────────────────────────────────────────
+  // The root carries tabIndex={-1}, so a click anywhere inside the bench
+  // focuses it (the browser walks up to the nearest focusable ancestor) and
+  // the handler below starts hearing keys. Selecting a source on the left
+  // rail is NOT such a click — focus stays on the sidebar card — so every
+  // shortcut in the help popover silently did nothing until you happened to
+  // click the bench first. Claim focus when a source opens.
+  useEffect(() => {
+    if (sourceId) rootRef.current?.focus({ preventScroll: true })
+  }, [sourceId])
+
   // Scoped to the bench (not window) and skipped while a field has focus,
   // so typing "5" into the clip-count box can't seek the video.
   useEffect(() => {
@@ -392,6 +402,11 @@ export default function SourceBench({
     const onKey = (e) => {
       const tag = e.target?.tagName
       if (tag === "INPUT" || tag === "TEXTAREA" || e.target?.isContentEditable) return
+      // The native player owns its own keys. `<video controls>` is focusable,
+      // so after clicking it Space reached BOTH the browser's play/pause and
+      // togglePlay() below — two toggles, one press, and the video visibly
+      // refused to start. Media controls win wherever they have focus.
+      if (tag === "VIDEO" || tag === "AUDIO") return
       const step = e.shiftKey ? 1 : 1 / 30
       const a = R.active
       switch (e.key) {

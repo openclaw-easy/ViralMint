@@ -166,6 +166,9 @@ export default function ExtractDialog({ open, onClose, video, onExtract, setting
   const estimate = autoCutEstimate({
     durationSeconds: video.duration_seconds,
     requested: ai.max_clips,
+    // A "Min (s)" of 60 means at most duration/60 clips fit, whatever the
+    // count field says — quote what can actually be produced.
+    minDurationSeconds: ai.min_duration,
   })
 
   return (

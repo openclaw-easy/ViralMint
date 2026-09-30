@@ -54,7 +54,7 @@ export default function SetupWizard() {
   }
 
   return (
-    <Dialog open maxWidth="sm" fullWidth onClose={handleClose} PaperProps={{ sx: { bgcolor: "background.paper" } }}>
+    <Dialog open maxWidth="sm" fullWidth onClose={handleClose} slotProps={{ paper: { sx: { bgcolor: "background.paper" } } }}>
       <DialogTitle sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", pb: 1 }}>
         <Box>
           <Typography variant="h6">{activeWizard.title}</Typography>

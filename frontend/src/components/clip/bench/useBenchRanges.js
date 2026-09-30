@@ -231,9 +231,15 @@ export default function useBenchRanges(sourceId, duration) {
     // Same rule as above: decide the next selection here, not inside the
     // updater. An updater that calls another setter is not pure, and React
     // is free to run it more than once.
-    setActiveId((cur) => (cur === id
-      ? (ranges.find((r) => r.id !== id)?.id ?? null)
-      : cur))
+    //
+    // The NEIGHBOUR, not the first survivor. `ranges.find(r => r.id !== id)`
+    // handed selection to block 1 whatever you deleted, so removing block 4 of
+    // 6 re-cued the IN/OUT panes to the top of the video and scoped playback
+    // jumped there with them. The list is kept in chronological order, so the
+    // next block down — else the one above — is the one the eye is already on.
+    const i = ranges.findIndex((r) => r.id === id)
+    const neighbour = i < 0 ? null : (ranges[i + 1]?.id ?? ranges[i - 1]?.id ?? null)
+    setActiveId((cur) => (cur === id ? neighbour : cur))
     setRanges((prev) => prev.filter((r) => r.id !== id))
   }, [ranges])
 

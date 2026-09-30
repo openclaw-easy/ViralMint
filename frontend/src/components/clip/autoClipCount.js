@@ -32,10 +32,26 @@ export function autoClipCount(durationSeconds) {
  * the video has less quality material than the budget allows, so the run can
  * produce fewer — never more.
  */
-export function autoCutEstimate({ durationSeconds, requested }) {
-  const clips = requested
+export function autoCutEstimate({ durationSeconds, requested, minDurationSeconds }) {
+  const asked = requested
     ? Math.max(1, Math.min(AUTO_CLIP_MAX, requested))
     : autoClipCount(durationSeconds)
+  // A length floor is also a count ceiling: clips don't overlap
+  // (_remove_overlapping_clips), so only `duration // floor` of them fit. The
+  // backend already reasons this way — clip_extractor's
+  // `min_clip_floor = max(10, min_duration)`, `duration_based_max =
+  // duration // min_clip_floor`, then "use the more restrictive estimate" —
+  // and without it "Min 60s" on a 14-minute source still quoted "up to 28
+  // clips", which is 28 minutes of material.
+  //
+  // Only applied when the user NAMES a minimum. The backend has a default
+  // floor too, but guessing it here could promise fewer than the run
+  // produces, and "up to" must never be an underestimate.
+  const floor = minDurationSeconds > 0 ? Math.max(10, minDurationSeconds) : 0
+  const fit = floor > 0 && durationSeconds > 0
+    ? Math.max(1, Math.floor(durationSeconds / floor))
+    : Infinity
+  const clips = Math.min(asked, fit)
   return {
     clips,
     // "up to" because the backend may return fewer; never because we're unsure.

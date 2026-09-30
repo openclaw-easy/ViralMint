@@ -558,7 +558,7 @@ export default function ToolMergeClips() {
         open={!!previewClip}
         onClose={() => setPreviewClip(null)}
         maxWidth="md"
-        PaperProps={{ sx: { bgcolor: "#000" } }}
+        slotProps={{ paper: { sx: { bgcolor: "#000" } } }}
       >
         <DialogContent sx={{ p: 0, position: "relative" }}>
           {previewClip && (
