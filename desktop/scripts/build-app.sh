@@ -195,8 +195,22 @@ case "$PLATFORM" in
         cp "$VOLICON" "$STAGING/.VolumeIcon.icns"
       fi
       TMP_DMG="$(mktemp -u).dmg"
-      hdiutil create -volname "ViralMint" -srcfolder "$STAGING" \
-        -ov -format UDRW "$TMP_DMG" >/dev/null
+      # hdiutil on GitHub's macOS runners intermittently fails with
+      # "Resource temporarily unavailable" (a busy disk-image helper), which
+      # once failed a release build that was otherwise green. Retry the two
+      # image-writing steps with a short backoff; a real error still fails.
+      hdiutil_retry() {
+        local attempt
+        for attempt in 1 2 3 4 5; do
+          if hdiutil "$@" >/dev/null; then return 0; fi
+          echo "    hdiutil $1 failed (attempt $attempt/5), retrying in $((attempt * 5))s" >&2
+          sleep $((attempt * 5))
+        done
+        echo "ERROR: hdiutil $1 failed after 5 attempts" >&2
+        return 1
+      }
+      hdiutil_retry create -volname "ViralMint" -srcfolder "$STAGING" \
+        -ov -format UDRW "$TMP_DMG"
       if [[ -f "$VOLICON" ]]; then
         MNT="$(mktemp -d)"
         if hdiutil attach "$TMP_DMG" -nobrowse -noautoopen -mountpoint "$MNT" >/dev/null; then
@@ -208,7 +222,7 @@ case "$PLATFORM" in
         fi
         rm -rf "$MNT"
       fi
-      hdiutil convert "$TMP_DMG" -format UDZO -o "$RELEASE_DIR/$DMG_NAME" >/dev/null
+      hdiutil_retry convert "$TMP_DMG" -ov -format UDZO -o "$RELEASE_DIR/$DMG_NAME"
       rm -f "$TMP_DMG"
       rm -rf "$STAGING"
     fi
