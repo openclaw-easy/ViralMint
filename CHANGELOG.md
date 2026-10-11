@@ -6,7 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- **Use any OpenAI-compatible AI server.** Settings → AI Provider has a new
+  **OpenAI-compatible** option: enter the server's base URL and model name
+  (the key is optional) to run ViralMint on Ollama, LM Studio, vLLM,
+  llama.cpp, DeepSeek, Groq or a company gateway. From `.env`, set
+  `CUSTOM_AI_BASE_URL` + `CUSTOM_AI_MODEL` (and `CUSTOM_AI_API_KEY` if
+  needed). Smaller local models may struggle with the structured replies
+  some features ask for (#43).
+
 ### Fixed
+- **The chat assistant knows an OpenRouter key in `.env` counts.** Its
+  setup check only looked for Anthropic and OpenAI keys, so on an
+  OpenRouter-only install it could tell you no AI provider was configured.
 - **The Linux tray launcher no longer crashes on start.** The tray title
   contained an em dash, which the X11 tray can't display, and the launcher
   died before the app started. Thanks to @chiragjangiir (#46).

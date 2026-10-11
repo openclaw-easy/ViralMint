@@ -45,7 +45,7 @@
 |   |   |
 |---|---|
 | 🔒 **100% 本地** | SQLite、本地 Whisper、本地 FFmpeg。你的脚本、转写、下载和生成的视频永不离开你的机器。 |
-| 🔑 **BYOK，无中间商** | 使用你自己的 Anthropic / OpenAI / OpenRouter / YouTube / Pexels 密钥，落盘时以 Fernet（AES-128-CBC + HMAC-SHA256）加密，直接发往服务提供方——中间没有任何 ViralMint 服务器。 |
+| 🔑 **BYOK，无中间商** | 使用你自己的 Anthropic / OpenAI / OpenRouter / YouTube / Pexels 密钥（也可以接入任何兼容 OpenAI 接口的服务器，如 Ollama、LM Studio、vLLM），落盘时以 Fernet（AES-128-CBC + HMAC-SHA256）加密，直接发往服务提供方——中间没有任何 ViralMint 服务器。 |
 | 🤖 **是智能体架构，不是套壳聊天** | 各司其职的智能体——Planner、Scout、Download、Analyzer 和 Generator——由一个真正会去执行工作的流式 AI 对话统一编排。 |
 | ✂️ **剪、生成或设计** | 通往成片的三条路：在真正的时间轴上从长视频剪出短视频；用脚本生成带字幕的素材视频；或者完全不用素材，直接创作动态图形。 |
 | 📱 **用手机随时随地掌控** | 通过 Telegram、WhatsApp、Discord 或 Slack 与规划智能体（Planner）双向对话——任务提醒也发到同一个会话里。 |
@@ -177,7 +177,7 @@ python run.py
 
 > 📦 **想用安装包？** macOS、Windows 和 Linux 的预构建应用在 [Releases 页面](https://github.com/openclaw-easy/ViralMint/releases)。macOS 版本仅适用于 **Apple Silicon**（M1 及更新机型）；Intel Mac 请按上面的步骤从源码运行。
 
-> 💡 **还没有 API 密钥？** 启动后打开「设置 → AI 提供方」，粘贴一个 Anthropic、OpenAI 或 OpenRouter 密钥即可。OpenRouter 是通往 300+ 模型的单一网关——一把密钥就能用上 Claude、GPT、Gemini、Llama 和 Mistral。Edge TTS、Whisper、FFmpeg 和 yt-dlp 无需任何配置即可离线工作。
+> 💡 **还没有 API 密钥？** 启动后打开「设置 → AI 提供方」，粘贴一个 Anthropic、OpenAI 或 OpenRouter 密钥即可。OpenRouter 是通往 300+ 模型的单一网关——一把密钥就能用上 Claude、GPT、Gemini、Llama 和 Mistral。想用自己的服务器？选择 **OpenAI-compatible**，填入它的 Base URL（例如 Ollama 的 `http://localhost:11434/v1`）和模型名即可，本地服务器无需密钥。Edge TTS、Whisper、FFmpeg 和 yt-dlp 无需任何配置即可离线工作。
 
 ### 从源码构建桌面应用（可选）
 
@@ -198,7 +198,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 
 | 用于 | 提供方 | 在哪里设置 | 费用 |
 |:----|:---------|:------|:-----|
-| AI 对话、脚本撰写、分析 | **Anthropic** · **OpenAI** · **OpenRouter** | [console.anthropic.com](https://console.anthropic.com) · [platform.openai.com](https://platform.openai.com/api-keys) · [openrouter.ai/keys](https://openrouter.ai/keys) —— 设置 → AI 提供方 | 按用量付费 |
+| AI 对话、脚本撰写、分析 | **Anthropic** · **OpenAI** · **OpenRouter** · 任意 **OpenAI 兼容**服务器 | [console.anthropic.com](https://console.anthropic.com) · [platform.openai.com](https://platform.openai.com/api-keys) · [openrouter.ai/keys](https://openrouter.ai/keys) · 你的服务器地址 —— 设置 → AI 提供方 | 按用量付费（本地服务器免费） |
 | YouTube 发现 · 评论 · My Channels | YouTube Data API v3 | [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials) —— 设置 → 服务 API 密钥 | 每天免费 10K 配额 |
 | 素材视频 | Pexels | [pexels.com/api](https://www.pexels.com/api/) | 免费 |
 | 高级配音（可选） | OpenAI TTS | [platform.openai.com](https://platform.openai.com/api-keys) | 按用量付费 |
@@ -252,7 +252,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 |:------|:------|
 | **后端** | Python 3.11+ · FastAPI · SQLAlchemy 2.0（异步）· SQLite · WebSockets |
 | **前端** | React 18 · Vite · MUI 7 · Zustand · React Router 6 |
-| **AI（BYOK）** | Anthropic Claude SDK · OpenAI SDK · OpenRouter（一把密钥用上 300+ 模型） |
+| **AI（BYOK）** | Anthropic Claude SDK · OpenAI SDK · OpenRouter（一把密钥用上 300+ 模型）· 任意 OpenAI 兼容服务器（Ollama、LM Studio、vLLM…） |
 | **转写** | faster-whisper（本地、多语言、CPU int8） |
 | **TTS** | Edge TTS（免费）· OpenAI TTS |
 | **视频** | Pexels 素材 · FFmpeg · Ken Burns 图片兜底 |

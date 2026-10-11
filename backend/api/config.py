@@ -47,6 +47,12 @@ _DEFAULTS = {
                 "google/gemini-3.1-flash-lite",
             ],
         },
+        # Any OpenAI-compatible server — the model is whatever that server
+        # serves, so Settings shows a free-text field instead of a list.
+        "openai_compatible": {
+            "default_model": "",
+            "models": [],
+        },
     },
     "tts_providers": {
         "edge_tts":   {"label": "Edge TTS — Free",          "cost_1k": 0.0,   "requires_key": False},

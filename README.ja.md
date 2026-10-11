@@ -45,7 +45,7 @@
 |   |   |
 |---|---|
 | 🔒 **100% ローカル** | SQLite、ローカル Whisper、ローカル FFmpeg。台本・文字起こし・ダウンロード・生成動画はマシンの外に出ません。 |
-| 🔑 **BYOK、仲介者なし** | 自分の Anthropic / OpenAI / OpenRouter / YouTube / Pexels キーを使用。Fernet（AES-128-CBC + HMAC-SHA256）で暗号化して保存し、プロバイダーへ直接送信 — 間に ViralMint のサーバーはありません。 |
+| 🔑 **BYOK、仲介者なし** | 自分の Anthropic / OpenAI / OpenRouter / YouTube / Pexels キーを使用（OpenAI 互換サーバー — Ollama・LM Studio・vLLM など — にも接続可能）。Fernet（AES-128-CBC + HMAC-SHA256）で暗号化して保存し、プロバイダーへ直接送信 — 間に ViralMint のサーバーはありません。 |
 | 🤖 **チャットのラッパーではなくエージェント** | 目的特化型のエージェント群 — Planner、Scout、Download、Analyzer、Generator — を、実際に処理を実行するストリーミング AI チャットがオーケストレーションします。 |
 | ✂️ **切る・生成する・設計する** | 完成動画への3つの道: 本物のタイムラインで長尺動画からショートを切り出す、台本からキャプション付きストック映像動画を生成する、あるいは映像を一切使わずにモーショングラフィックスを作る。 |
 | 📱 **スマホから操作** | Telegram・WhatsApp・Discord・Slack でプランナーと双方向チャット — 同じスレッドでジョブ通知も届きます。 |
@@ -177,7 +177,7 @@ python run.py
 
 > 📦 **インストーラーを使いたい場合:** macOS・Windows・Linux 向けのビルド済みアプリは [Releases ページ](https://github.com/openclaw-easy/ViralMint/releases) にあります。macOS 版は **Apple Silicon**（M1 以降）専用です。Intel Mac では上記の手順でソースから実行してください。
 
-> 💡 **まだ API キーがない？** 起動後に **Settings → AI Provider** を開き、Anthropic・OpenAI・OpenRouter のキーを貼り付けてください。OpenRouter は300以上のモデルへの統一ゲートウェイで、1つのキーで Claude・GPT・Gemini・Llama・Mistral を利用できます。Edge TTS・Whisper・FFmpeg・yt-dlp はすべて設定不要でオフライン動作します。
+> 💡 **まだ API キーがない？** 起動後に **Settings → AI Provider** を開き、Anthropic・OpenAI・OpenRouter のキーを貼り付けてください。OpenRouter は300以上のモデルへの統一ゲートウェイで、1つのキーで Claude・GPT・Gemini・Llama・Mistral を利用できます。自前のサーバーを使う場合は **OpenAI-compatible** を選び、Base URL（Ollama なら `http://localhost:11434/v1`）とモデル名を入力してください。ローカルサーバーならキーは不要です。Edge TTS・Whisper・FFmpeg・yt-dlp はすべて設定不要でオフライン動作します。
 
 ### ソースからデスクトップアプリをビルド（任意）
 
@@ -198,7 +198,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 
 | 用途 | プロバイダー | 場所 | コスト |
 |:----|:---------|:------|:-----|
-| AI チャット、台本作成、分析 | **Anthropic** · **OpenAI** · **OpenRouter** | [console.anthropic.com](https://console.anthropic.com) · [platform.openai.com](https://platform.openai.com/api-keys) · [openrouter.ai/keys](https://openrouter.ai/keys) — Settings → AI Provider | 従量課金 |
+| AI チャット、台本作成、分析 | **Anthropic** · **OpenAI** · **OpenRouter** · 任意の **OpenAI 互換**サーバー | [console.anthropic.com](https://console.anthropic.com) · [platform.openai.com](https://platform.openai.com/api-keys) · [openrouter.ai/keys](https://openrouter.ai/keys) · サーバーの Base URL — Settings → AI Provider | 従量課金（ローカルサーバーは無料） |
 | YouTube 発掘・コメント・My Channels | YouTube Data API v3 | [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials) — Settings → Service API Keys | 無料 1日1万ユニット |
 | ストック映像 | Pexels | [pexels.com/api](https://www.pexels.com/api/) | 無料 |
 | プレミアムボイスオーバー（任意） | OpenAI TTS | [platform.openai.com](https://platform.openai.com/api-keys) | 従量課金 |
@@ -252,7 +252,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 |:------|:------|
 | **バックエンド** | Python 3.11+ · FastAPI · SQLAlchemy 2.0 (async) · SQLite · WebSockets |
 | **フロントエンド** | React 18 · Vite · MUI 7 · Zustand · React Router 6 |
-| **AI (BYOK)** | Anthropic Claude SDK · OpenAI SDK · OpenRouter (1つのキーで300以上のモデル) |
+| **AI (BYOK)** | Anthropic Claude SDK · OpenAI SDK · OpenRouter (1つのキーで300以上のモデル) · 任意の OpenAI 互換サーバー（Ollama・LM Studio・vLLM…） |
 | **文字起こし** | faster-whisper（ローカル、多言語、CPU int8） |
 | **TTS** | Edge TTS（無料）· OpenAI TTS |
 | **動画** | Pexels ストック · FFmpeg · Ken Burns 画像フォールバック |

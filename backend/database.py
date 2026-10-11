@@ -90,6 +90,7 @@ async def init_db():
         await _add_column_if_missing(conn, "user_settings", "ai_provider", "VARCHAR(20)", existing=_cols)
         await _add_column_if_missing(conn, "user_settings", "ai_model", "VARCHAR(100)", existing=_cols)
         await _add_column_if_missing(conn, "user_settings", "ai_api_key_encrypted", "TEXT", existing=_cols)
+        await _add_column_if_missing(conn, "user_settings", "ai_base_url", "VARCHAR(500)", existing=_cols)
         await _add_column_if_missing(conn, "user_settings", "youtube_api_key_encrypted", "TEXT", existing=_cols)
 
     # Drift sentinel — compare every model's columns against the live DB

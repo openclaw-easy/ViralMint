@@ -45,7 +45,7 @@ All on your machine. Bring your own API keys. No SaaS in the middle. No telemetr
 |   |   |
 |---|---|
 | 🔒 **100% local** | SQLite, local Whisper, local FFmpeg. Your scripts, transcripts, downloads, and generated videos never leave your machine. |
-| 🔑 **BYOK, no middleman** | Bring your own Anthropic / OpenAI / OpenRouter / YouTube / Pexels keys. Encrypted at rest with Fernet (AES-128-CBC, HMAC-signed), sent straight to the provider — there is no ViralMint server in between. |
+| 🔑 **BYOK, no middleman** | Bring your own Anthropic / OpenAI / OpenRouter / YouTube / Pexels keys, or point it at any OpenAI-compatible server (Ollama, LM Studio, vLLM…). Encrypted at rest with Fernet (AES-128-CBC, HMAC-signed), sent straight to the provider — there is no ViralMint server in between. |
 | 🤖 **Agents, not a chat wrapper** | Purpose-built agents — Planner, Scout, Download, Analyzer and Generator — orchestrated by a streaming AI chat that actually runs the work. |
 | ✂️ **Clip, generate, or design** | Three ways to a finished video: cut shorts from a long source on a real timeline, generate a captioned stock-footage video from a script, or author motion graphics with no footage at all. |
 | 📱 **Runs from your phone** | Two-way chat with the planner over Telegram, WhatsApp, Discord, or Slack — and job alerts in the same thread. |
@@ -178,7 +178,7 @@ The first run installs frontend deps, builds the SPA, starts the API, and opens 
 
 > 📦 **Prefer an installer?** Prebuilt apps for macOS, Windows and Linux are on the [Releases page](https://github.com/openclaw-easy/ViralMint/releases). The macOS build is for **Apple Silicon** (M1 or later); on an Intel Mac, run from source as above.
 
-> 💡 **No API key yet?** Open **Settings → AI Provider** after launch and paste an Anthropic, OpenAI, or OpenRouter key. OpenRouter is a single gateway to 300+ models — one key gets you Claude, GPT, Gemini, Llama, and Mistral. Edge TTS, Whisper, FFmpeg, and yt-dlp all work offline with zero configuration.
+> 💡 **No API key yet?** Open **Settings → AI Provider** after launch and paste an Anthropic, OpenAI, or OpenRouter key. OpenRouter is a single gateway to 300+ models — one key gets you Claude, GPT, Gemini, Llama, and Mistral. Prefer your own server? Pick **OpenAI-compatible** and enter its base URL (e.g. `http://localhost:11434/v1` for Ollama) and model name — no key needed for local servers. Edge TTS, Whisper, FFmpeg, and yt-dlp all work offline with zero configuration.
 
 ### Build a desktop app from source (optional)
 
@@ -199,7 +199,7 @@ Every key can be set in `.env` *or* per-user inside the app under **Settings** �
 
 | For | Provider | Where | Cost |
 |:----|:---------|:------|:-----|
-| AI chat, scripting, analysis | **Anthropic** · **OpenAI** · **OpenRouter** | [console.anthropic.com](https://console.anthropic.com) · [platform.openai.com](https://platform.openai.com/api-keys) · [openrouter.ai/keys](https://openrouter.ai/keys) — Settings → AI Provider | Pay-per-use |
+| AI chat, scripting, analysis | **Anthropic** · **OpenAI** · **OpenRouter** · any **OpenAI-compatible** server | [console.anthropic.com](https://console.anthropic.com) · [platform.openai.com](https://platform.openai.com/api-keys) · [openrouter.ai/keys](https://openrouter.ai/keys) · your server's base URL — Settings → AI Provider | Pay-per-use (free on a local server) |
 | YouTube scouting · comments · My Channels | YouTube Data API v3 | [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials) — Settings → Service API Keys | Free 10K units/day |
 | Stock footage | Pexels | [pexels.com/api](https://www.pexels.com/api/) | Free |
 | Premium voiceover (optional) | OpenAI TTS | [platform.openai.com](https://platform.openai.com/api-keys) | Pay-per-use |
@@ -253,7 +253,7 @@ Every key can be set in `.env` *or* per-user inside the app under **Settings** �
 |:------|:------|
 | **Backend** | Python 3.11+ · FastAPI · SQLAlchemy 2.0 (async) · SQLite · WebSockets |
 | **Frontend** | React 18 · Vite · MUI 7 · Zustand · React Router 6 |
-| **AI (BYOK)** | Anthropic Claude SDK · OpenAI SDK · OpenRouter (300+ models via one key) |
+| **AI (BYOK)** | Anthropic Claude SDK · OpenAI SDK · OpenRouter (300+ models via one key) · any OpenAI-compatible server (Ollama, LM Studio, vLLM…) |
 | **Transcription** | faster-whisper (local, multilingual, CPU int8) |
 | **TTS** | Edge TTS (free) · OpenAI TTS |
 | **Video** | Pexels stock · FFmpeg · Ken Burns image fallback |

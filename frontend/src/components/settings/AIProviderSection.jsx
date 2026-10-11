@@ -17,18 +17,24 @@ const PROVIDER_LABEL = {
   anthropic: "Anthropic (Claude)",
   openai: "OpenAI (GPT)",
   openrouter: "OpenRouter (Claude / GPT / Gemini / Llama)",
+  openai_compatible: "OpenAI-compatible (Ollama, LM Studio, vLLM, …)",
 }
+
+// Any server that speaks OpenAI's /chat/completions, at a URL the user gives.
+const COMPATIBLE = "openai_compatible"
 
 const KEY_PLACEHOLDER = {
   anthropic: "sk-ant-...",
   openai: "sk-...",
   openrouter: "sk-or-...",
+  openai_compatible: "Optional — local servers usually need none",
 }
 
 const KEY_HINT = {
   anthropic: "Get yours at console.anthropic.com → API Keys",
   openai: "Get yours at platform.openai.com → API Keys",
   openrouter: "One key, every model — get yours at openrouter.ai/keys",
+  openai_compatible: "Only if your server asks for one (DeepSeek, Groq, a gateway…)",
 }
 
 export default function AIProviderSection({ settings, updateSettings }) {
@@ -36,11 +42,14 @@ export default function AIProviderSection({ settings, updateSettings }) {
 
   const [provider, setProvider] = useState(settings?.ai_provider || "openai")
   const [model, setModel] = useState(settings?.ai_model || "")
+  const [baseUrl, setBaseUrl] = useState(settings?.ai_base_url || "")
   const [apiKey, setApiKey] = useState("")
   const [showKey, setShowKey] = useState(false)
   const [registry, setRegistry] = useState({})
   const [saving, setSaving] = useState(false)
-  const [editing, setEditing] = useState(!settings?.ai_api_key_set)
+  const isConfigured = (s) =>
+    !!s?.ai_api_key_set || (s?.ai_provider === COMPATIBLE && !!s?.ai_base_url)
+  const [editing, setEditing] = useState(!isConfigured(settings))
   const [confirmRemove, setConfirmRemove] = useState(false)
 
   // Sync local state when settings change (e.g. after save).
@@ -50,9 +59,10 @@ export default function AIProviderSection({ settings, updateSettings }) {
     if (settings) {
       setProvider(settings.ai_provider || "openai")
       setModel(settings.ai_model || "")
-      if (!settings.ai_api_key_set) setEditing(true)
+      setBaseUrl(settings.ai_base_url || "")
+      if (!isConfigured(settings)) setEditing(true)
     }
-  }, [settings?.ai_provider, settings?.ai_model, settings?.ai_api_key_set])
+  }, [settings?.ai_provider, settings?.ai_model, settings?.ai_api_key_set, settings?.ai_base_url])
 
   // Fetch model registry once
   useEffect(() => {
@@ -64,10 +74,16 @@ export default function AIProviderSection({ settings, updateSettings }) {
   const availableModels = registry[provider]?.models || []
   const defaultModel = registry[provider]?.default_model || ""
   const effectiveModel = model || defaultModel
+  const compatible = provider === COMPATIBLE
 
   const handleSave = async () => {
     const hasNewKey = apiKey.trim().length > 0
-    if (!hasNewKey && !settings?.ai_api_key_set) {
+    if (compatible) {
+      if (!baseUrl.trim() || !model.trim()) {
+        showSnackbar("Enter the server's base URL and a model name", "warning")
+        return
+      }
+    } else if (!hasNewKey && !settings?.ai_api_key_set) {
       showSnackbar("Paste your API key first", "warning")
       return
     }
@@ -78,15 +94,16 @@ export default function AIProviderSection({ settings, updateSettings }) {
       // resolves to the new provider's default — that's what they saw and what we save.
       const updates = {
         ai_provider: provider,
-        ai_model: effectiveModel || "",  // empty string clears stale model
+        ai_model: (compatible ? model.trim() : effectiveModel) || "",  // empty string clears stale model
       }
+      if (compatible) updates.ai_base_url = baseUrl.trim()
       if (hasNewKey) {
         updates.ai_api_key = apiKey.trim()
       }
       await updateSettings(updates)
       setApiKey("")
       setEditing(false)
-      showSnackbar(hasNewKey ? "API key saved" : "Provider updated", "success")
+      showSnackbar(hasNewKey ? "API key saved" : compatible ? "Server saved" : "Provider updated", "success")
     } catch (e) {
       // updateSettings already shows a snackbar on error
     } finally {
@@ -98,10 +115,14 @@ export default function AIProviderSection({ settings, updateSettings }) {
     setConfirmRemove(false)
     setSaving(true)
     try {
-      await updateSettings({ ai_api_key: "" })
+      await updateSettings(
+        settings?.ai_provider === COMPATIBLE
+          ? { ai_api_key: "", ai_base_url: "" }
+          : { ai_api_key: "" },
+      )
       setApiKey("")
       setEditing(true)
-      showSnackbar("API key removed — falling back to .env (if configured)", "info")
+      showSnackbar("Provider removed — falling back to .env (if configured)", "info")
     } catch (e) {
       // handled in updateSettings
     } finally {
@@ -112,7 +133,7 @@ export default function AIProviderSection({ settings, updateSettings }) {
   const keyIsSet = !!settings?.ai_api_key_set
 
   // ── Connected state: key already configured, not editing ────────────────────
-  if (!editing && keyIsSet) {
+  if (!editing && isConfigured(settings)) {
     return (
       <Stack spacing={2}>
         <Alert
@@ -122,7 +143,7 @@ export default function AIProviderSection({ settings, updateSettings }) {
         >
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
             <Typography variant="body2" sx={{ fontWeight: 600 }}>
-              Personal API key configured
+              {settings.ai_provider === COMPATIBLE ? "Your own AI server configured" : "Personal API key configured"}
             </Typography>
             <Chip
               size="small"
@@ -136,6 +157,14 @@ export default function AIProviderSection({ settings, updateSettings }) {
                 size="small"
                 label={`model: ${settings.ai_model}`}
                 variant="outlined"
+              />
+            )}
+            {settings.ai_provider === COMPATIBLE && settings.ai_base_url && (
+              <Chip
+                size="small"
+                label={settings.ai_base_url}
+                variant="outlined"
+                sx={{ maxWidth: "100%" }}
               />
             )}
           </Stack>
@@ -164,18 +193,19 @@ export default function AIProviderSection({ settings, updateSettings }) {
         </Stack>
 
         <Dialog open={confirmRemove} onClose={() => setConfirmRemove(false)} maxWidth="xs" fullWidth>
-          <DialogTitle>Remove API key?</DialogTitle>
+          <DialogTitle>{settings.ai_provider === COMPATIBLE ? "Remove this server?" : "Remove API key?"}</DialogTitle>
           <DialogContent>
             <Typography variant="body2">
-              This deletes the encrypted key from your local database. ViralMint will fall back to
-              the {PROVIDER_LABEL[settings.ai_provider]} key in your <code>.env</code> file (if set).
-              If neither is configured, AI features will stop working until you add a new key.
+              This deletes the {settings.ai_provider === COMPATIBLE ? "server URL and any" : "encrypted"} key
+              from your local database. ViralMint will fall back to the provider configured in
+              your <code>.env</code> file (if any). If neither is configured, AI features will stop
+              working until you set one up again.
             </Typography>
           </DialogContent>
           <DialogActions>
             <Button onClick={() => setConfirmRemove(false)}>Cancel</Button>
             <Button color="error" variant="contained" onClick={handleRemove}>
-              Remove key
+              {settings.ai_provider === COMPATIBLE ? "Remove server" : "Remove key"}
             </Button>
           </DialogActions>
         </Dialog>
@@ -187,9 +217,10 @@ export default function AIProviderSection({ settings, updateSettings }) {
   return (
     <Stack spacing={2}>
       <Typography variant="body2" color="text.secondary">
-        Bring your own Anthropic, OpenAI, or OpenRouter API key. Keys are encrypted (AES-256) before
-        storage and never leave your machine except when calling the provider directly. OpenRouter
-        is a unified gateway — one key, access to Claude / GPT / Gemini / Llama / Mistral.
+        Bring your own Anthropic, OpenAI, or OpenRouter API key — or point ViralMint at any
+        OpenAI-compatible server (Ollama, LM Studio, vLLM, DeepSeek, Groq…). Keys are encrypted
+        (AES-256) before storage and never leave your machine except when calling the provider
+        directly. OpenRouter is a unified gateway — one key, access to Claude / GPT / Gemini / Llama.
       </Typography>
 
       <FormControl size="small" fullWidth>
@@ -203,9 +234,37 @@ export default function AIProviderSection({ settings, updateSettings }) {
           <MenuItem value="anthropic">Anthropic (Claude)</MenuItem>
           <MenuItem value="openai">OpenAI (GPT)</MenuItem>
           <MenuItem value="openrouter">OpenRouter (Claude / GPT / Gemini / Llama)</MenuItem>
+          <MenuItem value={COMPATIBLE}>{PROVIDER_LABEL[COMPATIBLE]}</MenuItem>
         </Select>
       </FormControl>
 
+      {compatible && (
+        <TextField
+          label="Base URL"
+          size="small"
+          fullWidth
+          value={baseUrl}
+          onChange={(e) => setBaseUrl(e.target.value)}
+          placeholder="http://localhost:11434/v1"
+          helperText="The server's OpenAI-compatible endpoint, usually ending in /v1 (Ollama: http://localhost:11434/v1, LM Studio: http://localhost:1234/v1)"
+          disabled={saving}
+          autoComplete="off"
+        />
+      )}
+
+      {compatible ? (
+        <TextField
+          label="Model"
+          size="small"
+          fullWidth
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          placeholder="e.g. qwen3:14b, llama3.3, deepseek-chat"
+          helperText="Exactly as your server names it. Smaller local models may struggle with the structured (JSON) replies some features need."
+          disabled={saving}
+          autoComplete="off"
+        />
+      ) : (
       <FormControl size="small" fullWidth>
         <InputLabel>Model</InputLabel>
         <Select
@@ -226,9 +285,10 @@ export default function AIProviderSection({ settings, updateSettings }) {
           ))}
         </Select>
       </FormControl>
+      )}
 
       <TextField
-        label="API key"
+        label={compatible ? "API key (optional)" : "API key"}
         type={showKey ? "text" : "password"}
         size="small"
         fullWidth
@@ -254,11 +314,11 @@ export default function AIProviderSection({ settings, updateSettings }) {
           variant="contained"
           startIcon={<SaveIcon />}
           onClick={handleSave}
-          disabled={saving || (!apiKey.trim() && !keyIsSet)}
+          disabled={saving || (compatible ? !baseUrl.trim() || !model.trim() : !apiKey.trim() && !keyIsSet)}
         >
           {saving ? "Saving…" : "Save"}
         </Button>
-        {keyIsSet && (
+        {isConfigured(settings) && (
           <Button
             variant="outlined"
             onClick={() => { setEditing(false); setApiKey("") }}

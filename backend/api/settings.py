@@ -3,7 +3,7 @@
 """REST /api/settings — user settings CRUD + credential testing + OAuth callbacks."""
 import logging
 from datetime import datetime
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -25,6 +25,7 @@ class SettingsResponse(BaseModel):
     # AI provider preference (BYOK)
     ai_provider: str = "openai"
     ai_model: Optional[str] = None
+    ai_base_url: Optional[str] = None  # OpenAI-compatible provider only; not a secret
     ai_api_key_set: bool = False  # masked — never returns the actual key
 
     # Service API keys (BYOK) — booleans only, never the plaintext key
@@ -58,6 +59,7 @@ class SettingsUpdate(BaseModel):
     # AI provider preference (BYOK)
     ai_provider: Optional[str] = None
     ai_model: Optional[str] = None
+    ai_base_url: Optional[str] = None  # empty string clears
     ai_api_key: Optional[str] = None  # plaintext on input — encrypted before storage
 
     # Service API keys (BYOK) — plaintext on input, encrypted before storage.
@@ -95,6 +97,7 @@ async def get_settings():
     return SettingsResponse(
         ai_provider=s.ai_provider or "openai",
         ai_model=s.ai_model,
+        ai_base_url=s.ai_base_url,
         ai_api_key_set=bool(s.ai_api_key_encrypted),
         youtube_api_key_set=bool(s.youtube_api_key_encrypted),
         douyin_cookie_set=bool(s.douyin_cookie_encrypted),
@@ -119,6 +122,21 @@ async def get_settings():
 @router.post("/settings", response_model=SettingsResponse)
 async def update_settings(update: SettingsUpdate):
     """Update user settings. Keys are encrypted before saving."""
+    from backend.core.ai_provider import AIProvider, normalize_base_url
+
+    # Validate before touching the DB so a bad value saves nothing.
+    if update.ai_provider is not None:
+        try:
+            AIProvider(update.ai_provider)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Unknown AI provider: {update.ai_provider}")
+    base_url = None
+    if update.ai_base_url is not None:
+        try:
+            base_url = normalize_base_url(update.ai_base_url)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(UserSettings).where(UserSettings.user_id == "local")
@@ -133,6 +151,8 @@ async def update_settings(update: SettingsUpdate):
             s.ai_provider = update.ai_provider
         if update.ai_model is not None:
             s.ai_model = update.ai_model or None
+        if update.ai_base_url is not None:
+            s.ai_base_url = base_url or None
         if update.ai_api_key is not None:
             # Empty string clears the stored key; otherwise encrypt + store
             s.ai_api_key_encrypted = encrypt(update.ai_api_key) if update.ai_api_key else None

@@ -22,12 +22,13 @@ from backend.core.exceptions import AIKeyMissingError
 
 
 def _no_env_keys():
-    """Patch all three env keys to empty so only the argument path is exercised."""
+    """Patch every env provider setting to empty so only the argument path is exercised."""
     return patch.multiple(
         ap.settings,
         ANTHROPIC_API_KEY="",
         OPENAI_API_KEY="",
         OPENROUTER_API_KEY="",
+        CUSTOM_AI_BASE_URL="",
     )
 
 
@@ -35,7 +36,10 @@ def _no_env_keys():
 
 def test_provider_defaults_cover_every_provider():
     for p in AIProvider:
-        assert p in PROVIDER_DEFAULTS and PROVIDER_DEFAULTS[p]
+        assert p in PROVIDER_DEFAULTS
+        # An OpenAI-compatible server has no default model — the user names it.
+        if p != AIProvider.OPENAI_COMPATIBLE:
+            assert PROVIDER_DEFAULTS[p]
 
 
 def test_aiclient_uses_default_model_when_none():
@@ -82,21 +86,21 @@ def test_raises_when_nothing_configured():
 
 def test_env_anthropic_wins_first():
     with patch.multiple(ap.settings, ANTHROPIC_API_KEY="anthr", OPENAI_API_KEY="oai",
-                        OPENROUTER_API_KEY="ork"):
+                        OPENROUTER_API_KEY="ork", CUSTOM_AI_BASE_URL=""):
         c = get_ai_client(None)
     assert c.provider == AIProvider.ANTHROPIC and c.api_key == "anthr"
 
 
 def test_env_openai_when_anthropic_empty():
     with patch.multiple(ap.settings, ANTHROPIC_API_KEY="", OPENAI_API_KEY="oai",
-                        OPENROUTER_API_KEY="ork"):
+                        OPENROUTER_API_KEY="ork", CUSTOM_AI_BASE_URL=""):
         c = get_ai_client(None)
     assert c.provider == AIProvider.OPENAI and c.api_key == "oai"
 
 
 def test_env_openrouter_last_resort():
     with patch.multiple(ap.settings, ANTHROPIC_API_KEY="", OPENAI_API_KEY="",
-                        OPENROUTER_API_KEY="ork"):
+                        OPENROUTER_API_KEY="ork", CUSTOM_AI_BASE_URL=""):
         c = get_ai_client(None)
     assert c.provider == AIProvider.OPENROUTER and c.api_key == "ork"
 

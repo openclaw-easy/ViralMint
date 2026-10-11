@@ -294,6 +294,36 @@ def test_save_settings(client):
     assert r.json()["caption_style"] == "bold"
 
 
+def test_save_openai_compatible_provider(client):
+    # Base URL is normalised (trailing slash) and returned — it isn't a secret.
+    r = client.post("/api/settings", json={
+        "ai_provider": "openai_compatible",
+        "ai_model": "qwen3:14b",
+        "ai_base_url": "http://localhost:11434/v1/",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ai_provider"] == "openai_compatible"
+    assert body["ai_base_url"] == "http://localhost:11434/v1"
+    assert body["ai_api_key_set"] is False
+    # Empty string clears it; put the default provider back for later tests.
+    r = client.post("/api/settings", json={"ai_provider": "openai", "ai_base_url": "", "ai_model": ""})
+    assert r.status_code == 200 and r.json()["ai_base_url"] is None
+
+
+@pytest.mark.parametrize("body", [
+    {"ai_base_url": "localhost:11434/v1"},
+    {"ai_base_url": "ftp://example.com/v1"},
+    {"ai_provider": "not-a-provider"},
+])
+def test_save_settings_rejects_bad_ai_config(client, body):
+    before = client.get("/api/settings").json()
+    r = client.post("/api/settings", json={**body, "caption_style": "minimal"})
+    assert r.status_code == 400
+    # Validation runs before the write — nothing in the body was saved.
+    assert client.get("/api/settings").json()["caption_style"] == before["caption_style"]
+
+
 # ── channels.py ──────────────────────────────────────────────────────────────
 
 def test_get_channel_videos(client, ids):

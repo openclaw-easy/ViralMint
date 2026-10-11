@@ -103,7 +103,7 @@ export default function Settings() {
         <Section
           icon={<SmartToyIcon sx={{ fontSize: 20 }} />}
           title="AI Provider"
-          description="Bring your own Anthropic, OpenAI, or OpenRouter API key — encrypted and stored locally"
+          description="Bring your own Anthropic, OpenAI or OpenRouter key, or your own OpenAI-compatible server — stored encrypted on this machine"
           accentColor="#0d9f6e"
         >
           <AIProviderSection settings={settings} updateSettings={updateSettings} />

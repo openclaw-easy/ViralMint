@@ -514,10 +514,15 @@ Return a JSON array of 3 strings. No explanation."""
         from backend.config import settings as env
 
         # All keys are BYOK from .env (or per-user UserSettings for AI provider).
-        ai_user_key = bool(user_settings and user_settings.ai_api_key_encrypted)
+        from backend.core.ai_provider import _resolve_user_provider_and_key
+        user_provider, _ = _resolve_user_provider_and_key(user_settings)
         status = {
             "ai_provider": {
-                "configured": bool(env.ANTHROPIC_API_KEY or env.OPENAI_API_KEY or ai_user_key),
+                "configured": bool(
+                    user_provider
+                    or env.ANTHROPIC_API_KEY or env.OPENAI_API_KEY
+                    or env.OPENROUTER_API_KEY or env.CUSTOM_AI_BASE_URL
+                ),
             },
             "youtube_scout": {
                 "configured": bool(env.YOUTUBE_API_KEY),

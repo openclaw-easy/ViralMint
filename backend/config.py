@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     OPENROUTER_API_KEY: str = ""
+    # Any OpenAI-compatible server (Ollama, LM Studio, vLLM, DeepSeek, Groq…).
+    # Base URL + model are required; the key is optional for local servers.
+    # Deliberately NOT named OPENAI_BASE_URL: the OpenAI SDK reads that
+    # variable on its own and would silently redirect the OpenAI provider.
+    CUSTOM_AI_BASE_URL: str = ""
+    CUSTOM_AI_API_KEY: str = ""
+    CUSTOM_AI_MODEL: str = ""
 
     # ── Service keys (BYOK) ───────────────────────────
     # All optional — features gracefully degrade when keys are missing.
