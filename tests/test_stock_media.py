@@ -9,6 +9,7 @@ search goes through — which provider answers, in what order, and what a
 failing provider costs.
 """
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -306,7 +307,7 @@ class TestPipelineUsesTheProviderLayer:
         # every search went to Pixabay, and no Pexels key was set to fall back to
         assert {c.args[0] for c in client.get.call_args_list} == {sm.PIXABAY_API}
         assert downloaded, "the pipeline downloaded the clips the adapter returned"
-        assert all("cdn.pixabay.com" in url for url in downloaded)
+        assert {urlparse(url).hostname for url in downloaded} == {"cdn.pixabay.com"}
         assert len(set(downloaded)) == len(downloaded), "distinct scenes kept distinct clips"
 
     async def test_no_configured_provider_degrades_instead_of_crashing(self, keys, tmp_path):
