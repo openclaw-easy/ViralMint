@@ -4,11 +4,11 @@
 Agent 4: Video Generation Pipeline
 Script -> Voice -> Transcribe -> Stock video -> Music Mix -> Captions -> Final output
 
-- Free, local generation using Pexels stock footage matched to script keywords
+- Free, local generation using stock footage (Pexels or Pixabay) matched to script keywords
 - Multi-TTS providers (Edge TTS free by default; OpenAI TTS via BYOK)
 - Word-by-word animated captions (viral style)
 - Background music mixing
-- Falls back to Ken Burns image zoom or text-on-background when Pexels is unavailable
+- Falls back to Ken Burns image zoom or text-on-background when no stock provider is configured
 """
 import asyncio
 import hashlib
@@ -630,7 +630,7 @@ class GeneratorAgent:
     # ── Video generation ────────────────────────────────────────────────
 
     async def _generate_video(self, script: str, voice_path: Path, aspect_ratio: str, user_settings, start_image: str = None, visual_style: str = None, transition_style: str = None, user_images: list[str] = None) -> Path:
-        """Generate video: Pexels stock footage → Ken Burns image → text fallback.
+        """Generate video: stock footage → Ken Burns image → text fallback.
 
         `start_image` and `user_images` are two different asks and only one
         can win. A start image means "make the WHOLE video out of this one

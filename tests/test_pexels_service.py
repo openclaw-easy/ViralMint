@@ -269,13 +269,13 @@ class TestBuildStockVideo:
         candidate = {"id": 1, "download_url": "http://x/c.mp4", "duration": 12,
                      "quality_score": 100}
 
-        async def fake_search(query, orientation="portrait", per_page=10, api_key=""):
+        async def fake_search(query, orientation="portrait", per_page=10):
             # unique id per query so dedup keeps them all
             return [{**candidate, "id": abs(hash(query)) % 100000}]
 
         stitched = tmp_path / "stitched.mp4"
 
-        with patch.object(px, "search_videos", side_effect=fake_search), \
+        with patch("backend.services.stock_media.search_clips", side_effect=fake_search), \
              patch.object(px, "download_clip", AsyncMock(return_value=tmp_path / "raw.mp4")), \
              patch.object(px, "trim_and_normalize_clip",
                           AsyncMock(side_effect=lambda *a, **k: a[4] if len(a) > 4 else tmp_path / "t.mp4")), \
@@ -285,16 +285,50 @@ class TestBuildStockVideo:
              patch("shutil.move") as mv:
             res = await px.build_stock_video(
                 "alpha bravo charlie delta echo foxtrot golf hotel india juliet",
-                voice_path=None, pexels_api_key="k", aspect_ratio="9:16",
+                voice_path=None, aspect_ratio="9:16",
                 ai_client=None, output_path=out)
         assert res == out
         mv.assert_called_once()
 
+    async def test_the_same_id_from_two_providers_is_two_clips(self, tmp_path):
+        """Pexels and Pixabay number their clips independently, so dedup has
+        to key on (provider, id) — a bare id silently drops a whole scene."""
+        calls = {"n": 0}
+
+        async def fake_search(query, orientation="portrait", per_page=10):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return [{"id": 7, "provider": "pexels", "duration": 12,
+                         "download_url": "http://x/pexels-7.mp4", "quality_score": 100}]
+            if calls["n"] == 2:
+                return [{"id": 7, "provider": "pixabay", "duration": 12,
+                         "download_url": "http://x/pixabay-7.mp4", "quality_score": 100}]
+            return [{"id": 100 + calls["n"], "provider": "pexels", "duration": 12,
+                     "download_url": f"http://x/clip-{calls['n']}.mp4", "quality_score": 100}]
+
+        with patch("backend.services.stock_media.search_clips", side_effect=fake_search), \
+             patch.object(px, "download_clip", AsyncMock(return_value=tmp_path / "raw.mp4")) as dl, \
+             patch.object(px, "trim_and_normalize_clip",
+                          AsyncMock(side_effect=lambda *a, **k: a[4])), \
+             patch.object(px, "probe_duration", return_value=10.0), \
+             patch("backend.services.ffmpeg_service.stitch_clips",
+                   AsyncMock(return_value=tmp_path / "stitched.mp4")), \
+             patch("shutil.move"):
+            await px.build_stock_video(
+                "alpha bravo charlie delta echo foxtrot golf hotel india juliet",
+                voice_path=None, aspect_ratio="9:16",
+                ai_client=None, output_path=tmp_path / "final.mp4")
+
+        urls = [call.args[0] for call in dl.await_args_list]
+        assert "http://x/pexels-7.mp4" in urls
+        assert "http://x/pixabay-7.mp4" in urls
+        assert len(urls) == calls["n"], "every scene with a distinct clip was downloaded"
+
     async def test_no_clips_returns_none(self, tmp_path):
         out = tmp_path / "final.mp4"
-        with patch.object(px, "search_videos", AsyncMock(return_value=[])):
+        with patch("backend.services.stock_media.search_clips", AsyncMock(return_value=[])):
             res = await px.build_stock_video(
                 "alpha bravo charlie delta echo foxtrot",
-                voice_path=None, pexels_api_key="k", aspect_ratio="16:9",
+                voice_path=None, aspect_ratio="16:9",
                 ai_client=None, output_path=out)
         assert res is None

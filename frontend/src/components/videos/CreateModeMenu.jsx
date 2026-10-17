@@ -36,7 +36,7 @@ export default function CreateModeMenu({ anchorEl, onClose, sourceId, navigate }
         <ListItemIcon><AutoFixHighIcon fontSize="small" color="primary" /></ListItemIcon>
         <ListItemText
           primary={quickLoading ? "Starting..." : "Quick Stock Video"}
-          secondary="One-click: Pexels stock footage + free voice + viral captions"
+          secondary="One-click: stock footage + free voice + viral captions"
           primaryTypographyProps={{ fontWeight: 700, color: "primary.main" }}
           secondaryTypographyProps={{ fontSize: "0.7rem" }}
         />

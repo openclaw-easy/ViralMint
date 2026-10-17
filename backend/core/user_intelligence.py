@@ -550,7 +550,8 @@ Return a JSON array of 3 strings. No explanation."""
                 "configured": True,
             },
             "stock_footage": {
-                "configured": bool(env.PEXELS_API_KEY),
+                # Either provider is enough; the pipeline picks the configured one.
+                "configured": bool(env.PEXELS_API_KEY or env.PIXABAY_API_KEY),
             },
         }
 

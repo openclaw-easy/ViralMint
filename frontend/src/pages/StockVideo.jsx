@@ -172,7 +172,7 @@ export default function StockVideo() {
       <PageHero
         icon={<PhotoLibraryIcon />}
         title="Smart Video"
-        subtitle="Turn a script into a captioned short — Pexels footage matched to every line"
+        subtitle="Turn a script into a captioned short — stock footage matched to every line"
         accentColor="#2E9E6B"
         actions={
           <Stack direction="row" spacing={1} alignItems="center">
