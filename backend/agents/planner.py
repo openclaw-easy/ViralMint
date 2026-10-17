@@ -206,7 +206,7 @@ PROACTIVE news behavior:
 
 ## Important: wizard_id values
 Valid wizard IDs: youtube_auth, tiktok_upload_auth, telegram
-Note: Scouting credentials (YouTube API key, TikHub token, Pexels) are configured via .env file or Settings page. If a platform's key is missing, that platform is skipped gracefully.
+Note: Scouting credentials (YouTube API key, TikHub token) and stock-footage keys (Pexels or Pixabay) are configured via .env file or Settings page. If a platform's key is missing, that platform is skipped gracefully.
 
 ## ═══════ DYNAMIC CONTEXT (changes per request) ═══════
 

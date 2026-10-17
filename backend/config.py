@@ -87,7 +87,14 @@ class Settings(BaseSettings):
     # All optional — features gracefully degrade when keys are missing.
     YOUTUBE_API_KEY: str = ""           # YouTube scout, channel reader, comments
     TIKHUB_API_KEY: str = ""            # TikTok / Douyin scout (alternative: cookies in Settings)
-    PEXELS_API_KEY: str = ""            # Stock video footage
+    # ── Stock footage ──
+    # Any one of these is enough for stock-video mode. Pexels is tried first
+    # when both are set, so an existing install keeps the footage it had.
+    PEXELS_API_KEY: str = ""
+    PIXABAY_API_KEY: str = ""
+    # "auto" (default) uses every configured provider in the order above;
+    # "pexels" or "pixabay" pins one and never falls back.
+    STOCK_MEDIA_PROVIDER: str = "auto"
 
     # ── Upload OAuth ──────────────────────────────────
     YOUTUBE_CLIENT_ID: str = ""

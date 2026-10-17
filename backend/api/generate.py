@@ -3,8 +3,8 @@
 """
 REST endpoints for video generation.
 
-POST /api/generate/stock          — Stock footage (Pexels)
-POST /api/generate/split-scenes   — AI-split script into scenes with Pexels keywords
+POST /api/generate/stock          — Stock footage (Pexels or Pixabay)
+POST /api/generate/split-scenes   — AI-split script into scenes with stock keywords
 POST /api/generate/motion/studio/* — the embedded Motion Graphics studio
 """
 import asyncio
@@ -47,7 +47,7 @@ class StockGenerateRequest(BaseModel):
     scenes: Optional[list[StockScene]] = None
     start_image: Optional[str] = None
     # The user's own stills. Each claims a scene in order from the hook; the
-    # rest of the scenes still come from Pexels. Bounded so one request cannot
+    # rest of the scenes still come from stock footage. Bounded so one request cannot
     # queue an unbounded number of renders — the scene grid caps at 12 anyway.
     user_images: list[str] = Field(default_factory=list, max_length=12)
 
@@ -119,7 +119,7 @@ async def generate_stock(body: StockGenerateRequest):
 
 @router.post("/split-scenes")
 async def split_scenes(body: SplitScenesRequest):
-    """AI-split a script into stock-footage scenes with per-scene Pexels keywords."""
+    """AI-split a script into stock-footage scenes with per-scene search keywords."""
     script = body.script.strip()
     if not script:
         raise HTTPException(400, "Script is empty")
@@ -149,7 +149,7 @@ async def split_scenes(body: SplitScenesRequest):
 
     system = (
         "You split video scripts into scenes for stock footage matching. "
-        "For each scene, extract 2-4 Pexels search keywords that describe "
+        "For each scene, extract 2-4 stock footage search keywords that describe "
         "the visual content needed. Keywords are always in English (stock "
         "sites are searched in English); narration text stays verbatim. "
         "Return JSON only."

@@ -55,7 +55,7 @@ RULES:
 Output ONLY a JSON array of {count} template objects. No markdown, no explanation."""
 
 MODE_DETAILS = {
-    "stock": "Stock Video mode uses Pexels stock footage matched to script keywords. Free, fast. Best for: educational, listicles, news commentary, explainers.",
+    "stock": "Stock Video mode uses stock footage (Pexels or Pixabay, whichever key is configured) matched to script keywords. Free, fast. Best for: educational, listicles, news commentary, explainers.",
 }
 
 

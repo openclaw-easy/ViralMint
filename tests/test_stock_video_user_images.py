@@ -52,7 +52,7 @@ class _Harness:
     def __enter__(self):
         tmp = self.tmp_path
 
-        async def fake_search(query, orientation="portrait", per_page=10, api_key=""):
+        async def fake_search(query, orientation="portrait", per_page=10):
             self.searched.append(query)
             return [{"id": abs(hash(query)) % 100000, "duration": 12,
                      "download_url": "http://x/c.mp4", "quality_score": 100}]
@@ -70,7 +70,7 @@ class _Harness:
             self.warnings.append(constraint)
 
         self._patches = [
-            patch.object(px, "search_videos", side_effect=fake_search),
+            patch("backend.services.stock_media.search_clips", side_effect=fake_search),
             patch.object(px, "download_clip", AsyncMock(return_value=tmp / "raw.mp4")),
             patch.object(px, "trim_and_normalize_clip", side_effect=fake_trim),
             patch.object(px, "probe_duration", return_value=4.0),
@@ -139,7 +139,7 @@ async def test_a_scene_an_image_owns_is_never_searched_on_pexels(tmp_path):
     imgs = [_image(tmp_path / "a.png"), _image(tmp_path / "b.png")]
     with _Harness(tmp_path) as h:
         await px.build_stock_video(
-            SCRIPT, voice_path=None, pexels_api_key="k", aspect_ratio="9:16",
+            SCRIPT, voice_path=None, aspect_ratio="9:16",
             ai_client=None, output_path=tmp_path / "final.mp4",
             user_images=imgs,
         )
@@ -155,7 +155,7 @@ async def test_the_user_images_land_on_the_opening_scenes_in_order(tmp_path):
     imgs = [_image(tmp_path / "a.png"), _image(tmp_path / "b.png")]
     with _Harness(tmp_path) as h:
         await px.build_stock_video(
-            SCRIPT, voice_path=None, pexels_api_key="k", aspect_ratio="9:16",
+            SCRIPT, voice_path=None, aspect_ratio="9:16",
             ai_client=None, output_path=tmp_path / "final.mp4",
             user_images=imgs,
         )
@@ -172,7 +172,7 @@ async def test_stock_clips_keep_the_scripts_own_order_around_the_stills(tmp_path
     imgs = [_image(tmp_path / "a.png")]
     with _Harness(tmp_path) as h:
         await px.build_stock_video(
-            SCRIPT, voice_path=None, pexels_api_key="k", aspect_ratio="9:16",
+            SCRIPT, voice_path=None, aspect_ratio="9:16",
             ai_client=None, output_path=tmp_path / "final.mp4",
             user_images=imgs,
         )
@@ -187,7 +187,7 @@ async def test_every_scene_can_be_a_user_image(tmp_path):
     imgs = [_image(tmp_path / f"{i}.png") for i in range(4)]
     with _Harness(tmp_path) as h:
         await px.build_stock_video(
-            "short script here", voice_path=None, pexels_api_key="k",
+            "short script here", voice_path=None,
             aspect_ratio="9:16", ai_client=None,
             output_path=tmp_path / "final.mp4", user_images=imgs,
         )
@@ -207,7 +207,7 @@ async def test_an_unreadable_image_gives_its_scene_back_to_stock(tmp_path):
 
     with _Harness(tmp_path) as h:
         await px.build_stock_video(
-            SCRIPT, voice_path=None, pexels_api_key="k", aspect_ratio="9:16",
+            SCRIPT, voice_path=None, aspect_ratio="9:16",
             ai_client=None, output_path=tmp_path / "final.mp4",
             user_images=[bad, good],
         )
@@ -226,7 +226,7 @@ async def test_more_images_than_the_script_has_room_for_is_said_out_loud(tmp_pat
     imgs = [_image(tmp_path / f"{i}.png") for i in range(14)]
     with _Harness(tmp_path) as h:
         await px.build_stock_video(
-            "tiny", voice_path=None, pexels_api_key="k", aspect_ratio="9:16",
+            "tiny", voice_path=None, aspect_ratio="9:16",
             ai_client=None, output_path=tmp_path / "final.mp4",
             user_images=imgs,
         )
@@ -240,7 +240,7 @@ async def test_bringing_images_raises_the_scene_count_to_fit_them(tmp_path):
     imgs = [_image(tmp_path / f"{i}.png") for i in range(6)]
     with _Harness(tmp_path) as h:
         await px.build_stock_video(
-            "tiny", voice_path=None, pexels_api_key="k", aspect_ratio="9:16",
+            "tiny", voice_path=None, aspect_ratio="9:16",
             ai_client=None, output_path=tmp_path / "final.mp4",
             user_images=imgs,
         )
@@ -258,7 +258,7 @@ async def test_the_normalized_stills_are_cleaned_up(tmp_path):
     imgs = [_image(tmp_path / "a.png")]
     with _Harness(tmp_path):
         await px.build_stock_video(
-            SCRIPT, voice_path=None, pexels_api_key="k", aspect_ratio="9:16",
+            SCRIPT, voice_path=None, aspect_ratio="9:16",
             ai_client=None, output_path=tmp_path / "final.mp4",
             user_images=imgs,
         )
@@ -269,7 +269,7 @@ async def test_the_normalized_stills_are_cleaned_up(tmp_path):
 async def test_no_images_behaves_exactly_as_before(tmp_path):
     with _Harness(tmp_path) as h:
         res = await px.build_stock_video(
-            SCRIPT, voice_path=None, pexels_api_key="k", aspect_ratio="9:16",
+            SCRIPT, voice_path=None, aspect_ratio="9:16",
             ai_client=None, output_path=tmp_path / "final.mp4",
         )
     assert res is not None

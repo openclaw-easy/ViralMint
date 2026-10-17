@@ -3,7 +3,7 @@
 """Generation tools — scripts, Smart Video renders and Motion Graphics.
 
   - Scripts: write or polish a narration script (synchronous, returns text).
-  - Smart Video: a finished mp4 from a script — Pexels stock footage matched
+  - Smart Video: a finished mp4 from a script — stock footage matched
     per scene, TTS voiceover, word-by-word captions and background music.
   - Motion Graphics: an AI-written HyperFrames composition, rendered locally.
     Needs the optional HyperFrames engine (Settings → Add-ons).
@@ -166,10 +166,10 @@ def register(mcp: FastMCP) -> None:
         """Render a finished short from a script — stock footage + voice + captions + music.
 
         Runs the whole pipeline in one background job: TTS voiceover →
-        Whisper word timings → Pexels stock clips matched per scene →
+        Whisper word timings → stock clips matched per scene →
         stitch → music mix → burned-in word-by-word captions → thumbnail →
         AI-drafted YouTube / TikTok titles and descriptions. Stock search
-        needs a Pexels key in Settings; without usable footage the render
+        needs a Pexels or Pixabay key in Settings; without usable footage the render
         degrades to a text-on-background video rather than failing.
 
         Get a script first with generate_script_from_topic (or polish one the

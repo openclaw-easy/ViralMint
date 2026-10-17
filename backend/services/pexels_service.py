@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2025-2026 ViralMint Contributors
 """
-Pexels stock footage service.
+Stock footage service.
 Searches and downloads royalty-free stock videos matching script content.
+Search itself is provider-agnostic — see backend.services.stock_media for the
+Pexels/Pixabay adapters and how one is picked.
 """
 import asyncio
 import json
@@ -13,6 +15,7 @@ from uuid import uuid4
 
 import httpx
 
+from backend.services import stock_media
 from backend.services.video_utils import probe_duration
 
 from backend.config import settings
@@ -26,21 +29,13 @@ from backend.services.ffmpeg_service import (
 
 logger = logging.getLogger(__name__)
 
-PEXELS_API = "https://api.pexels.com"
-
-# Shared httpx client — connection pooling across all Pexels calls
+# Shared httpx client — connection pooling across all Pexels downloads
 _http = httpx.AsyncClient(timeout=30, follow_redirects=True, limits=httpx.Limits(max_connections=10))
 
 # Most scenes one video is cut into. Past this the cuts come faster than an
 # idea can land, and it is also the ceiling on how many of the user's own
 # images a single video can hold.
 MAX_SCENES = 12
-
-# Minimum acceptable resolution for stock clips
-MIN_WIDTH_PORTRAIT = 720
-MIN_HEIGHT_PORTRAIT = 1280
-MIN_WIDTH_LANDSCAPE = 1280
-MIN_HEIGHT_LANDSCAPE = 720
 
 
 async def search_videos(
@@ -50,78 +45,19 @@ async def search_videos(
     api_key: str = "",
 ) -> list[dict]:
     """
-    Search Pexels for stock footage matching a keyword.
-    Returns list of video entries with download URLs, sorted by quality.
+    Search Pexels only, with a key the caller already holds.
+
+    The pipeline itself goes through `stock_media.search_clips`, which picks a
+    provider from configuration; this stays as the explicit-Pexels entry point
+    and shares `_http` with the download path below.
     """
-    if not api_key:
-        raise VideoGenerationError("Pexels API key not configured")
-
-    resp = await _http.get(
-        f"{PEXELS_API}/videos/search",
-        params={"query": query, "orientation": orientation, "per_page": per_page, "size": "medium"},
-        headers={"Authorization": api_key},
+    return await stock_media.PexelsProvider(api_key, http=_http).search(
+        query, orientation=orientation, per_page=per_page,
     )
-    resp.raise_for_status()
-    data = resp.json()
-
-    min_w = MIN_WIDTH_PORTRAIT if orientation == "portrait" else MIN_WIDTH_LANDSCAPE
-    min_h = MIN_HEIGHT_PORTRAIT if orientation == "portrait" else MIN_HEIGHT_LANDSCAPE
-
-    videos = []
-    for v in data.get("videos", []):
-        # Find the best HD file that matches orientation
-        best_file = None
-        best_score = 0
-
-        for f in v.get("video_files", []):
-            w = f.get("width", 0)
-            h = f.get("height", 0)
-            quality = f.get("quality", "")
-
-            # Skip files that are too small
-            if w < min_w or h < min_h:
-                continue
-
-            # Skip wrong orientation
-            is_portrait = h > w
-            want_portrait = orientation == "portrait"
-            if is_portrait != want_portrait:
-                continue
-
-            # Score: prefer HD, higher resolution, but not excessively large (>4K wastes bandwidth)
-            score = 0
-            if quality == "hd":
-                score += 100
-            if w <= 1920 and h <= 1920:
-                score += 50  # prefer reasonable size
-            score += min(w, 1920) / 100  # higher res is better up to 1080p
-
-            if score > best_score:
-                best_score = score
-                best_file = f
-
-        if best_file:
-            # Bonus for longer source clips (longer clips = more flexibility, less looping)
-            duration = v.get("duration", 0)
-            duration_bonus = min(duration / 5, 10)  # up to +10 pts for 50s+ clips
-
-            videos.append({
-                "id": v["id"],
-                "url": v.get("url", ""),
-                "download_url": best_file["link"],
-                "width": best_file.get("width", 0),
-                "height": best_file.get("height", 0),
-                "duration": duration,
-                "quality_score": best_score + duration_bonus,
-            })
-
-    # Sort by quality score descending (longer + higher quality clips first)
-    videos.sort(key=lambda x: x["quality_score"], reverse=True)
-    return videos
 
 
 async def download_clip(url: str, output_path: Path) -> Path:
-    """Download a Pexels video clip to local storage."""
+    """Download a stock video clip to local storage."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     async with _http.stream("GET", url, timeout=120) as resp:
         resp.raise_for_status()
@@ -129,7 +65,7 @@ async def download_clip(url: str, output_path: Path) -> Path:
             async for chunk in resp.aiter_bytes(chunk_size=65536):
                 f.write(chunk)
     if not output_path.exists() or output_path.stat().st_size == 0:
-        raise VideoGenerationError(f"Downloaded Pexels clip is empty: {url}")
+        raise VideoGenerationError(f"Downloaded stock clip is empty: {url}")
     return output_path
 
 
@@ -227,7 +163,7 @@ async def extract_visual_scenes(script: str, ai_client, num_scenes: int = 8) -> 
     """Use AI to extract visual scene descriptions from script text.
     Creates one scene per ~10 seconds of video for a cinematic, unhurried feel."""
     prompt = f"""You are a professional video editor choosing stock footage clips for a narrated video.
-You must find {num_scenes} clips from Pexels.com that visually match what the narrator is talking about.
+You must find {num_scenes} clips from a stock footage library that visually match what the narrator is talking about.
 
 THE MOST IMPORTANT RULE: Each clip must DIRECTLY illustrate what the script is saying at that moment.
 If the script talks about war → show military footage. If it talks about oil → show oil rigs.
@@ -237,10 +173,10 @@ Script:
 {script[:3000]}
 
 RULES:
-1. Read the script section by section. For each ~10-second chunk, write a Pexels search query that matches EXACTLY what's being discussed.
-2. Pexels is a stock footage site — it has real filmed footage of: military, cities, nature, business, technology, food, people, vehicles, buildings, industrial, medical, sports, etc.
-3. Pexels does NOT have footage of specific named people or branded logos. So instead of "Trump" use "politician speaking podium". Instead of "Apple iPhone" use "smartphone close up".
-4. But Pexels DOES have footage of general categories like: military tanks, fighter jets, warships, oil refineries, desert landscapes, flags waving, protests, soldiers, missiles, nuclear plants, etc.
+1. Read the script section by section. For each ~10-second chunk, write a stock footage search query that matches EXACTLY what's being discussed.
+2. Stock footage sites have real filmed footage of: military, cities, nature, business, technology, food, people, vehicles, buildings, industrial, medical, sports, etc.
+3. They do NOT have footage of specific named people or branded logos. So instead of "Trump" use "politician speaking podium". Instead of "Apple iPhone" use "smartphone close up".
+4. But they DO have footage of general categories like: military tanks, fighter jets, warships, oil refineries, desert landscapes, flags waving, protests, soldiers, missiles, nuclear plants, etc.
 5. Be SPECIFIC and CONCRETE: "military tank desert" is much better than "dramatic scene". "oil refinery night flames" is better than "energy concept".
 6. Every query must directly relate to what the narrator is saying at that point — NO filler scenes like "sunset" or "sky timelapse" unless the script actually talks about those.
 7. Vary camera angles: close-up, wide shot, aerial, tracking shot.
@@ -250,7 +186,7 @@ RULES:
 
 Return JSON array only (no markdown):
 [
-  {{"query": "specific pexels search terms"}}
+  {{"query": "specific stock footage search terms"}}
 ]"""
 
     try:
@@ -292,7 +228,7 @@ Return JSON array only (no markdown):
     return fallback[:num_scenes]
 
 
-# Visual-style → Pexels footage mood. Appended to each scene query so the
+# Visual-style → stock footage mood. Appended to each scene query so the
 # selected style actually changes the look of the stock footage that's pulled.
 VISUAL_STYLE_MOODS = {
     "cinematic": "cinematic film",
@@ -320,7 +256,6 @@ TRANSITION_MAP = {
 async def build_stock_video(
     script: str,
     voice_path: Path,
-    pexels_api_key: str,
     aspect_ratio: str = "9:16",
     ai_client=None,
     output_path: Path = None,
@@ -332,7 +267,8 @@ async def build_stock_video(
     Full stock footage video pipeline:
     1. AI extracts visual scene descriptions from script (one per ~7s of audio)
     2. Any images the user brought claim the opening scenes
-    3. Search Pexels for the REMAINING scenes with quality filtering
+    3. Search the configured stock provider for the REMAINING scenes with
+       quality filtering
     4. Download best-matching HD clips
     5. Normalize all clips to consistent resolution
     6. Trim clips to match voice timing — total MUST equal voice duration
@@ -344,8 +280,8 @@ async def build_stock_video(
     order, starting at scene 0 — the hook, which is the scene most worth
     giving to the creator's own material — and is animated into it with a Ken
     Burns move for exactly that scene's slot. Scenes with no user image fall
-    to Pexels as before, and no Pexels search is even ISSUED for a scene an
-    image already owns.
+    to stock footage as before, and no stock search is even ISSUED for a scene
+    an image already owns.
     """
     if output_path is None:
         output_path = settings.GENERATED_DIR / f"stock_{hash(script) & 0xFFFFFFFF:08x}.mp4"
@@ -398,7 +334,7 @@ async def build_stock_video(
         words = script.split()
         scenes = [{"query": w, "mood": "neutral", "priority": i + 1}
                   for i, w in enumerate(w for w in words if len(w) > 4 and w.isalpha()) if i < 8]
-    # Bias every scene's Pexels query toward the chosen visual style so the
+    # Bias every scene's stock query toward the chosen visual style so the
     # footage that comes back actually matches the look the user picked.
     mood = VISUAL_STYLE_MOODS.get((visual_style or "").lower())
     if mood:
@@ -439,7 +375,7 @@ async def build_stock_video(
 
     # Step 2: Search clips for the scenes no image claimed (parallel search,
     # then parallel download)
-    used_video_ids = set()
+    used_clip_ids: set[tuple[str, object]] = set()
 
     # Scene index -> (clip path, real duration). Keyed by SCENE rather than
     # accumulated into a flat list because user stills and stock clips are
@@ -452,7 +388,7 @@ async def build_stock_video(
 
     # Phase A: Search all scenes in parallel to find clip URLs
     async def _search_scene(i: int, scene: dict) -> tuple[int, dict | None]:
-        # A scene the user's own image owns costs no Pexels quota and no
+        # A scene the user's own image owns costs no stock quota and no
         # download — it is never searched for in the first place.
         if i in images_by_scene:
             return i, None
@@ -460,9 +396,8 @@ async def build_stock_video(
         if not query:
             return i, None
         try:
-            # Prefer longer clips from Pexels (min_duration filter via query)
-            results = await search_videos(
-                query, orientation=orientation, per_page=15, api_key=pexels_api_key,
+            results = await stock_media.search_clips(
+                query, orientation=orientation, per_page=15,
             )
             # Prefer clips that are at least as long as our target duration
             long_results = [r for r in results if r.get("duration", 0) >= target_per_clip]
@@ -471,12 +406,12 @@ async def build_stock_video(
             if not candidates:
                 # Fallback: try broader search
                 broad_query = " ".join(query.split()[:2]) if len(query.split()) > 2 else query
-                candidates = await search_videos(
-                    broad_query, orientation=orientation, per_page=10, api_key=pexels_api_key,
+                candidates = await stock_media.search_clips(
+                    broad_query, orientation=orientation, per_page=10,
                 )
             if not candidates:
-                candidates = await search_videos(
-                    "cinematic aerial landscape", orientation=orientation, per_page=5, api_key=pexels_api_key,
+                candidates = await stock_media.search_clips(
+                    "cinematic aerial landscape", orientation=orientation, per_page=5,
                 )
             return i, candidates[0] if candidates else None
         except Exception as e:
@@ -486,12 +421,18 @@ async def build_stock_video(
     search_tasks = [_search_scene(i, scene) for i, scene in enumerate(scenes)]
     search_results = await asyncio.gather(*search_tasks)
 
-    # Deduplicate and collect chosen clips
+    # Deduplicate and collect chosen clips. The key is (provider, id): two
+    # providers number their clips independently, so a bare id would drop a
+    # legitimate Pixabay clip for colliding with a Pexels one.
     chosen_clips = []
     for i, chosen in sorted(search_results, key=lambda x: x[0]):
-        if chosen and chosen["id"] not in used_video_ids:
-            used_video_ids.add(chosen["id"])
-            chosen_clips.append((i, chosen))
+        if not chosen:
+            continue
+        clip_key = (chosen.get("provider", ""), chosen.get("id"))
+        if clip_key in used_clip_ids:
+            continue
+        used_clip_ids.add(clip_key)
+        chosen_clips.append((i, chosen))
 
     # Phase B: Download and process all clips in parallel
     async def _download_and_process(i: int, chosen: dict) -> tuple[int, Path | None, float]:
@@ -516,7 +457,7 @@ async def build_stock_video(
             logger.warning(f"Failed to download/process clip {i}: {e}")
             return i, None, 0
 
-    # Run downloads in parallel (limit concurrency to 4 to avoid hammering Pexels)
+    # Run downloads in parallel (limit concurrency to 4 to avoid hammering the provider)
     sem = asyncio.Semaphore(4)
 
     async def _limited_download(i, chosen):

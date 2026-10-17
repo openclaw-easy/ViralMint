@@ -2,9 +2,11 @@
 # Copyright (c) 2025-2026 ViralMint Contributors
 """Video generation strategy helpers for the generator pipeline.
 
-Generates videos using Pexels stock footage matched to script content, with
-the user's own images filling scenes where they supplied any.
-Falls back to Ken Burns image zoom or text-on-background if Pexels is unavailable.
+Generates videos using stock footage (Pexels or Pixabay, whichever is
+configured) matched to script content, with the user's own images filling
+scenes where they supplied any.
+Falls back to Ken Burns image zoom or text-on-background if no stock provider
+is configured.
 Called from GeneratorAgent._generate_video().
 """
 import hashlib
@@ -15,6 +17,7 @@ from backend.config import settings
 from backend.core.ai_provider import get_ai_client
 from backend.core.exceptions import GenerationError
 from backend.core.ws_manager import ws_manager
+from backend.services import stock_media
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +61,8 @@ async def generate_stock_video(
     transition_style: str = None,
     user_images: list[str] | None = None,
 ) -> Path:
-    """Pexels stock footage matched to script keywords, with any images the
-    user brought filling the opening scenes."""
-    pexels_key = settings.PEXELS_API_KEY
+    """Stock footage matched to script keywords, with any images the user
+    brought filling the opening scenes."""
 
     resolved_images: list[Path] = []
     for ref in (user_images or []):
@@ -83,11 +85,11 @@ async def generate_stock_video(
             continue
         resolved_images.append(path)
 
-    # Pexels is what fills the scenes the user did NOT bring an image for. With
-    # no key AND no images there is nothing to build a video out of; with
-    # images we can still build one entirely from them.
-    if not pexels_key and not resolved_images:
-        logger.info("Pexels API key not configured — skipping stock footage tier")
+    # Stock footage is what fills the scenes the user did NOT bring an image
+    # for. With no provider key AND no images there is nothing to build a
+    # video out of; with images we can still build one entirely from them.
+    if not stock_media.configured_providers() and not resolved_images:
+        logger.info("No stock media API key configured — skipping stock footage tier")
         return None
 
     from backend.services.pexels_service import build_stock_video
@@ -101,7 +103,6 @@ async def generate_stock_video(
     return await build_stock_video(
         script=script,
         voice_path=voice_path,
-        pexels_api_key=pexels_key,
         aspect_ratio=aspect_ratio,
         ai_client=ai_client,
         visual_style=visual_style,
