@@ -55,6 +55,10 @@ jobs:
           - os: macos-14
             platform: mac
             frozen_bin: dist/ViralMint.app/Contents/MacOS/ViralMint
+          # Intel Macs (issue #44). The macos-14 build above is arm64-only.
+          - os: macos-15-intel
+            platform: mac-intel
+            frozen_bin: dist/ViralMint.app/Contents/MacOS/ViralMint
           - os: ubuntu-22.04
             platform: linux
             frozen_bin: dist/ViralMint/ViralMint
@@ -91,6 +95,20 @@ jobs:
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Building ViralMint $V for ${{ matrix.platform }}"
+
+      - name: Link OpenSSL statically into cryptography (Intel macOS)
+        # cryptography >= 49 ships no macOS x86_64 wheel, so pip builds it from
+        # source — by default against Homebrew's libssl.3.dylib, which loses to
+        # the Python framework's older libssl.3 at runtime ("Symbol not found:
+        # _SSL_get0_group_name"). Static linking, as the official wheels do,
+        # leaves nothing to collide. No pip cache, so a dynamic wheel built by
+        # an earlier run can't be reused.
+        if: matrix.platform == 'mac-intel'
+        shell: bash
+        run: |
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+          echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
+          echo "PIP_NO_CACHE_DIR=1" >> "$GITHUB_ENV"
 
       - name: Ensure zip is available (Windows)
         # build-app.sh's Windows branch packages with `zip`, which isn't on the
