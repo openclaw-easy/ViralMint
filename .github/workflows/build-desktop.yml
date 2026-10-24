@@ -55,6 +55,10 @@ jobs:
           - os: macos-14
             platform: mac
             frozen_bin: dist/ViralMint.app/Contents/MacOS/ViralMint
+          # Intel Macs (issue #44). The macos-14 build above is arm64-only.
+          - os: macos-15-intel
+            platform: mac-intel
+            frozen_bin: dist/ViralMint.app/Contents/MacOS/ViralMint
           - os: ubuntu-22.04
             platform: linux
             frozen_bin: dist/ViralMint/ViralMint

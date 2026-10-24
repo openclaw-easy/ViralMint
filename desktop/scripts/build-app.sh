@@ -5,7 +5,7 @@
 #   1. Build frontend (Vite) → frontend/dist/
 #   2. Vendor ffprobe → desktop/scripts/vendor/ffprobe
 #   3. Bundle everything (PyInstaller on viralmint.spec) → dist/ViralMint(.app)
-#   4. Package per OS → desktop/release/ViralMint-<ver>-(mac.dmg|mac.zip|linux.tar.gz)
+#   4. Package per OS → desktop/release/ViralMint-<ver>-(mac|mac-intel).(dmg|zip), -linux.tar.gz
 #
 # Inputs (env):
 #   PYTHON_BIN        Python 3.11+ interpreter (default: ./venv/bin/python).
@@ -166,11 +166,16 @@ case "$PLATFORM" in
       codesign --force --deep --sign - "$APP_PATH" || true
     fi
 
-    ZIP_NAME="ViralMint-${VERSION}-mac.zip"
+    # Apple Silicon keeps the plain "-mac" names that existing download links
+    # use; an Intel build (macos-15-intel runner, issue #44) gets "-mac-intel".
+    MAC_SUFFIX="mac"
+    if [[ "$(uname -m)" == "x86_64" ]]; then MAC_SUFFIX="mac-intel"; fi
+
+    ZIP_NAME="ViralMint-${VERSION}-${MAC_SUFFIX}.zip"
     echo "==> Zipping $APP_PATH → $RELEASE_DIR/$ZIP_NAME"
     (cd dist && ditto -c -k --keepParent "ViralMint.app" "$RELEASE_DIR/$ZIP_NAME")
 
-    DMG_NAME="ViralMint-${VERSION}-mac.dmg"
+    DMG_NAME="ViralMint-${VERSION}-${MAC_SUFFIX}.dmg"
     VOLICON="$REPO_ROOT/desktop/build/icon.icns"   # generated from icon.png above
     if command -v create-dmg >/dev/null 2>&1; then
       echo "==> Building DMG via create-dmg"
