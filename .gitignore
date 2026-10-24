@@ -29,9 +29,14 @@ storage/
 #   logs/          — rotating backend logs
 #   whisper-cache/ — HF_HOME for the faster-whisper model downloads
 #   cache/         — settings.CACHE_DIR, if configured
+#   motion/        — Motion Graphics plugin (portable Node, HyperFrames, studio project)
+#   studio/        — Smart Video Studio projects. Anchored: a bare `studio/`
+#                    would also hide frontend/src/components/studio/.
 /logs/
 /whisper-cache/
 /cache/
+/motion/
+/studio/
 
 # Node
 node_modules/
