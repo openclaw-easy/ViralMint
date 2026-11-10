@@ -392,6 +392,11 @@ class WhisperService:
         # of minutes.
         from backend.services.video_utils import probe_duration
         total_duration = await asyncio.to_thread(probe_duration, Path(audio_path))
+        # A thread can't be cancelled, but it can look. Set when the caller
+        # stops waiting (a cancelled job, a wait_for that timed out), so a
+        # decode nobody wants doesn't hold the batch gate until it ends — the
+        # next long transcription used to queue behind it.
+        abandoned = threading.Event()
 
         def _run():
             # Gate only BATCH-length audio (see _SERIALIZE_MIN_SECONDS —
@@ -406,6 +411,8 @@ class WhisperService:
                 )
                 gate.acquire()
             try:
+                if abandoned.is_set():
+                    raise TimeoutError("Transcription abandoned before it started: nobody is waiting for it")
                 segments_gen, info = model.transcribe(
                     str(audio_path),
                     beam_size=1 if timing_only else 5,
@@ -420,6 +427,8 @@ class WhisperService:
                 best_fraction = 0.0
                 for s in segments_gen:
                     segments.append(s)
+                    if abandoned.is_set():
+                        raise TimeoutError("Transcription abandoned: nobody is waiting for it")
                     if on_progress is not None and total_duration > 0:
                         now = time.monotonic()
                         if now - last_emit >= _PROGRESS_EMIT_INTERVAL:
@@ -461,6 +470,9 @@ class WhisperService:
             # decode that never returns can hold a transcription worker, never
             # one of the request path's (backend/core/executors.py).
             return await transcribe_pool.run(_run)
+        except asyncio.CancelledError:
+            abandoned.set()
+            raise
         finally:
             type(self)._last_used = time.monotonic()
             type(self)._arm_evictor()
