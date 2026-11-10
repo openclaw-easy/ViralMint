@@ -64,11 +64,33 @@ pytrends==4.9.2
 # 0.15 broke; our floor is 2026.7.4, where it is fine.
 # Optional at runtime: the service degrades to urllib's fingerprint if it's
 # missing/incompatible (see ytdlp_service._IMPERSONATE_TARGET).
-yt-dlp>=2026.7.4
-curl-cffi>=0.15
+#
+# Floor raised to 2026.10.21: YouTube's new default `tv_samsung` client and an
+# initial-data extraction fix. curl-cffi moved to the 0.16 line with it —
+# 2026.10.21's own `pin-curl-cffi` extra locks 0.16.x and its runtime range is
+# `<0.17`, so 0.16 is the upstream-tested combination. Move the curl-cffi cap
+# together with the yt-dlp release that supports the next line. The 0.15
+# FLOOR rationale above still holds (never below 0.15).
+yt-dlp>=2026.10.21
+curl-cffi>=0.16,<0.17
+
+# certifi — explicit SECURITY floor (GHSA-6q48-6c7w-9gw2: older certifi
+# bundles leave HTTPS open to MITM; yt-dlp's `default` extra requires
+# certifi>=2026.10.19). We install yt-dlp WITHOUT extras, so nothing else would
+# raise it; PyInstaller bundles whatever certifi the build resolved as the CA
+# store for yt-dlp, requests and httpx.
+certifi>=2026.10.19
 
 # Transcription
 faster-whisper
+# PyAV — faster-whisper's audio decoder, CAPPED <19. PyAV 19 removed
+# `av.open(..., metadata_errors=)`, which faster-whisper 1.2.1 (latest) still
+# passes in decode_audio, so EVERY transcription raises TypeError — captions,
+# transcripts and clip picking all go dark. faster-whisper declares only
+# `av>=11`, so an unpinned resolve (a fresh install, CI's desktop build) lands
+# on 19. av 17.0.1 and 18.x accept the kwarg; tests/test_whisper_av_compat.py
+# notices a drift. Lift only when a faster-whisper release stops passing it.
+av>=17,<19
 
 # Video generation
 # This used to be `moviepy==1.0.3`, which nothing imported — it was four
