@@ -49,8 +49,83 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   tools use the provider keys you set in Settings; every request needs the
   token, which the page only shows on the computer running ViralMint. No
   MCP tool uploads or publishes anything.
+- **Smart Video projects can hold up to 40 scenes (was 18).** Longer
+  scripts are no longer squeezed into 18 scenes; a script that already fit is
+  packed exactly as before.
+- **A Cancel button on every running tool page**, and beside Merge Clips'
+  progress, worded the same as in Activity. Cancelling keeps what you typed.
+- **Optional faster renders.** `VIDEO_INTERMEDIATE_PRESET` (e.g.
+  `ultrafast`) speeds up the intermediate encodes of a Smart Video render
+  and `VIDEO_ENCODE_PRESET` sets the final one; the defaults are unchanged.
+  Every render now logs one line saying where its time went.
+
+### Changed
+- **Smart Video editor:** the player gets more room, every clip card has one
+  clear Use / In use button, using a clip no longer reshuffles the clip list,
+  and switching the voice away and back keeps the takes you already recorded.
+  On a phone the editor fits the screen: the media panel folds into a
+  drawer, the top bar takes two rows and Render stays visible.
+- **Vertical videos get portrait stock first.** A 9:16 project asks Pexels
+  for portrait clips, prefers a native vertical among the best matches unless
+  it is off-topic, and no longer zooms a landscape clip in twice. A
+  rate-limited stock search says so in the plan instead of coming back empty.
+- **Renders download stock clips while the voices record**, never inside an
+  encode slot, so a long project spends less time waiting on the network.
+- **Long free-voice (Edge) scripts are voiced in parts.** Progress shows
+  "part N of M", only a part that fails is retried, a stalled voice stops
+  with a reason instead of hanging, and Cancel stops it at once.
+- **Dependencies:** yt-dlp 2026.10.21 (and the self-update asks for at least
+  that), curl-cffi 0.16, a certifi security floor, ffmpeg pinned to 7.1, and
+  PyAV capped below 19 so transcription keeps working on fresh installs.
 
 ### Fixed
+- **A temporary download error is retried, not reported as "Video
+  unavailable".** The permanent-error check matched single words, and "age" is
+  inside "webpage" — so yt-dlp's common "Unable to download webpage: HTTP
+  Error 500" stopped the download at once as unavailable. Only real phrases
+  (age-restricted, private video, not available in your country, …) end a
+  download now, and words in the link itself are ignored.
+- **A video link that also names a playlist downloads just that video.** A
+  YouTube `watch?v=…&list=…` link or a Music mix used to go down the channel
+  path and fetch five videos from the playlist.
+- **Channel links list the channel's videos, not its tabs**, and a channel
+  listing that fails says why (private, rate-limited, timed out) instead of
+  "No videos found". Channel analysis lists only the 30 videos it reads.
+- **A download counts as done only when a non-empty file is on disk.** A
+  persistent 403 or sign-in wall now fails quickly instead of retrying every
+  format, and the sign-in message names the site that asked.
+- **Cancelling a download stops it.** Retries, format fallbacks and the AI
+  link repair all check for the cancel instead of running to the end.
+- **The AI link repair runs only for errors that point at a bad link** —
+  never for rate limits, sign-in walls or network failures — and the link it
+  suggests must be a public http(s) address.
+- **Two scout results for the same video no longer share one file**, so
+  deleting one download no longer removes the other's video.
+- **The Transcript Downloader finds Chinese (`zh-Hans`/`zh-Hant`) and
+  regional auto-generated captions** under their language.
+- **A job that fails always tells the app.** Chat cards, the Activity panel
+  and busy buttons no longer keep showing a failed scout, analysis,
+  generation or upload as running, and the job poll corrects any job whose
+  final update was missed.
+- **The macOS tray no longer crashes seconds after launch on macOS 27.**
+  Every tray update now runs on the main thread, and quitting from Activity
+  Monitor exits cleanly.
+- **News scouting works on clean installs and packaged builds.** Its
+  extractors (trafilatura, feedparser) were never declared as dependencies;
+  they are now, their data files ship, and the desktop build fails instead
+  of quietly shipping without a module or data file.
+- **English Smart Video captions show your script's words**, not Whisper's
+  mis-hearing of them. Takes recorded earlier are re-timed once.
+- **On a new install, the first voice take's word timings wait for the
+  Whisper download** instead of timing out.
+- **Cancelling a Smart Video job while it waits in the queue no longer
+  leaves the project locked** until a restart.
+- **The free voice says "know" and "debut"**, not "okay, now" and "done but".
+- **Cancelling a transcription frees Whisper for the next one** straight away.
+- **Connecting a Telegram bot that already sends to a webhook is refused**
+  with a plain explanation, instead of silently cutting the other service
+  off.
+- **Info notices show as info**, not as warnings.
 - **A downloaded video's transcript is in the video's own language.** The
   downloader fetches subtitles in ten languages — for a video without
   creator subtitles that means YouTube's machine translations — and then
