@@ -41,8 +41,8 @@ async def run_scout(job_id: str, niche: str, platforms: list[str], user_id: str 
         logger.info("TASK DONE  scout | job=%s", job_id[:8])
     except Exception as e:
         logger.error(f"TASK FAIL  scout | job={job_id[:8]}: {e}", exc_info=True)
-        from backend.agents.job_helper import update_job_status
-        await update_job_status(job_id, "failed", error_message=str(e))
+        from backend.agents.job_helper import fail_job
+        await fail_job(job_id, str(e), user_id)
 
 
 async def run_download(job_id: str, scout_result_ids: list[str], user_id: str = "local"):
@@ -61,8 +61,8 @@ async def run_download(job_id: str, scout_result_ids: list[str], user_id: str = 
         logger.info("TASK DONE  download | job=%s", job_id[:8])
     except Exception as e:
         logger.error(f"TASK FAIL  download | job={job_id[:8]}: {e}", exc_info=True)
-        from backend.agents.job_helper import update_job_status
-        await update_job_status(job_id, "failed", error_message=str(e))
+        from backend.agents.job_helper import fail_job
+        await fail_job(job_id, str(e), user_id)
 
 
 async def run_generate(
@@ -99,8 +99,8 @@ async def run_generate(
         logger.info("TASK DONE  generate | job=%s", job_id[:8])
     except Exception as e:
         logger.error(f"TASK FAIL  generate | job={job_id[:8]}: {e}", exc_info=True)
-        from backend.agents.job_helper import update_job_status
-        await update_job_status(job_id, "failed", error_message=str(e))
+        from backend.agents.job_helper import fail_job
+        await fail_job(job_id, str(e), user_id)
 
 
 async def _settle_if_cancelled(job_id: str, err: Exception, what: str) -> bool:
@@ -1145,7 +1145,8 @@ async def run_suggest_clips(
             await update_job_status(job_id, "cancelled", current_step="Cancelled")
             return
         logger.error("TASK FAILED suggest_clips | job=%s: %s", job_id[:8], e, exc_info=True)
-        await update_job_status(job_id, "failed", error_message=str(e))
+        from backend.agents.job_helper import fail_job
+        await fail_job(job_id, str(e), user_id)
 
 
 async def run_extract_clips(
@@ -1417,8 +1418,8 @@ async def run_reanalyze(job_id: str, video_id: str, whisper_quality: str = "bala
         logger.info("TASK DONE  reanalyze | job=%s", job_id[:8])
     except Exception as e:
         logger.error(f"TASK FAIL  reanalyze | job={job_id[:8]}: {e}", exc_info=True)
-        from backend.agents.job_helper import update_job_status
-        await update_job_status(job_id, "failed", error_message=str(e))
+        from backend.agents.job_helper import fail_job
+        await fail_job(job_id, str(e), user_id)
 
 
 async def run_upload(
@@ -1437,8 +1438,8 @@ async def run_upload(
         logger.info("TASK DONE  upload | job=%s", job_id[:8])
     except Exception as e:
         logger.error(f"TASK FAIL  upload | job={job_id[:8]}: {e}", exc_info=True)
-        from backend.agents.job_helper import update_job_status
-        await update_job_status(job_id, "failed", error_message=str(e))
+        from backend.agents.job_helper import fail_job
+        await fail_job(job_id, str(e), user_id)
 
 
 _task_semaphore = asyncio.Semaphore(3)  # max 3 concurrent heavy tasks
@@ -1524,8 +1525,8 @@ async def run_news_scout(
         logger.info("TASK DONE  news_scout | job=%s", job_id[:8])
     except Exception as e:
         logger.error("TASK FAIL  news_scout | job=%s: %s", job_id[:8], e, exc_info=True)
-        from backend.agents.job_helper import update_job_status
-        await update_job_status(job_id, "failed", error_message=str(e))
+        from backend.agents.job_helper import fail_job
+        await fail_job(job_id, str(e), user_id)
 
 
 async def run_news_save(
@@ -1604,8 +1605,8 @@ async def run_news_save(
         logger.info("TASK DONE  news_save | job=%s saved=%d", job_id[:8], len(saved_ids))
     except Exception as e:
         logger.error("TASK FAIL  news_save | job=%s: %s", job_id[:8], e, exc_info=True)
-        from backend.agents.job_helper import update_job_status
-        await update_job_status(job_id, "failed", error_message=str(e))
+        from backend.agents.job_helper import fail_job
+        await fail_job(job_id, str(e), user_id)
 
 
 async def run_studio_author(job_id: str, brief: dict, user_id: str = "local", **kwargs):

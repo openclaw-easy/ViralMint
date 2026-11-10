@@ -114,6 +114,34 @@ const useAppStore = create((set, get) => ({
     return { activeJobs: rest }
   }),
 
+  // Poll-driven safety net for a MISSED terminal WS event. A job whose
+  // job_failed / job_complete never arrived (socket blip, or a runner that
+  // wrote "failed" without announcing it) stayed "running" here — a chat
+  // card, the Activity pill, a busy button — until a page reload. useJobs
+  // calls this on every poll. Quiet by design — state only, no toasts or chat
+  // lines (the live WS handlers own those; a reconnect must not replay a
+  // burst of them).
+  //   rows    — job rows the poll just saw (any status)
+  //   liveIds — Set of ids the server reports as running/pending/queued, from
+  //             an AUTHORITATIVE (uncapped) listing; null when the caller only
+  //             has a capped window, and then a missing row is never treated
+  //             as gone (it may just be outside the window)
+  reconcileActiveJobs: (rows, liveIds = null, now = Date.now()) => {
+    const state = get()
+    const byId = new Map((rows || []).map((r) => [r.id, r]))
+    Object.values(state.activeJobs).forEach((job) => {
+      if (job.status !== "running") return
+      // Grace: a just-dispatched job's row may not be queryable yet.
+      if (now - (job.startedAt || 0) < 15000) return
+      if (liveIds && liveIds.has(job.jobId)) return
+      const row = byId.get(job.jobId)
+      if (row?.status === "failed") state.failJob(job.jobId, row.error_message)
+      else if (row?.status === "success") state.completeJob(job.jobId)
+      else if (row?.status === "cancelled") state.removeJob(job.jobId)
+      else if (!row && liveIds) state.removeJob(job.jobId)
+    })
+  },
+
 
   // Settings
   settings: null,

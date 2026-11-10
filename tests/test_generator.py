@@ -368,14 +368,17 @@ class TestRun:
     async def test_no_script_and_no_source_fails(self):
         factory, _ = _session_cm([_result_scalar_one(None)])  # user settings
         with patch.object(gen_mod, "AsyncSessionLocal", factory), \
-             patch.object(gen_mod, "update_job_status", AsyncMock()) as ujs, \
+             patch.object(gen_mod, "update_job_status", AsyncMock()), \
+             patch.object(gen_mod, "fail_job", AsyncMock()) as fj, \
              patch.object(gen_mod.ws_manager, "send", AsyncMock()), \
              patch.object(gen_mod.ws_manager, "send_progress", AsyncMock()):
             await GeneratorAgent().run(
                 job_id="g1", downloaded_video_id=None, custom_script=None,
                 user_id="local",
             )
-        assert ujs.await_args_list[-1].args[1] == "failed"
+        # Failed AND announced (fail_job), so the UI stops showing it running.
+        fj.assert_awaited_once_with(
+            "g1", "No script provided and no source video to generate from", "local")
 
     @pytest.mark.asyncio
     async def test_custom_script_happy_path_saves_row(self):
@@ -481,7 +484,8 @@ class TestRun:
         factory, _ = _session_cm([_result_scalar_one(None)])
         script = "Another perfectly acceptable custom script for the pipeline."
         with patch.object(gen_mod, "AsyncSessionLocal", factory), \
-             patch.object(gen_mod, "update_job_status", AsyncMock()) as ujs, \
+             patch.object(gen_mod, "update_job_status", AsyncMock()), \
+             patch.object(gen_mod, "fail_job", AsyncMock()) as fj, \
              patch.object(gen_mod.ws_manager, "send", AsyncMock()), \
              patch.object(gen_mod.ws_manager, "send_progress", AsyncMock()), \
              patch.object(GeneratorAgent, "_generate_voice",
@@ -495,4 +499,4 @@ class TestRun:
                 caption_enabled=False, music_enabled=False, user_id="local",
                 start_image="/tmp/still.png",
             )
-        assert ujs.await_args_list[-1].args[1] == "failed"
+        fj.assert_awaited_once_with("g3", "Video generation failed — check API keys", "local")
