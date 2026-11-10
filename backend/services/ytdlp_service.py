@@ -317,7 +317,9 @@ def _try_update_ytdlp() -> bool:
         # fails on modern YouTube). Bounded, pip errors loudly instead of
         # installing a silently-broken downloader.
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp>=2026.7.4"],
+            # Same floor as requirements.txt (2026.10.21: YouTube initial-data
+            # fix + tv_samsung default client) — raise them together.
+            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp>=2026.10.21"],
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode == 0:

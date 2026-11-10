@@ -491,7 +491,7 @@ _MEDIA_TYPES = {
     ".mp4": "video/mp4", ".webm": "video/webm", ".mkv": "video/x-matroska",
     ".mov": "video/quicktime", ".avi": "video/x-msvideo",
     ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
-    ".ogg": "audio/ogg", ".flac": "audio/flac",
+    ".ogg": "audio/ogg", ".flac": "audio/flac", ".aac": "audio/aac",
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
     ".webp": "image/webp", ".gif": "image/gif",
     # Tool outputs are not all media: subtitle exports, transcripts and
