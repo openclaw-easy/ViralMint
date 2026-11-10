@@ -155,6 +155,7 @@ class DownloadAgent:
                     output_dir=settings.VIDEOS_DIR,
                     filename=stem,
                     extract_audio=True,
+                    job_id=job_id,   # a cancel stops the retry ladder
                 )
 
                 # Save to DB
@@ -242,7 +243,8 @@ class DownloadAgent:
                 # may be wrong (see url_fix_worth_trying; network errors, bot
                 # walls and rate limits never qualify), and only for a row
                 # that loaded (no URL to fix otherwise).
-                if sr is not None and url_fix_worth_trying(first_error):
+                if (sr is not None and url_fix_worth_trying(first_error)
+                        and not await job_cancelled(job_id)):
                     try:
                         from backend.core.ai_retry import ai_fix_url
                         from backend.models.user_settings import UserSettings
@@ -253,7 +255,7 @@ class DownloadAgent:
                             user_settings = us_result.scalar_one_or_none()
 
                         corrected_url = await ai_fix_url(sr.video_url, str(first_error), user_settings)
-                        if corrected_url:
+                        if corrected_url and not await job_cancelled(job_id):
                             logger.info(f"Retrying download with AI-corrected URL: {corrected_url}")
                             # Same stem: the first attempt's thread has returned
                             # (abandonments never get here), so the stem is
@@ -263,6 +265,7 @@ class DownloadAgent:
                                 output_dir=settings.VIDEOS_DIR,
                                 filename=stem or _download_stem(sr.video_id),
                                 extract_audio=True,
+                                job_id=job_id,
                             )
                             # Save to DB with full metadata (same as success path above)
                             async with AsyncSessionLocal() as db:

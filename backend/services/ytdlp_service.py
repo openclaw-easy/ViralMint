@@ -1018,12 +1018,65 @@ async def _await_with_stall_guard(
             task.cancel()
 
 
+# How often a backoff looks up from its sleep, and how long one look may take.
+_CANCEL_POLL_S = 1
+_CANCEL_CHECK_TIMEOUT_S = 5
+
+
+async def _job_is_cancelled(job_id: str | None) -> bool:
+    """`job_cancelled`, reading nothing for a download with no job."""
+    if not job_id:
+        return False
+    from backend.agents.job_helper import job_cancelled
+    return await job_cancelled(job_id)
+
+
+def _job_cancelled_from_thread(job_id: str | None, loop) -> bool:
+    """`job_cancelled`, for the download worker thread: the read runs on the loop.
+
+    Bounded and never raises, because this thread may have been abandoned by a
+    stall (see backend/core/executors.py) and can outlive a stopped or closed
+    loop: a read that can't finish counts as "not cancelled", as a DB error
+    does in `job_cancelled`. No job means no read, so job-less downloads are
+    unchanged.
+    """
+    if not job_id or loop is None:
+        return False
+    coro = _job_is_cancelled(job_id)
+    try:
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+    except Exception:  # noqa: BLE001 — the loop is gone
+        coro.close()
+        return False
+    try:
+        return future.result(timeout=_CANCEL_CHECK_TIMEOUT_S) is True
+    except Exception:  # noqa: BLE001 — a timeout or a failed read: keep going
+        future.cancel()
+        return False
+
+
+def _backoff_sleep(seconds: float, job_id: str | None, loop) -> None:
+    """Sleep out a retry backoff, ending at once if the job is cancelled. The
+    caller's next attempt then finds the cancel and stops the ladder."""
+    if not job_id:
+        time.sleep(seconds)
+        return
+    remaining = seconds
+    while remaining > 0:
+        if _job_cancelled_from_thread(job_id, loop):
+            return
+        step = min(_CANCEL_POLL_S, remaining)
+        time.sleep(step)
+        remaining -= step
+
+
 async def download_video(
     url: str,
     output_dir: Path = None,
     filename: str = None,
     extract_audio: bool = True,
     options: dict | None = None,
+    job_id: str | None = None,
 ) -> dict:
     """
     Download a video using yt-dlp.
@@ -1045,6 +1098,12 @@ async def download_video(
     always the one requested (a cap falls through to the uncapped rungs rather
     than erroring). Surfacing it is what lets a UI say "you asked for 4K, this
     source only had 1080p" instead of implying the cap was honoured.
+
+    `job_id`: when given, a cancel of that job stops the ladder — no further
+    attempt, format rung, cookie refresh or audio re-download starts, and a
+    backoff wakes within a second. The transfer in flight can't be
+    interrupted. The ladder ends with the error it already has (wrapped as
+    "Download cancelled: …"), so the cancelled job keeps its real reason.
     """
     if output_dir is None:
         output_dir = settings.VIDEOS_DIR
@@ -1074,6 +1133,9 @@ async def download_video(
     if cooldown > 0:
         logger.info(f"Rate-limit cooldown active — waiting {cooldown:.0f}s before downloading {url[:60]}")
         await asyncio.sleep(cooldown)
+
+    # The worker thread reads the job's cancel flag through the loop.
+    loop = asyncio.get_running_loop()
 
     def _download():
         """Run one download, sweeping part-files on EVERY exit path.
@@ -1156,6 +1218,16 @@ async def download_video(
             _cleanup_partial_files(output_dir, file_stem)
             raise _terminal_download_error(error, url) from error
 
+        def _stop_if_cancelled(error):
+            """End the ladder when the user has cancelled, with the error we
+            already have, so the caller keeps it as the reason. Not through
+            _classify_and_raise: a cancel is not a yt-dlp failure, so it must
+            not count toward the auto-update streak."""
+            if error is not None and _job_cancelled_from_thread(job_id, loop):
+                logger.info("Download of %s stops here — job %s was cancelled", url[:80], job_id[:8])
+                _cleanup_partial_files(output_dir, file_stem)
+                raise DownloadError(f"Download cancelled: {error}") from error
+
         # ── Main download with multi-layer retry ────────────────────────────
         last_error = None
         # Whether the per-download optional postprocessors (embed thumbnail /
@@ -1172,6 +1244,8 @@ async def download_video(
         # a specific quality — see download_options.format_chain() on why an
         # unrequested download must keep the module-level chain verbatim.
         for fmt_idx, fmt in enumerate(_format_chain):
+            if fmt_idx > 0:
+                _stop_if_cancelled(last_error)
             if stop_format_chain:
                 logger.info("Skipping format fallback (HTTP 403 survived the cookie drop)")
                 break
@@ -1179,6 +1253,8 @@ async def download_video(
 
             # Up to 2 attempts per format (original + 1 retry for transient errors)
             for attempt in range(2):
+                if attempt > 0:
+                    _stop_if_cancelled(last_error)
                 try:
                     video_path, info = _attempt_download(video_opts)
                     duration = info.get("duration", 0)
@@ -1236,8 +1312,7 @@ async def download_video(
                             # signed URLs, which clears an expired one.
                             logger.warning("HTTP 403 without cookies, retrying once in 5s: %s", e)
                             _cleanup_partial_files(output_dir, file_stem)
-                            import time as _time
-                            _time.sleep(5)
+                            _backoff_sleep(5, job_id, loop)
                             continue
                         # Still refused, with no cookies left to drop: that
                         # was the only recovery a 403 has. A different format
@@ -1256,11 +1331,11 @@ async def download_video(
                         # every remaining attempt and format rung.
                         browser = _detect_cookie_browser() if attempt == 0 else None
                         if browser:
+                            _stop_if_cancelled(e)      # before a possible Keychain prompt
                             logger.warning(f"Bot detection triggered, retrying with {browser} cookies")
                             _cleanup_partial_files(output_dir, file_stem)
                             _apply_cookies(video_opts)
-                            import time as _time
-                            _time.sleep(3)
+                            _backoff_sleep(3, job_id, loop)
                             continue  # Retry with cookies
                         else:
                             _cleanup_partial_files(output_dir, file_stem)
@@ -1270,8 +1345,7 @@ async def download_video(
                     if _is_transient_error(error_str) and attempt == 0:
                         logger.warning(f"Transient error (attempt {attempt + 1}), retrying in 5s: {e}")
                         _cleanup_partial_files(output_dir, file_stem)
-                        import time as _time
-                        _time.sleep(5)
+                        _backoff_sleep(5, job_id, loop)
                         continue  # Retry
 
                     # ── Format-related errors: try next format ────
@@ -1315,8 +1389,7 @@ async def download_video(
                     if attempt == 0:
                         logger.warning(f"Download error (attempt 1), retrying in 5s: {e}")
                         _cleanup_partial_files(output_dir, file_stem)
-                        import time as _time
-                        _time.sleep(5)
+                        _backoff_sleep(5, job_id, loop)
                         continue
 
                     # Second attempt also failed — try next format
@@ -1381,7 +1454,7 @@ async def download_video(
         audio_dir.mkdir(parents=True, exist_ok=True)
         if extract_audio and video_path and video_path.exists():
             audio_path = _extract_audio_locally(video_path, audio_dir, file_stem_resolved)
-            if not audio_path:
+            if not audio_path and not _job_cancelled_from_thread(job_id, loop):
                 # Fallback: re-download audio from YouTube
                 logger.info("Local audio extraction failed, falling back to yt-dlp download")
                 audio_opts = {

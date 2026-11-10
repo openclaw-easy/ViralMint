@@ -532,6 +532,7 @@ async def _download_single_video_to_db(job_id: str, url: str, title: str, user_i
             extract_audio=True,
             # None for every pre-existing caller → byte-identical download.
             options=options,
+            job_id=job_id,   # a cancel stops the retry ladder
         )
     except (DownloadStalledError, DownloadTimeoutError):
         # ABANDONED, not failed: the worker thread is still running and still
@@ -544,7 +545,8 @@ async def _download_single_video_to_db(job_id: str, url: str, title: str, user_i
         # for errors a different URL could fix (shared gate with the scout
         # path; it used to fire on rate limits, bot checks, private videos).
         from backend.agents.downloader import url_fix_worth_trying
-        if not url_fix_worth_trying(first_error):
+        from backend.agents.job_helper import job_cancelled
+        if not url_fix_worth_trying(first_error) or await job_cancelled(job_id):
             raise
         from backend.core.ai_retry import ai_fix_url
         from backend.models.user_settings import UserSettings
@@ -557,8 +559,8 @@ async def _download_single_video_to_db(job_id: str, url: str, title: str, user_i
             user_settings = result.scalar_one_or_none()
 
         corrected_url = await ai_fix_url(url, str(first_error), user_settings)
-        if not corrected_url:
-            raise first_error  # AI couldn't help — raise original error
+        if not corrected_url or await job_cancelled(job_id):
+            raise first_error  # AI couldn't help, or the user stopped it meanwhile
 
         logger.info(f"Retrying download with AI-corrected URL: {corrected_url}")
         dl_result = await download_video(
@@ -567,6 +569,7 @@ async def _download_single_video_to_db(job_id: str, url: str, title: str, user_i
             filename=video_id,
             extract_audio=True,
             options=options,
+            job_id=job_id,
         )
         # If this also fails, the exception propagates naturally
         url = corrected_url  # Use corrected URL for DB records
