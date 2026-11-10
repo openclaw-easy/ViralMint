@@ -98,10 +98,10 @@ def test_split_keeps_the_query_and_restales_only_the_first_half():
 
 
 def test_scene_cap_on_split_and_insert():
-    d = make_doc([f"Line number {i} is long enough to split." for i in range(18)])
-    with pytest.raises(StudioOpError, match="at most 18"):
+    d = make_doc([f"Line number {i} is long enough to split." for i in range(sd.SCENE_MAX)])
+    with pytest.raises(StudioOpError, match=f"at most {sd.SCENE_MAX}"):
         run(d, {"op": "split_scene", "uid": "s1"})
-    with pytest.raises(StudioOpError, match="at most 18"):
+    with pytest.raises(StudioOpError, match=f"at most {sd.SCENE_MAX}"):
         run(d, {"op": "insert_scene", "after_uid": "s1", "line": ""})
 
 

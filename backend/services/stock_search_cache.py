@@ -147,7 +147,7 @@ def note_refusal(source: str) -> None:
         seen.append(source)
 
 
-# In-flight dedup: a plan fires up to 18 scene
+# In-flight dedup: a plan fires up to 12 scene
 # searches concurrently and continuity makes identical queries common — on a
 # cache miss, every duplicate used to hit the API. One task per key; joiners
 # await it and get a private copy.

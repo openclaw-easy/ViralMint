@@ -237,7 +237,7 @@ def test_a_planning_failure_fails_the_job_and_releases_the_claim(client, env, mo
 
 
 def test_a_script_that_does_not_fit_is_refused_before_any_job(client, env):
-    long_script = " ".join(("word " * 79).strip() + "." for _ in range(20))
+    long_script = " ".join(("word " * 79).strip() + "." for _ in range(42))   # > studio_doc.SCENE_MAX (40) full scenes
     before = len(client.get("/api/studio/projects", params={"limit": 200}).json()["items"])
     r = client.post("/api/generate/stock", json={"script": long_script})
     assert r.status_code == 400

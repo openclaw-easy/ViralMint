@@ -98,7 +98,7 @@ def test_create_and_read_a_project(client):
 
 def test_create_refuses_empty_and_oversized_scripts(client):
     assert client.post("/api/studio/projects", json={"start": {"script": "  "}}).status_code == 400
-    huge = " ".join(("word " * 70).strip() + "." for _ in range(30))
+    huge = " ".join(("word " * 70).strip() + "." for _ in range(44))   # > SCENE_MAX (40) full scenes
     r = client.post("/api/studio/projects", json={"start": {"script": huge}})
     assert r.status_code == 400 and "too long" in r.json()["detail"]["message"]
 

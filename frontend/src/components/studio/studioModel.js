@@ -267,7 +267,7 @@ export function visualSourceLabel(visual) {
 // studio_ops (is_fixed_visual) rule for rule, so Home's live
 // scene list and the editor's labels match what the server builds.
 
-export const SCENE_MAX = 18
+export const SCENE_MAX = 40   // studio_doc.SCENE_MAX
 
 const normalise = (x) => String(x || "").replace(/\s+/g, " ").trim()
 
@@ -293,6 +293,11 @@ function splitLong(sentence) {
 // a space. SCENE_TARGET_MIN_CHARS matches the backend (was 80 here vs 60
 // there — Home promised 14 scenes and the editor built 18, 2026-10-13).
 export const SCENE_TARGET_MIN_CHARS = 60
+// studio_doc._pace_target: pack as if into 18 scenes, but never aim past ~8 s a
+// scene — a longer script gets more scenes (up to SCENE_MAX), not longer ones.
+export const SCENE_PACE_SCENES = 18
+export const SCENE_TARGET_SOFT_MAX = 130
+const paceTarget = (total) => Math.max(SCENE_TARGET_MIN_CHARS, Math.min(Math.ceil(total / SCENE_PACE_SCENES), SCENE_TARGET_SOFT_MAX))
 export const CJK_CHAR_WEIGHT = 4.3
 const CJK_CHAR = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af\u3000-\u303f\uff00-\uffef]/
 const isCjk = (ch) => !!ch && CJK_CHAR.test(ch)
@@ -310,7 +315,7 @@ export function joinSentences(a, b) {
 
 function groupScenes(sentences, target) {
   const total = sentences.reduce((a, s) => a + spokenUnits(s), 0)
-  const t = target ?? Math.max(SCENE_TARGET_MIN_CHARS, Math.ceil(total / 18))
+  const t = target ?? paceTarget(total)
   const maxSentences = t > 160 ? 99 : 2
   const lines = []
   let cur = ""
@@ -331,9 +336,12 @@ function groupScenes(sentences, target) {
 export function planLines(script) {
   const parts = splitSentences(script).flatMap(splitLong)
   let lines = groupScenes(parts)
-  let target = Math.max(SCENE_TARGET_MIN_CHARS, Math.ceil(parts.reduce((a, x) => a + spokenUnits(x), 0) / 18))
+  const total = parts.reduce((a, x) => a + spokenUnits(x), 0)
+  let target = paceTarget(total)
+  // fits the 18-scene pacing → that packing exactly; longer → up to SCENE_MAX
+  const limit = total > SCENE_PACE_SCENES * SCENE_TARGET_SOFT_MAX ? SCENE_MAX : SCENE_PACE_SCENES
   const ceiling = LINE_MAX * CJK_CHAR_WEIGHT
-  while (lines.length > SCENE_MAX && target < ceiling) {
+  while (lines.length > limit && target < ceiling) {
     target = Math.min(ceiling, Math.ceil(target * 1.25))
     lines = groupScenes(parts, target)
   }

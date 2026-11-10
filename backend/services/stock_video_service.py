@@ -52,6 +52,8 @@ MIN_HEIGHT_LANDSCAPE = 720
 # How many heuristic-ranked candidates per scene the planner keeps (and the
 # AI re-rank sees).
 MAX_CANDIDATES_PER_SCENE = 8
+# Scenes searched at once by search_all_scenes.
+SEARCH_SCENE_CONCURRENCY = 12
 
 
 def _slug_words(pexels_url: str) -> list[str]:
@@ -381,7 +383,16 @@ async def search_all_scenes(
             logger.warning("Search failed for scene %d %r: %s", i, queries[0], e)
             return i, []
 
-    results = await asyncio.gather(*(_search_scene(i, s) for i, s in enumerate(scenes)))
+    # ≤ SEARCH_SCENE_CONCURRENCY scenes search at once (each may call two
+    # providers, and a portrait Pexels search may top up once): a 40-scene plan
+    # would otherwise burst well over 80 calls and trip the providers' rate limits.
+    slots = asyncio.Semaphore(SEARCH_SCENE_CONCURRENCY)
+
+    async def _bounded(i: int, scene: dict) -> tuple[int, list[dict]]:
+        async with slots:
+            return await _search_scene(i, scene)
+
+    results = await asyncio.gather(*(_bounded(i, s) for i, s in enumerate(scenes)))
     return sorted(results, key=lambda x: x[0])
 
 
@@ -719,9 +730,10 @@ Return a JSON array only (no markdown), exactly {n_chunks} entries in chunk orde
     try:
         resp = await ai_client.chat(
             messages=[{"role": "user", "content": prompt}],
-            # ~100 tokens/scene plus headroom; a flat budget truncated the
-            # JSON at 13+ scenes.
-            max_tokens=min(4000, max(1500, 300 + 120 * n_chunks)),
+            # ~150 tokens/scene plus headroom; a flat budget truncated the
+            # JSON at 13+ scenes, and 4000 cut it at ~25. 6300 holds 40 scenes
+            # (studio_doc.SCENE_MAX).
+            max_tokens=min(6300, max(1500, 300 + 150 * n_chunks)),
         )
         clean = extract_json_text(resp)
         try:
