@@ -82,12 +82,27 @@ def encode_slots() -> asyncio.Semaphore:
 class _Clock:
     """Where a render's wall time goes: one log line at the end, step by step,
     plus per-scene totals (they overlap, so they sum past the visuals step).
-    Render speed is tuned from these, not from guesses."""
+    Render speed is tuned from these, not from guesses.
+
+    Scene sums (each a sum over scenes, so they overlap):
+      download      stock bytes on the wire (prefetched or not)
+      fetch         what a scene WAITED for its visual at the encode's door — a
+                    clip fetched during the voices step waits ~0 here
+      fetch_b       the second shot's download
+      encode_wait   queueing for an encode slot
+      encode        the slot held: normalise, fit, join
+      fetch_exposed wall seconds of the visuals step with a scene waiting for its
+                    visual and NO encode running — the fetch time that really
+                    reaches the clock; the one number this is tuned by.
+    """
 
     def __init__(self) -> None:
         self._start = self._last = time.monotonic()
         self.steps: list[tuple[str, float]] = []
         self.sums: dict[str, float] = {}
+        self._waiting = self._encoding = 0
+        self._watching = False
+        self._exposed_since: float | None = None
 
     def mark(self, name: str) -> None:
         now = time.monotonic()
@@ -97,10 +112,92 @@ class _Clock:
     def add(self, name: str, seconds: float) -> None:
         self.sums[name] = self.sums.get(name, 0.0) + seconds
 
+    # ── fetch/encode overlap ──
+    def watch(self) -> None:
+        """From here on, a scene waiting for its visual while no encode runs is
+        exposed fetch (the visuals step; a wait hidden behind the voices step is not)."""
+        self._watching = True
+        self.sums.setdefault("fetch_exposed", 0.0)     # always on the line, even at 0
+        self._settle()
+
+    def waiting(self, delta: int) -> None:
+        self._waiting += delta
+        self._settle()
+
+    def encoding(self, delta: int) -> None:
+        self._encoding += delta
+        self._settle()
+
+    def _settle(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        exposed = self._watching and self._waiting > 0 and self._encoding == 0
+        if exposed and self._exposed_since is None:
+            self._exposed_since = now
+        elif not exposed and self._exposed_since is not None:
+            self.add("fetch_exposed", now - self._exposed_since)
+            self._exposed_since = None
+
     def line(self) -> str:
+        now = time.monotonic()
+        if self._exposed_since is not None:         # close an open window (a failed render)
+            self.add("fetch_exposed", now - self._exposed_since)
+            self._exposed_since = None
         steps = " ".join(f"{n}={t:.1f}" for n, t in self.steps)
         sums = " ".join(f"{n}={t:.1f}" for n, t in sorted(self.sums.items()))
-        return f"total={time.monotonic() - self._start:.1f}s | {steps} | scene sums: {sums}"
+        return f"total={now - self._start:.1f}s | {steps} | scene sums: {sums}"
+
+
+class _StockFetcher:
+    """A render's stock downloads: ONE per clip (provider + id), however many
+    scenes bind it, started as early as the document allows (a bound clip
+    needs no take, so before the voices step) and awaited by its scene at the
+    encode's door. The files live in the render's scratch dir, so the reuse is
+    within one render. A cache across renders would keep clip FILES, which
+    stock_search_cache's license note rules out (search responses are cached
+    there; never footage)."""
+
+    def __init__(self, slots: asyncio.Semaphore, clock: _Clock) -> None:
+        self._slots, self._clock = slots, clock
+        self._tasks: dict[str, asyncio.Task] = {}
+
+    @staticmethod
+    def key(asset: dict | None, url: str) -> str:
+        provider, pid = (asset or {}).get("provider"), (asset or {}).get("provider_id")
+        return f"{provider}:{pid}" if provider and pid else f"url:{url}"
+
+    def start(self, key: str, url: str, dest: Path) -> asyncio.Task:
+        """The clip's download, begun now if nobody has (`dest` is the first
+        asker's; later askers share that file — stock sources are only read)."""
+        task = self._tasks.get(key)
+        if task is None:
+            task = self._tasks[key] = asyncio.ensure_future(self._download(url, dest))
+        return task
+
+    async def fetch(self, key: str, url: str, dest: Path) -> Path:
+        # Shielded: a scene cancelled by a sibling's failure must not take a
+        # download another scene shares down with it; `cancel()` at the
+        # render's end is what stops what is still on the wire.
+        return await asyncio.shield(self.start(key, url, dest))
+
+    async def _download(self, url: str, dest: Path) -> Path:
+        from backend.services import studio_media
+        began = time.monotonic()
+        try:
+            async with self._slots:
+                await studio_media.download(url, dest)
+        finally:
+            self._clock.add("download", time.monotonic() - began)
+        return dest
+
+    def cancel(self) -> None:
+        """At the render's end: stop what is still on the wire; a prefetched clip
+        whose scene never got to ask (the render failed first) has its error
+        taken, so it is logged nowhere as 'never retrieved'."""
+        for task in self._tasks.values():
+            if not task.done():
+                task.cancel()
+            elif not task.cancelled():
+                task.exception()
 
 
 # Voice takes still recording after their render was cancelled (kept alive:
@@ -255,6 +352,7 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
     details: dict[str, asyncio.Task] = {}
     clock = _Clock()
     scene_count = 0
+    fetcher: _StockFetcher | None = None
     try:
         await progress(2, "Checking the project")
         row = await store.get_project(project_id, user_id)
@@ -279,7 +377,29 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
         landing: list[dict] = []
         await gate()
 
+        # Cheap blockers first: a missing clip fails the render BEFORE any
+        # voice is recorded or any scene starts downloading or encoding.
+        for i, scene in enumerate(scenes):
+            visual = scene["visual"]
+            if visual["kind"] == "user_clip":
+                record = store.find_asset_record(assets, (visual.get("asset") or {}).get("asset_id"))
+                if record is None or studio_media.asset_file(project_id, record) is None:
+                    raise StudioError(f"Scene {i + 1}'s clip is missing from the project — add it again.")
+
         clock.mark("setup")
+        # Stock clips start downloading NOW, under the voices step: a bound clip
+        # needs no take, and the download was otherwise the serial head of the
+        # visuals step.
+        download_slots = asyncio.Semaphore(max(1, min(16, int(settings.STOCK_DOWNLOAD_SLOTS or 5))))
+        fetcher = _StockFetcher(download_slots, clock)
+
+        def stock_dest(i: int) -> Path:
+            return scratch / f"stock_{i:02d}.mp4"
+
+        for i, scene in enumerate(scenes):
+            bound = scene["visual"].get("asset") if scene["visual"]["kind"] == "stock" else None
+            if bound and bound.get("download_url"):
+                fetcher.start(_StockFetcher.key(bound, bound["download_url"]), bound["download_url"], stock_dest(i))
         # ── 2. takes ──
         await progress(8, "Voices")
         spec = vts.VoiceSpec.from_settings(s)
@@ -337,28 +457,21 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
         clock.mark("voices")
         # ── 3. visuals ──
         await progress(20, "Gathering visuals")
-        # Cheap blockers first: a missing clip fails the render BEFORE any
-        # scene starts downloading or encoding.
-        for i, scene in enumerate(scenes):
-            visual = scene["visual"]
-            if visual["kind"] == "user_clip":
-                record = store.find_asset_record(assets, (visual.get("asset") or {}).get("asset_id"))
-                if record is None or studio_media.asset_file(project_id, record) is None:
-                    raise StudioError(f"Scene {i + 1}'s clip is missing from the project — add it again.")
-        download_slots = asyncio.Semaphore(5)
         provenance: dict[int, dict] = {}
+        clock.watch()
 
         async def stock_file(i: int, query: str | None, bound: dict | None) -> tuple[Path, str]:
-            dest = scratch / f"stock_{i:02d}.mp4"
+            dest = stock_dest(i)
             tried: set[str] = set()
             if bound and bound.get("download_url"):
                 try:
-                    async with download_slots:
-                        await studio_media.download(bound["download_url"], dest)
+                    # Usually on disk already (prefetched under the voices step).
+                    path = await fetcher.fetch(_StockFetcher.key(bound, bound["download_url"]),
+                                               bound["download_url"], dest)
                     provenance[i] = {"scene": i, "source": bound.get("provider"), "id": bound.get("provider_id"),
                                      "creator": bound.get("creator"), "license": bound.get("license"),
                                      "fetched_at": time.time()}
-                    return dest, "video"
+                    return path, "video"
                 except Exception as e:  # noqa: BLE001 — replaced below, with a warning
                     logger.warning("studio render: bound clip for scene %d failed: %s", i + 1, e)
                     tried.add(str(bound.get("provider_id")))
@@ -372,14 +485,15 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
                 if candidate["provider_id"] in tried:
                     continue
                 try:
-                    async with download_slots:
-                        await studio_media.download(candidate["download_url"], dest)
+                    path = await fetcher.fetch(_StockFetcher.key(candidate, candidate["download_url"]),
+                                               candidate["download_url"], scratch / f"stock_{i:02d}_{len(tried):02d}.mp4")
                 except Exception:  # noqa: BLE001 — try the next candidate
+                    tried.add(str(candidate["provider_id"]))
                     continue
                 provenance[i] = {"scene": i, "source": candidate["provider"], "id": candidate["provider_id"],
                                  "creator": candidate.get("creator"), "license": candidate.get("license"),
                                  "fetched_at": time.time()}
-                return dest, "video"
+                return path, "video"
             raise StudioError(f"Scene {i + 1} has no usable footage — replace its visual and render again.")
 
         async def visual_file(i: int, scene: dict) -> tuple[Path, str]:
@@ -396,50 +510,74 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
 
         async def scene_clip(i: int, scene: dict) -> Path:
             began = time.monotonic()
-            source, media = await visual_file(i, scene)
+            # The visual and its second shot arrive together, BEFORE the encode
+            # slot: the alternate used to download inside the slot, parking an
+            # encoder on the network for every long stock scene.
+            shot = shots.get(scene["uid"])
+            clock.waiting(+1)
+            try:
+                (source, media), second = await _run_all([
+                    visual_file(i, scene),
+                    _second_source(i, shot) if shot else _none(),
+                ])
+            finally:
+                clock.waiting(-1)
             clock.add("fetch", time.monotonic() - began)
             out = scratch / f"scene_{i:02d}.mp4"
             queued = time.monotonic()
             async with encode_slots():
                 clock.add("encode_wait", time.monotonic() - queued)
+                clock.encoding(+1)
                 encoding = time.monotonic()
-                if media == "image":
-                    await generate_single_kenburns_clip(source, durations[i], out, target_w=width, target_h=height,
-                                                        grade_filters=_color_grade_filters(lut))
-                else:
-                    shot = shots.get(scene["uid"])
-                    second = await _second_source(i, shot) if shot else None
-                    first_len = shot["cut"] if second else durations[i]
-                    norm_path = scratch / f"norm_{i:02d}.mp4"
-                    normalised = Path(await trim_and_normalize_clip(source, first_len, width, height,
-                                                                    output_path=norm_path, lut_preset=lut))
-                    fit = scene["visual"].get("fit") or "loop"
-                    if second is None:
-                        await asyncio.to_thread(_fit_or_keep, normalised, norm_path, durations[i], fit, out)
-                    else:
-                        a = scratch / f"scene_{i:02d}_a.mp4"
-                        b_norm = scratch / f"norm_{i:02d}_b.mp4"
-                        b = scratch / f"scene_{i:02d}_b.mp4"
-                        rest = durations[i] - first_len
-                        await asyncio.to_thread(_fit_or_keep, normalised, norm_path, first_len, fit, a)
-                        b_normalised = Path(await trim_and_normalize_clip(second, rest, width, height,
-                                                                          output_path=b_norm, lut_preset=lut))
-                        await asyncio.to_thread(_fit_or_keep, b_normalised, b_norm, rest, fit, b)
-                        await asyncio.to_thread(_join_shots, a, b, out)
-                clock.add("encode", time.monotonic() - encoding)
+                try:
+                    return await encode_scene(i, scene, source, media, second, out)
+                finally:
+                    clock.encoding(-1)
+                    clock.add("encode", time.monotonic() - encoding)
+
+        async def encode_scene(i: int, scene: dict, source, media: str, second: Path | None, out: Path) -> Path:
+            """Inside the encode slot: the scene's clip from its fetched visual(s)."""
+            if media == "image":
+                await generate_single_kenburns_clip(source, durations[i], out, target_w=width, target_h=height,
+                                                    grade_filters=_color_grade_filters(lut))
+                return out
+            shot = shots.get(scene["uid"])
+            first_len = shot["cut"] if second else durations[i]
+            norm_path = scratch / f"norm_{i:02d}.mp4"
+            normalised = Path(await trim_and_normalize_clip(source, first_len, width, height,
+                                                            output_path=norm_path, lut_preset=lut))
+            fit = scene["visual"].get("fit") or "loop"
+            if second is None:
+                await asyncio.to_thread(_fit_or_keep, normalised, norm_path, durations[i], fit, out)
+            else:
+                a = scratch / f"scene_{i:02d}_a.mp4"
+                b_norm = scratch / f"norm_{i:02d}_b.mp4"
+                b = scratch / f"scene_{i:02d}_b.mp4"
+                rest = durations[i] - first_len
+                await asyncio.to_thread(_fit_or_keep, normalised, norm_path, first_len, fit, a)
+                b_normalised = Path(await trim_and_normalize_clip(second, rest, width, height,
+                                                                  output_path=b_norm, lut_preset=lut))
+                await asyncio.to_thread(_fit_or_keep, b_normalised, b_norm, rest, fit, b)
+                await asyncio.to_thread(_join_shots, a, b, out)
             return out
+
+        async def _none() -> None:
+            return None
 
         async def _second_source(i: int, shot: dict) -> Path | None:
             """The alternate's file, or None (the scene keeps one shot — a
             missing second clip is never worth failing a render)."""
-            dest = scratch / f"stock_{i:02d}_b.mp4"
+            url = shot["asset"]["download_url"]
+            began = time.monotonic()
             try:
-                async with download_slots:
-                    await studio_media.download(shot["asset"]["download_url"], dest)
-                return dest
+                return await fetcher.fetch(_StockFetcher.key(shot["asset"], url), url, scratch / f"stock_{i:02d}_b.mp4")
+            except asyncio.CancelledError:
+                raise
             except Exception as e:  # noqa: BLE001
                 logger.info("studio render: second shot for scene %d skipped: %s", i + 1, e)
                 return None
+            finally:
+                clock.add("fetch_b", time.monotonic() - began)
 
         clips = await _run_all([scene_clip(i, sc) for i, sc in enumerate(scenes)])
         clock.mark("visuals")
@@ -553,6 +691,8 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
         for task in details.values():
             if not task.done():
                 task.cancel()           # a take's timings are cached by whoever finishes them later
+        if fetcher is not None:
+            fetcher.cancel()            # a clip still on the wire, for a render that is over
         shutil.rmtree(scratch, ignore_errors=True)
 
 

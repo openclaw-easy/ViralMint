@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     # decides the delivered quality: faster renders on a slow machine, at the
     # cost of more scratch disk while rendering.
     VIDEO_INTERMEDIATE_PRESET: str = ""
+    # Stock clips a Video Studio render downloads at once. 5 fits a home
+    # connection (five clips of up to 250 MB); a render fetches every scene's
+    # clip AND its second shot up front, under the voices step.
+    STOCK_DOWNLOAD_SLOTS: int = 5
 
     # ── Upload OAuth ──────────────────────────────────
     YOUTUBE_CLIENT_ID: str = ""
