@@ -689,9 +689,9 @@ class GeneratorAgent:
             # Loaded in a thread because a first-time load downloads the model.
             #
             # Deliberately NOT timing_only=True (greedy + VAD): the recognised
-            # text is only replaced by the real script when that script is
-            # CJK-dominant (see caption_service.align_script_to_segments), so
-            # for a Latin script the ASR text IS what gets burned in — a
+            # text is replaced by the real script only when the two match well
+            # enough (caption_service.align_script_to_segments fails open below
+            # 0.5 similarity), and then the ASR text IS what gets burned in — a
             # cheaper decode would degrade the visible captions, not just the
             # discarded text.
             await asyncio.to_thread(whisper_service.load, "fast")

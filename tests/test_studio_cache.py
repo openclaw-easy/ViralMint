@@ -67,6 +67,47 @@ def test_peaks_and_words_are_computed_once_and_cached(dirs, monkeypatch):
     assert "peaks" in json.loads((dirs / "voice" / f"{k}.json").read_text())
 
 
+def test_words_timed_by_an_older_aligner_are_re_timed_once(dirs, monkeypatch):
+    """A sidecar's words are stamped with WORDS_VERSION. Words cached before the
+    Latin script alignment ("Did you know" captioned "Did you pay?") are re-timed
+    once instead of showing the old mis-hearing on every render of that take."""
+    k = key("old-words")
+    write_take(dirs, k, created_at=time.time())
+    meta_path = dirs / "voice" / f"{k}.json"
+    old = {**json.loads(meta_path.read_text()), "text": "Did you know this?", "peaks": [0.5],
+           "words": [{"word": "Did", "start": 0.0, "end": 0.2}, {"word": "you", "start": 0.2, "end": 0.4},
+                     {"word": "pay?", "start": 0.4, "end": 0.8}]}
+    meta_path.write_text(json.dumps(old))
+    fresh = [{"word": "Did", "start": 0.0, "end": 0.2}, {"word": "you", "start": 0.2, "end": 0.4},
+             {"word": "know", "start": 0.4, "end": 0.6}, {"word": "this?", "start": 0.6, "end": 0.8}]
+    calls = []
+
+    async def timings(path, text):
+        calls.append(text)
+        return fresh
+
+    monkeypatch.setattr(vts, "_word_timings", timings)
+    first = asyncio.run(vts.take_details(k))
+    assert first["words"] == fresh and calls == ["Did you know this?"]
+    assert json.loads(meta_path.read_text())["words_version"] == vts.WORDS_VERSION
+    again = asyncio.run(vts.take_details(k))
+    assert again["words"] == fresh and len(calls) == 1       # re-timed once, then cached
+
+
+def test_a_failed_re_time_keeps_the_old_words(dirs, monkeypatch):
+    k = key("old-words-2")
+    write_take(dirs, k, created_at=time.time())
+    meta_path = dirs / "voice" / f"{k}.json"
+    stale = [{"word": "Hello", "start": 0.0, "end": 0.5}]
+    meta_path.write_text(json.dumps({**json.loads(meta_path.read_text()), "peaks": [0.5], "words": stale}))
+
+    async def broken(path, text):
+        return None
+    monkeypatch.setattr(vts, "_word_timings", broken)
+    assert asyncio.run(vts.take_details(k))["words"] == stale
+    assert "words_version" not in json.loads(meta_path.read_text())     # tried again next time
+
+
 def test_whisper_failure_still_gives_peaks(dirs, monkeypatch):
     k = key("no-whisper")
     write_take(dirs, k, created_at=time.time())

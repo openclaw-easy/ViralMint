@@ -481,8 +481,10 @@ def align_script_to_segments(script: str, segments: list[dict]) -> list[dict]:
     too, which also improves the phrase-aware line grouping.
 
     Scope + safety:
-    - Applied only when the script is CJK-dominant. Latin ASR of our own TTS
-      is near-perfect, and char-level alignment could split Latin words.
+    - CJK-dominant scripts align char by char (below). Every other script
+      aligns WORD by word (`_align_latin_words`) — Latin ASR of our own TTS is
+      good but not perfect ("Did you know" was captioned "Did you pay?" on a
+      real render), and char-level alignment would split words.
     - Fail-open: if overall similarity < 0.5 (audio doesn't actually match
       the script — shouldn't happen for our own TTS) the original segments
       are returned untouched.
@@ -495,8 +497,10 @@ def align_script_to_segments(script: str, segments: list[dict]) -> list[dict]:
     # CJK-dominant gate.
     stripped = "".join(script.split())
     cjk = _cjk_char_count(stripped)
-    if not stripped or cjk < len(stripped) * 0.5:
+    if not stripped:
         return segments
+    if cjk < len(stripped) * 0.5:
+        return _align_latin_words(script, segments)
 
     # Flatten timed words; remember (segment_idx, word_idx) per flat index.
     flat: list[dict] = []
@@ -580,6 +584,112 @@ def align_script_to_segments(script: str, segments: list[dict]) -> list[dict]:
         "Caption text realigned to the true script (%d chars, similarity %.2f)",
         len(script_chars), sm.ratio(),
     )
+    return out or segments
+
+
+_WORD_KEY_RE = re.compile(r"[^\w']+", re.UNICODE)
+
+
+def _word_key(text: str) -> str:
+    """A word's comparison form: lowercase, punctuation stripped."""
+    return _WORD_KEY_RE.sub("", text.lower())
+
+
+def _align_latin_words(script: str, segments: list[dict]) -> list[dict]:
+    """Word-level twin of the CJK char alignment: each timed ASR word takes
+    the script's word(s) it was heard as, keeping Whisper's timing.
+
+    - equal / one-for-one replace: the script word replaces the ASR word.
+    - ASR split one script word ("thirty seconds" for "30s"): the script word
+      spans the ASR words' time.
+    - ASR merged script words ("icecream" for "ice cream"): the ASR word's
+      time is shared evenly between them.
+    - a script word the ASR missed shares the previous word's time (or the
+      next one's at the very start) — it is never dropped from the captions.
+    - ASR words with no script counterpart contribute nothing.
+    Fail-open below 0.5 word similarity, like the CJK path.
+    """
+    import difflib
+
+    flat: list[dict] = []
+    for si, seg in enumerate(segments):
+        for w in seg.get("words") or []:
+            text = (w.get("word") or w.get("text") or "")
+            if text.strip() and w.get("start") is not None and w.get("end") is not None:
+                flat.append({"seg": si, "start": float(w["start"]), "end": float(w["end"]),
+                             "key": _word_key(text)})
+    # A token with no letters or digits ("—", "🔥", "...") is never heard, so it
+    # can't be matched: it rides with the word before it (or after, at the start).
+    tokens: list[str] = []
+    lead = ""
+    for t in script.split():
+        if not _word_key(t):
+            if tokens:
+                tokens[-1] = f"{tokens[-1]} {t}"
+            else:
+                lead = f"{lead}{t} "
+            continue
+        tokens.append(lead + t)
+        lead = ""
+    if not flat or not tokens:
+        return segments
+    sm = difflib.SequenceMatcher(a=[w["key"] for w in flat], b=[_word_key(t) for t in tokens],
+                                 autojunk=False)
+    if sm.ratio() < 0.5:
+        logger.warning("Caption script alignment skipped — ASR/script word similarity %.2f too low",
+                       sm.ratio())
+        return segments
+
+    out_words: list[dict] = []          # {seg, start, end, word}
+    pending: list[str] = []             # script words before the first timed word
+
+    def share(seg: int, start: float, end: float, words: list[str]) -> None:
+        step = (end - start) / len(words)
+        for k, t in enumerate(words):
+            out_words.append({"seg": seg, "start": round(start + k * step, 3),
+                              "end": round(end if k == len(words) - 1 else start + (k + 1) * step, 3),
+                              "word": t})
+
+    def emit(seg: int, start: float, end: float, words: list[str]) -> None:
+        nonlocal pending
+        share(seg, start, end, pending + words)
+        pending = []
+
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag in ("equal", "replace"):
+            a, b = i2 - i1, j2 - j1
+            if b >= a:      # each ASR word carries one or more script words
+                for k in range(a):
+                    w = flat[i1 + k]
+                    emit(w["seg"], w["start"], w["end"],
+                         tokens[j1 + k * b // a: j1 + (k + 1) * b // a])
+            else:           # each script word spans one or more ASR words
+                for k in range(b):
+                    first, last = flat[i1 + k * a // b], flat[i1 + (k + 1) * a // b - 1]
+                    emit(first["seg"], first["start"], last["end"], [tokens[j1 + k]])
+        elif tag == "insert":
+            missed = tokens[j1:j2]
+            if not out_words:
+                pending.extend(missed)
+                continue
+            prev = out_words.pop()
+            share(prev["seg"], prev["start"], prev["end"], [prev["word"], *missed])
+        # "delete": ASR words with no script counterpart contribute nothing.
+
+    words_by_seg: dict[int, list[dict]] = {}
+    for w in out_words:
+        words_by_seg.setdefault(w["seg"], []).append(
+            {"word": " " + w["word"], "start": w["start"], "end": w["end"]})
+    out: list[dict] = []
+    for si, seg in enumerate(segments):
+        words = words_by_seg.get(si, [])
+        if not words:
+            if not (seg.get("words") or []):
+                out.append(seg)         # never aligned (no word timings) — keep it
+            continue
+        out.append({**seg, "text": "".join(w["word"] for w in words).strip(), "words": words})
+    logger.info("Caption text realigned to the true script (%d words, similarity %.2f)",
+                len(tokens), sm.ratio())
     return out or segments
 
 
