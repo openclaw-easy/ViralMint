@@ -15,6 +15,7 @@ from pathlib import Path
 from backend.config import settings
 from backend.core.exceptions import VideoGenerationError
 from backend.services import safe_zones
+from backend.services.video_utils import encode_preset
 
 logger = logging.getLogger(__name__)
 
@@ -1390,7 +1391,7 @@ async def burn_captions(
             "-i", str(video_path),
             "-vf", ass_filter(ass_path),
             "-c:a", "copy",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:v", "libx264", "-preset", encode_preset(), "-crf", "23",
             str(output_path),
         ]
         try:

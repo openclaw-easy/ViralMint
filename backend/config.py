@@ -96,6 +96,18 @@ class Settings(BaseSettings):
     # "pexels" or "pixabay" pins one and never falls back.
     STOCK_MEDIA_PROVIDER: str = "auto"
 
+    # ── Video encoding ────────────────────────────────
+    # x264 preset for the render path's encodes ("fast" by default; "veryfast"
+    # is ~1.8x faster at the same CRF and slightly larger files).
+    VIDEO_ENCODE_PRESET: str = "fast"
+    # Preset for INTERMEDIATE clips a later pass re-encodes (Video Studio scene
+    # clips, before the caption burn / final encode). Empty = the call site's
+    # own preset and CRF (the default). Set it to "ultrafast" and the
+    # intermediates are written near-lossless (CRF 16), so the one final encode
+    # decides the delivered quality: faster renders on a slow machine, at the
+    # cost of more scratch disk while rendering.
+    VIDEO_INTERMEDIATE_PRESET: str = ""
+
     # ── Upload OAuth ──────────────────────────────────
     YOUTUBE_CLIENT_ID: str = ""
     YOUTUBE_CLIENT_SECRET: str = ""

@@ -31,8 +31,8 @@ from backend.core.prompt_rules import extract_json_text
 from backend.services import stock_search_cache
 from backend.services.stock_media import _truncate_query
 from backend.services.ffmpeg_service import ffmpeg_error
-from backend.services.video_utils import (cover_vf, demote_off_topic, on_topic, orientation_fit_adjustment,
-                                          probe_dimensions, topic_words)
+from backend.services.video_utils import (cover_vf, demote_off_topic, intermediate_x264, on_topic,
+                                          orientation_fit_adjustment, probe_dimensions, topic_words)
 
 logger = logging.getLogger(__name__)
 
@@ -491,7 +491,7 @@ def _kenburns_crop(target_w: int, target_h: int, duration: float,
 def _encode_args(clip_path, duration: float, vf: str, output_path) -> list[str]:
     return [
         "ffmpeg", "-y", "-i", str(clip_path), "-t", str(duration), "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:v", "libx264", *intermediate_x264("20"),
         "-pix_fmt", "yuv420p", "-r", "30", "-an", str(output_path),
     ]
 

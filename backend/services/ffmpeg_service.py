@@ -9,7 +9,8 @@ from pathlib import Path
 from uuid import uuid4
 from backend.config import settings
 from backend.core.exceptions import VideoGenerationError
-from backend.services.video_utils import cover_vf, ff_filter_path, probe_dimensions, probe_duration
+from backend.services.video_utils import (cover_vf, encode_preset, ff_filter_path, intermediate_x264, probe_dimensions,
+                                          probe_duration)
 
 
 def _tmp(name: str) -> Path:
@@ -137,7 +138,7 @@ async def _stitch_xfade(
             + inputs
             + ["-filter_complex", ";".join(filter_parts)]
             + ["-map", "[outv]"]
-            + ["-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p"]
+            + ["-c:v", "libx264", "-preset", encode_preset(), "-crf", "20", "-pix_fmt", "yuv420p"]
             + [str(output_path)]
         )
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -443,7 +444,7 @@ async def extract_clip(
                 "-i", str(video_path),
                 "-t", str(duration),
                 "-filter_complex", vf,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:v", "libx264", "-preset", encode_preset(), "-crf", "20",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "128k",
                 str(output_path),
@@ -454,7 +455,7 @@ async def extract_clip(
                 "-ss", str(start),
                 "-i", str(video_path),
                 "-t", str(duration),
-                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:v", "libx264", "-preset", encode_preset(), "-crf", "20",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "128k",
                 str(output_path),
@@ -852,7 +853,7 @@ async def generate_kenburns_video(
                 "-i", str(img_path),
                 "-vf", _kenburns_image_vf(
                     effect, frames_per_image, out_w, out_h, fps),
-                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:v", "libx264", "-preset", encode_preset(), "-crf", "20",
                 "-t", str(per_image),
                 str(clip_path),
             ]
@@ -901,7 +902,7 @@ async def generate_kenburns_video(
                 + inputs
                 + ["-filter_complex", ";".join(filter_parts)]
                 + ["-map", map_label]
-                + ["-c:v", "libx264", "-preset", "fast", "-crf", "20"]
+                + ["-c:v", "libx264", "-preset", encode_preset(), "-crf", "20"]
                 + [str(final_video)]
             )
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -1005,7 +1006,7 @@ async def generate_single_kenburns_clip(
                 "ffmpeg", "-y",
                 "-i", str(image_path),
                 "-vf", filtergraph,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:v", "libx264", *intermediate_x264("20"),
                 "-t", str(duration),
                 "-an",
                 str(output_path),
@@ -1157,7 +1158,7 @@ async def apply_auto_zoom(
             "ffmpeg", "-y",
             "-i", str(video_path),
             "-vf", vf,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:v", "libx264", "-preset", encode_preset(), "-crf", "20",
             "-c:a", "copy",
             str(output_path),
         ]
@@ -1324,7 +1325,7 @@ async def convert_aspect_ratio(
         common = [
             "ffmpeg", "-y", "-i", str(video_path),
             filter_flag, vf,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-c:v", "libx264", "-preset", encode_preset(), "-crf", "20",
             # yuv420p like every other re-encode in this module. Without it a
             # 10-bit source exported a file Safari and iOS refuse to play.
             "-pix_fmt", "yuv420p",

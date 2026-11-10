@@ -709,3 +709,46 @@ def test_a_missing_ai_title_falls_back_to_the_project_title(client, env, monkeyp
     assert video.title == project["title"] != "Untitled Video"
     assert video.youtube_title == project["title"] and video.metadata_status == "fallback"
     assert titles == [project["title"]]
+
+
+@pytest.mark.parametrize("captions", [False, True])
+def test_fast_intermediates_get_exactly_one_real_final_encode(client, env, monkeypatch, captions):
+    """VIDEO_INTERMEDIATE_PRESET=ultrafast: scene clips are near-lossless
+    intermediates. With captions on the burn is the deliverable's encode; with
+    captions off the render adds one, so the file a user downloads is never an
+    ultrafast intermediate."""
+    from backend.config import settings
+    from backend.services import studio_render as sr
+    from backend.services.output_validator import validate_output
+    monkeypatch.setattr(settings, "VIDEO_INTERMEDIATE_PRESET", "ultrafast")
+    calls = []
+    real = sr._final_encode
+    monkeypatch.setattr(sr, "_final_encode", lambda src, out: calls.append(src) or real(src, out))
+    project = make_project(client, captions=captions)
+    assert start_render(client, project).status_code == 200
+    run(env)
+    (video,) = generated_for(project["id"])
+    assert calls == ([] if captions else [calls[0]])
+    check = asyncio.run(validate_output(Path(video.video_path), expect={"audio": True}))
+    assert check.ok and check.has_audio
+
+
+def test_the_default_render_adds_no_extra_encode(client, env, monkeypatch):
+    from backend.services import studio_render as sr
+    calls = []
+    monkeypatch.setattr(sr, "_final_encode", lambda src, out: calls.append(src) or src)
+    project = make_project(client, captions=False)
+    assert start_render(client, project).status_code == 200
+    run(env)
+    assert calls == [] and len(generated_for(project["id"])) == 1
+
+
+def test_the_render_logs_where_its_time_went(client, env, caplog):
+    import logging
+    project = make_project(client)
+    assert start_render(client, project).status_code == 200
+    with caplog.at_level(logging.INFO, logger="backend.services.studio_render"):
+        run(env)
+    line = next(r.getMessage() for r in caplog.records if "studio render timing" in r.getMessage())
+    for step in ("setup=", "voices=", "visuals=", "stitch=", "captions=", "persist=", "encode=", "fetch="):
+        assert step in line

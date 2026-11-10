@@ -79,6 +79,30 @@ def encode_slots() -> asyncio.Semaphore:
     return sem
 
 
+class _Clock:
+    """Where a render's wall time goes: one log line at the end, step by step,
+    plus per-scene totals (they overlap, so they sum past the visuals step).
+    Render speed is tuned from these, not from guesses."""
+
+    def __init__(self) -> None:
+        self._start = self._last = time.monotonic()
+        self.steps: list[tuple[str, float]] = []
+        self.sums: dict[str, float] = {}
+
+    def mark(self, name: str) -> None:
+        now = time.monotonic()
+        self.steps.append((name, now - self._last))
+        self._last = now
+
+    def add(self, name: str, seconds: float) -> None:
+        self.sums[name] = self.sums.get(name, 0.0) + seconds
+
+    def line(self) -> str:
+        steps = " ".join(f"{n}={t:.1f}" for n, t in self.steps)
+        sums = " ".join(f"{n}={t:.1f}" for n, t in sorted(self.sums.items()))
+        return f"total={time.monotonic() - self._start:.1f}s | {steps} | scene sums: {sums}"
+
+
 # Voice takes still recording after their render was cancelled (kept alive:
 # a take is cached when it finishes, so the next render re-uses it).
 _inflight_takes: set[asyncio.Future] = set()
@@ -86,7 +110,11 @@ _inflight_takes: set[asyncio.Future] = set()
 
 # ── ffmpeg helpers (argv lists, never a shell) ─────────────────────────────
 
-_ENCODE = ["-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-r", "30"]
+def _encode() -> list[str]:
+    """Scene-clip encode args (an intermediate: the caption burn or the final
+    encode re-encodes it)."""
+    from backend.services.video_utils import intermediate_x264
+    return ["-an", "-c:v", "libx264", *intermediate_x264("20", "veryfast"), "-pix_fmt", "yuv420p", "-r", "30"]
 
 
 OUTRO_HOLD_S = 0.85
@@ -127,9 +155,9 @@ def fit_clip(src: Path, target: float, fit: str, out: Path) -> Path:
         raise StudioError("A scene's clip has no duration.")
     t = f"{target:.3f}"
     if have >= target - 0.04:
-        _ff(["-i", str(src), "-t", t, *_ENCODE, str(out)])
+        _ff(["-i", str(src), "-t", t, *_encode(), str(out)])
     elif fit == "freeze":
-        _ff(["-i", str(src), "-vf", f"tpad=stop_mode=clone:stop_duration={target - have + 0.1:.3f}", "-t", t, *_ENCODE, str(out)])
+        _ff(["-i", str(src), "-vf", f"tpad=stop_mode=clone:stop_duration={target - have + 0.1:.3f}", "-t", t, *_encode(), str(out)])
     elif fit == "slow":
         rate = max(0.75, have / target)
         remainder = max(0.0, target - have / rate)
@@ -137,12 +165,12 @@ def fit_clip(src: Path, target: float, fit: str, out: Path) -> Path:
         # 7.1: after setpts, 7.1's tpad adds NOTHING, so a slowed clip came out
         # 2.67s for a 3.5s slot and the scene fell out of sync with its voice
         # (8.x pads fine). Normalising timestamps first makes both agree; 30
-        # is the render rate _ENCODE writes anyway.
+        # is the render rate _encode() writes anyway.
         vf = f"setpts=PTS/{rate:.4f}" + (
             f",fps=30,tpad=stop_mode=clone:stop_duration={remainder + 0.1:.3f}" if remainder > 0.01 else "")
-        _ff(["-i", str(src), "-vf", vf, "-t", t, *_ENCODE, str(out)])
+        _ff(["-i", str(src), "-vf", vf, "-t", t, *_encode(), str(out)])
     else:
-        _ff(["-stream_loop", "-1", "-i", str(src), "-t", t, *_ENCODE, str(out)])
+        _ff(["-stream_loop", "-1", "-i", str(src), "-t", t, *_encode(), str(out)])
     return out
 
 
@@ -225,6 +253,8 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
     scratch = settings.TMP_DIR / f"studio_render_{job_id[:8]}"
     scratch.mkdir(parents=True, exist_ok=True)
     details: dict[str, asyncio.Task] = {}
+    clock = _Clock()
+    scene_count = 0
     try:
         await progress(2, "Checking the project")
         row = await store.get_project(project_id, user_id)
@@ -245,9 +275,11 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
         lut = resolve_visual_style(s["visual_style"])["lut"]
         gap = float(s["tail_gap_s"])
         scenes = doc["scenes"]
+        scene_count = len(scenes)
         landing: list[dict] = []
         await gate()
 
+        clock.mark("setup")
         # ── 2. takes ──
         await progress(8, "Voices")
         spec = vts.VoiceSpec.from_settings(s)
@@ -302,6 +334,7 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
         total = sum(durations)
         await gate()
 
+        clock.mark("voices")
         # ── 3. visuals ──
         await progress(20, "Gathering visuals")
         # Cheap blockers first: a missing clip fails the render BEFORE any
@@ -362,9 +395,14 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
             return await stock_file(i, visual.get("query"), visual.get("asset"))
 
         async def scene_clip(i: int, scene: dict) -> Path:
+            began = time.monotonic()
             source, media = await visual_file(i, scene)
+            clock.add("fetch", time.monotonic() - began)
             out = scratch / f"scene_{i:02d}.mp4"
+            queued = time.monotonic()
             async with encode_slots():
+                clock.add("encode_wait", time.monotonic() - queued)
+                encoding = time.monotonic()
                 if media == "image":
                     await generate_single_kenburns_clip(source, durations[i], out, target_w=width, target_h=height,
                                                         grade_filters=_color_grade_filters(lut))
@@ -388,6 +426,7 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
                                                                           output_path=b_norm, lut_preset=lut))
                         await asyncio.to_thread(_fit_or_keep, b_normalised, b_norm, rest, fit, b)
                         await asyncio.to_thread(_join_shots, a, b, out)
+                clock.add("encode", time.monotonic() - encoding)
             return out
 
         async def _second_source(i: int, shot: dict) -> Path | None:
@@ -403,6 +442,7 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
                 return None
 
         clips = await _run_all([scene_clip(i, sc) for i, sc in enumerate(scenes)])
+        clock.mark("visuals")
         if landing:
             try:
                 await store.write_ops(project_id, landing, if_revision=None, internal=True, user_id=user_id)
@@ -420,6 +460,7 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
             if pause > 0:
                 items.append((take.path, pause))
         narration = await concat_audio(items, scratch / "narration.mp3")
+        clock.mark("narration")
 
         captions_file = None
         caption_status = "skipped"
@@ -447,7 +488,9 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
                                                         hook_text=sd.hook_title(doc),
                                                         hook_duration=hook_duration)
 
+        clock.mark("timings")
         stitched = await stitch_with_style(list(clips), scratch / "stitched.mp4", s["transition"])
+        clock.mark("stitch")
         await progress(72, "Mixing audio")
         audio = narration
         music = s["music"]
@@ -467,6 +510,8 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
         # everything else in the feed.
         audio = await render_post.deliver_loudness(audio, scratch / "delivered.mp3", warn)
         final = Path(await add_audio_to_video(stitched, audio, scratch / "merged.mp4"))
+        merged = final
+        clock.mark("audio")
         if captions_file is not None:
             burned = Path(await burn_captions(final, captions_file, scratch / "captioned.mp4"))
             if burned == final:
@@ -475,8 +520,15 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
             else:
                 final = burned
                 caption_status = "applied"
+        from backend.services.video_utils import intermediates_are_fast
+        if final == merged and intermediates_are_fast():
+            # Nothing re-encoded the fast intermediates (captions off, or the
+            # burn fell back): give the deliverable its one real encode.
+            final = await asyncio.to_thread(_final_encode, final, scratch / "final.mp4")
+        clock.mark("captions")
         # Auto-zoom — before validation, so the checked file is the saved one.
         final = await render_post.finish_video(final, segments, post, warn)
+        clock.mark("finish")
         await gate()
 
         # ── 6. validate ──
@@ -488,6 +540,7 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
             raise StudioError(f"The rendered video is {check.duration:.1f}s, the project is {total:.1f}s — "
                               "it wasn't saved. Try rendering again.")
         await gate()
+        clock.mark("check")
 
         # ── 7. persist ──
         await progress(92, "Saving")
@@ -495,6 +548,8 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
                               user_settings=user_settings, caption_status=caption_status, clean=stitched,
                               cover_at=min(max(0.8, durations[0] * 0.5), max(0.0, total - 0.2)))
     finally:
+        clock.mark("persist")
+        logger.info("studio render timing %s (%d scenes): %s", job_id, scene_count, clock.line())
         for task in details.values():
             if not task.done():
                 task.cancel()           # a take's timings are cached by whoever finishes them later
@@ -536,10 +591,19 @@ async def _run_all(coros: list) -> list:
     return [t.result() for t in tasks]
 
 
+def _final_encode(src: Path, out: Path) -> Path:
+    """The deliverable's encode at the render preset, audio copied as is."""
+    from backend.services.video_utils import encode_preset
+    _ff(["-i", str(src), "-map", "0", "-c:v", "libx264", "-preset", encode_preset(), "-crf", "20",
+         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(out)])
+    return out
+
+
 def _join_shots(a: Path, b: Path, out: Path) -> Path:
     """Two normalised shots of one scene, back to back (same size and rate)."""
+    from backend.services.video_utils import intermediate_x264
     _ff(["-i", str(a), "-i", str(b), "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-an", str(out)])
+         "-c:v", "libx264", *intermediate_x264("18", "veryfast"), "-pix_fmt", "yuv420p", "-an", str(out)])
     return out
 
 

@@ -10,6 +10,37 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+_X264_PRESETS = frozenset({"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"})
+
+
+def encode_preset() -> str:
+    """The x264 preset for render-path encodes (settings.VIDEO_ENCODE_PRESET;
+    an unknown value falls back to "fast" rather than failing every encode)."""
+    from backend.config import settings
+    value = (settings.VIDEO_ENCODE_PRESET or "").strip().lower()
+    return value if value in _X264_PRESETS else "fast"
+
+
+INTERMEDIATE_CRF = "16"
+
+
+def intermediates_are_fast() -> bool:
+    """True when intermediates use their own fast preset
+    (settings.VIDEO_INTERMEDIATE_PRESET): the deliverable then needs a real
+    final encode."""
+    from backend.config import settings
+    return (settings.VIDEO_INTERMEDIATE_PRESET or "").strip().lower() in _X264_PRESETS
+
+
+def intermediate_x264(crf: str = "20", preset: str | None = None) -> list[str]:
+    """`-preset … -crf …` for a clip a later pass re-encodes. Unset setting →
+    the call site's own preset/CRF (the default behaviour)."""
+    from backend.config import settings
+    if intermediates_are_fast():
+        return ["-preset", settings.VIDEO_INTERMEDIATE_PRESET.strip().lower(), "-crf", INTERMEDIATE_CRF]
+    return ["-preset", preset or encode_preset(), "-crf", crf]
+
+
 def run_ffmpeg(args: list[str], *, timeout: float = 600, binary_stdout: bool = False) -> subprocess.CompletedProcess:
     """ffmpeg with `args` (an argv list — never a shell), errors only on stderr.
     `binary_stdout` returns stdout as bytes (e.g. decoded PCM)."""
