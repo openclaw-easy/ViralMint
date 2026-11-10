@@ -9,6 +9,7 @@ import re
 import shutil
 import threading
 import time
+from urllib.parse import urlparse
 from pathlib import Path
 from backend.config import settings
 from backend.core.exceptions import (
@@ -587,14 +588,70 @@ def _is_transient_error(error_str: str) -> bool:
     return any(ind in error_str.lower() for ind in indicators)
 
 
+_CURL_ERR_DOC_URL = "https://curl.se/libcurl/c/libcurl-errors.html"
+
+
+def _classifiable_text(err, url: str | None = None) -> str:
+    """Lowercased error text with URL noise removed, for the classifiers.
+
+    yt-dlp echoes the request URL into its errors (``Unable to download
+    webpage: https://www.tiktok.com/@private_user/…``), and curl transport
+    errors carry a documentation URL. A word in a URL path must not decide
+    how a failure is classified, so the request URL, its host and the curl
+    doc URL are stripped first. Never raises.
+    """
+    s = str(err)
+    s = s.replace(_CURL_ERR_DOC_URL, "")
+    if url:
+        try:
+            s = s.replace(url, "")
+            host = urlparse(url).netloc
+            if host:
+                s = s.replace(host, "")
+        except Exception:
+            pass
+    return s.lower()
+
+
+# Every indicator is a multi-word PHRASE, never a bare token. Bare tokens
+# misfire: "age" is inside "webpage" (so "Unable to download webpage: HTTP
+# Error 500", a transient failure, was reported as "Video unavailable" and
+# never retried), "not found" is any HTTP 404, "geo" / "blocked" / "private"
+# turn up in URL paths and ordinary error text.
+_PERMANENT_PHRASES = (
+    # Privacy / removal
+    "private video", "video is private", "this is a private",
+    "video has been removed", "video was removed", "has been deleted",
+    "video has been deleted", "video deleted",
+    "this video is not available", "video is unavailable",
+    "video unavailable", "no longer available",
+    # NB: never bare "is not available" — yt-dlp's "Requested format is not
+    # available" must advance to the next format, not end the download.
+    # Copyright / channel termination
+    "copyright claim", "copyright strike", "removed for copyright",
+    "account has been terminated", "channel has been terminated",
+    "account terminated", "channel terminated",
+    # Geo / region blocking
+    "geo-restricted", "geo restricted", "geo-blocked", "geo blocked",
+    "not available in your country", "blocked in your country",
+    "made this video available in your country",
+    # Age gates
+    "age-restricted", "age restricted", "age_gate", "age-gate", "age gate",
+    "confirm your age", "inappropriate for some users",
+    # Members-only
+    "members only", "members-only", "join this channel",
+    # yt-dlp's own 404 wording
+    "video not found", "no longer exists",
+)
+
+
 def _is_permanent_error(error_str: str) -> bool:
-    """Check if the error is permanent (no point retrying)."""
-    indicators = [
-        "private", "unavailable", "removed", "deleted", "not found",
-        "copyright", "terminated", "blocked", "geo", "age",
-        "members only", "this video is not available",
-    ]
-    return any(ind in error_str.lower() for ind in indicators)
+    """Check if the error is permanent (no point retrying).
+
+    Callers should pass text through ``_classifiable_text(err, url)`` first.
+    """
+    lower = str(error_str).lower()
+    return any(phrase in lower for phrase in _PERMANENT_PHRASES)
 
 
 def _terminal_download_error(error, url: str | None = None) -> Exception:
@@ -605,7 +662,7 @@ def _terminal_download_error(error, url: str | None = None) -> Exception:
     Returns the exception — the caller raises it — and records the 429
     cooldown / failure streak on the way, as the download path always did.
     """
-    error_str = str(error).lower()
+    error_str = _classifiable_text(error, url)
     if _is_permanent_error(error_str):
         return VideoUnavailableError(f"Video unavailable: {error}")
     if _is_403(error_str):
@@ -1271,7 +1328,7 @@ async def download_video(
                     error_str = str(e).lower()
 
                     # ── Permanent errors: don't retry, raise immediately ────
-                    if _is_permanent_error(error_str):
+                    if _is_permanent_error(_classifiable_text(e, url)):
                         _cleanup_partial_files(output_dir, file_stem)
                         raise VideoUnavailableError(f"Video unavailable: {e}")
 

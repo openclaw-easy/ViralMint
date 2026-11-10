@@ -48,6 +48,45 @@ class TestErrorClassification:
         assert YT._is_permanent_error(msg.lower()) is True
 
     @pytest.mark.parametrize("msg", [
+        "ERROR: [youtube] abc: Unable to download webpage: HTTP Error 500: Internal Server Error",
+        "Unable to download webpage: <urlopen error [Errno 54] Connection reset by peer>",
+        "ERROR: Requested format is not available. Use --list-formats",
+        "HTTP Error 404: Not Found",
+        "Unable to extract uploader id; please report this issue",
+    ])
+    def test_ordinary_failures_are_not_permanent(self, msg):
+        """A bare token used to decide this: "age" is inside "webpage", so a
+        plain HTTP 500 on the page fetch failed at once as "Video unavailable"
+        and was never retried."""
+        assert YT._is_permanent_error(msg.lower()) is False
+
+    @pytest.mark.parametrize("msg", [
+        "Sign in to confirm your age. This video may be inappropriate for some users.",
+        "This video is age-restricted",
+        "The uploader has not made this video available in your country",
+        "This video is not available in your country",
+        "Join this channel to get access to members-only content",
+        "This video is no longer available because the YouTube account has been terminated",
+    ])
+    def test_permanent_phrases_still_match(self, msg):
+        assert YT._is_permanent_error(msg.lower()) is True
+
+    def test_a_word_in_the_url_does_not_classify_the_error(self):
+        """yt-dlp echoes the request URL; a phrase that happens to sit in the
+        URL's path must not make a transient error permanent."""
+        url = "https://example.com/age-gate/clip/123"
+        err = f"ERROR: Unable to download webpage: {url} (HTTP Error 500)"
+        text = YT._classifiable_text(err, url)
+        assert "age-gate" not in text
+        assert YT._is_permanent_error(text) is False
+        assert YT._is_permanent_error(err.lower()) is True  # what the strip prevents
+
+    def test_terminal_mapping_retries_a_webpage_500_as_a_download_error(self):
+        err = Exception("Unable to download webpage: HTTP Error 500")
+        mapped = YT._terminal_download_error(err, "https://example.com/v")
+        assert not isinstance(mapped, VideoUnavailableError)
+
+    @pytest.mark.parametrize("msg", [
         "unable to download video data: HTTP Error 500",
         "Connection reset by peer",
         "read timed out",
