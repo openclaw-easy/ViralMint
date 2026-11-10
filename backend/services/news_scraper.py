@@ -197,7 +197,7 @@ def _extract_with_trafilatura(html: str, url: str, favor_precision: bool = True)
             favor_recall=not favor_precision,
         )
     except Exception as e:
-        logger.debug("trafilatura extraction error: %s", e)
+        logger.warning("trafilatura extraction error: %s", e)
         return {}
 
     # Handle both Document object (2.x) and dict (1.x)

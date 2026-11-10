@@ -162,6 +162,15 @@ hiddenimports += [
 ]
 hiddenimports += collect_submodules("yt_dlp.extractor")
 
+# Data files these read at run time, which PyInstaller doesn't follow from
+# imports. Without them article extraction fails on every packaged build and
+# silently falls back to raw <p> tags. desktop/scripts/check_frozen_data.py
+# fails the build if one of them goes missing again.
+for p in ("trafilatura", "justext", "tld"):
+    datas += collect_data_files(p)
+# yt-dlp's built-in JS solver for YouTube's signature challenges.
+datas += collect_data_files("yt_dlp", includes=["extractor/youtube/jsc/_builtin/vendor/*.js"])
+
 # Ship the entire backend/ tree so dynamic imports (services, agents,
 # messaging channels, models) work in the frozen bundle.
 datas += collect_data_files("backend")

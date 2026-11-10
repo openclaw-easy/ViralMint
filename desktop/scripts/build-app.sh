@@ -139,6 +139,14 @@ rm -rf "$REPO_ROOT/build" "$REPO_ROOT/dist"
 echo "==> Running PyInstaller"
 VIRALMINT_VERSION="$VERSION" $PYTHON_BIN -m PyInstaller "$SPEC" --noconfirm --clean
 
+# PyInstaller only WARNS about a backend module it couldn't take, and doesn't
+# follow the data files a package reads at run time — either way the app then
+# degrades without a word. Both gates fail the build instead.
+echo "==> Checking PyInstaller's warnings for lost backend code"
+$PYTHON_BIN desktop/scripts/check_frozen_warnings.py "$REPO_ROOT/build/viralmint/warn-viralmint.txt"
+echo "==> Checking the bundle for its runtime data files"
+$PYTHON_BIN desktop/scripts/check_frozen_data.py "$REPO_ROOT/dist/ViralMint/_internal"
+
 # ─── 6. Package ────────────────────────────────────────────────────────────────
 mkdir -p "$RELEASE_DIR"
 rm -f "$RELEASE_DIR"/*.dmg "$RELEASE_DIR"/*.zip "$RELEASE_DIR"/*.tar.gz "$RELEASE_DIR"/*.exe || true
