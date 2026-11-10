@@ -6,7 +6,7 @@
 
 ### The open-source, local-first video pipeline for creators
 
-**Scout trends → clip long videos → generate captioned shorts → design motion graphics → polish with 22 local tools.**
+**Scout trends → clip long videos → build captioned shorts scene by scene → design motion graphics → polish with 22 local tools.**
 All on your machine. Bring your own API keys. No SaaS in the middle. No telemetry.
 
 <!-- Activity badges (top row) — auto-update from GitHub, so they reflect
@@ -31,14 +31,14 @@ All on your machine. Bring your own API keys. No SaaS in the middle. No telemetr
 
 <img src="docs/screenshots/clipper-bench.webp" alt="ViralMint Clip Studio — a cutting bench with a filmstrip timeline, speech lane and pending cuts" width="900" />
 
-<sub><i>Cut a long video into shorts on a real timeline — drag across its own frames, snap to sentence boundaries, or let the AI propose the moments. Scouting, transcription, script-to-video on stock footage, motion graphics and 22 editing tools all run from the same app.</i></sub>
+<sub><i>Cut a long video into shorts on a real timeline — drag across its own frames, snap to sentence boundaries, or let the AI propose the moments. Scouting, transcription, a scene-by-scene video studio, motion graphics and 22 editing tools all run from the same app.</i></sub>
 
 </div>
 
 ---
 
 > **What manual creators do across a dozen tabs and apps, ViralMint runs as one local workflow.**
-> Find trending videos across YouTube, TikTok and Douyin, transcribe and analyze them with local Whisper, cut long videos into publishable shorts on a real timeline, write original scripts with the AI of your choice, render captioned stock-footage videos, design animated motion graphics — and get back a finished MP4 with an AI-drafted title, description and tags, ready to post. Drive it from a browser, or chat with it on Telegram, WhatsApp, Discord, or Slack.
+> Find trending videos across YouTube, TikTok and Douyin, transcribe and analyze them with local Whisper, cut long videos into publishable shorts on a real timeline, write original scripts with the AI of your choice, build captioned videos scene by scene in a studio where you hear every line before you render, design animated motion graphics — and get back a finished MP4 with an AI-drafted title, description and tags, ready to post. Drive it from a browser, or chat with it on Telegram, WhatsApp, Discord, or Slack.
 
 ## ✨ Why ViralMint
 
@@ -47,12 +47,12 @@ All on your machine. Bring your own API keys. No SaaS in the middle. No telemetr
 | 🔒 **100% local** | SQLite, local Whisper, local FFmpeg. Your scripts, transcripts, downloads, and generated videos never leave your machine. |
 | 🔑 **BYOK, no middleman** | Bring your own Anthropic / OpenAI / OpenRouter / YouTube / Pexels keys, or point it at any OpenAI-compatible server (Ollama, LM Studio, vLLM…). Encrypted at rest with Fernet (AES-128-CBC, HMAC-signed), sent straight to the provider — there is no ViralMint server in between. |
 | 🤖 **Agents, not a chat wrapper** | Purpose-built agents — Planner, Scout, Download, Analyzer and Generator — orchestrated by a streaming AI chat that actually runs the work. |
-| ✂️ **Clip, generate, or design** | Three ways to a finished video: cut shorts from a long source on a real timeline, generate a captioned stock-footage video from a script, or author motion graphics with no footage at all. |
+| ✂️ **Clip, build, or design** | Three ways to a finished video: cut shorts from a long source on a real timeline, turn a script into a captioned video scene by scene, or author motion graphics with no footage at all. |
 | 🧩 **Drive it from your AI agent** | A built-in **MCP server** exposes 69 tools — scout, download, clip, generate, the editing tools, job control — to Claude Code, Claude Desktop, Codex, Cursor, Windsurf and Gemini CLI. Copy one snippet from the **/mcp** page. |
 | 📱 **Runs from your phone** | Two-way chat with the planner over Telegram, WhatsApp, Discord, or Slack — and job alerts in the same thread. |
-| 🆓 **Free out of the box** | Local Whisper, Edge TTS (400+ voices), royalty-free music, Pexels stock, and 22 built-in tools (most of them pure FFmpeg + Whisper) — the heavy lifting costs $0. Pay only for the AI you choose to plug in. |
+| 🆓 **Free out of the box** | Local Whisper, Edge TTS (400+ voices), royalty-free music, Pexels or Pixabay stock, and 22 built-in tools (most of them pure FFmpeg + Whisper) — the heavy lifting costs $0. Pay only for the AI you choose to plug in. |
 
-<sub>Battle-tested: a **3,000-test pytest suite** runs on every commit, plus a browser harness that drives the real app end to end. AGPL-3.0 — fork it, modify it, build a business on it.</sub>
+<sub>Battle-tested: a **4,000-test pytest suite** runs on every commit, plus a browser harness that drives the real app end to end. AGPL-3.0 — fork it, modify it, build a business on it.</sub>
 
 ---
 
@@ -76,8 +76,8 @@ Local Whisper transcription with clean long-form handling, plus AI insight extra
 <tr>
 <td width="50%" valign="top">
 
-### 🎬 Generate
-Full pipeline: AI script → TTS voiceover → Pexels stock footage matched to keywords → phrase-aware animated captions (with CJK / Arabic / Thai support) → balanced background music → AI thumbnail → finished MP4.
+### 🎬 Smart Video Studio
+Write or paste a script — or let your AI draft one from a topic — and it becomes a project of up to 40 scenes. Every scene has a voice take you can play and a stock clip you can watch (Pexels or Pixabay, portrait-first for vertical video) or one of your own. Rewrite a line and only that scene is re-voiced; split, merge, reorder, swap clips, pick the look, music and caption style, then render exactly what you previewed. Captions are word-by-word, with CJK / Arabic / Thai support.
 
 </td>
 <td width="50%" valign="top">
@@ -111,7 +111,7 @@ Streaming WebSocket chat that orchestrates every agent. Say *"scout cooking vide
 <td width="50%" valign="top">
 
 ### 📲 Messaging
-Two-way chat from your phone via **Telegram, WhatsApp, Discord, Slack**. Command the planner from anywhere and get job alerts as they finish — same agent, different transport.
+Two-way chat from your phone via **Telegram, WhatsApp, Discord, Slack** — connect one under Settings → Messaging with a one-time pairing code, so the bot answers only you. Command the planner from anywhere and get job alerts as they finish.
 
 </td>
 </tr>
@@ -119,7 +119,7 @@ Two-way chat from your phone via **Telegram, WhatsApp, Discord, Slack**. Command
 <td width="50%" valign="top">
 
 ### ⬇️ Universal downloader
-yt-dlp under the hood — YouTube, TikTok, Bilibili, Instagram, Twitter/X, SoundCloud, Vimeo, and **1,800+ other sites**. No watermarks, no ads, no cap.
+yt-dlp under the hood — YouTube, TikTok, Bilibili, Instagram, Twitter/X, SoundCloud, Vimeo, and **1,800+ other sites**. No watermarks, no ads, no cap. Pick quality, container, subtitles, cover art and metadata; a stalled or failing download says why instead of hanging, and Cancel really stops it.
 
 </td>
 <td width="50%" valign="top">
@@ -237,7 +237,7 @@ Every key can be set in `.env` *or* per-user inside the app under **Settings** �
                      │       (served by FastAPI in production)        │
                      │  Chat · Scout · Channels · Library             │
                      │  Smart Video · Clip Studio · Motion Graphics   │
-                     │  Tools · Messaging · Settings                  │
+                     │  Tools · MCP · Settings (incl. Messaging)      │
                      └─────────────────┬──────────────────────────────┘
                                        │  HTTP + WebSocket
                                        ▼
@@ -249,8 +249,8 @@ Every key can be set in `.env` *or* per-user inside the app under **Settings** �
                      │                    (+ yt-dlp dynamic search)   │
                      │  Download Agent ── yt-dlp (1,800+ sites)       │
                      │  Analyzer Agent ── Whisper + AI insights       │
-                     │  Generator Agent ─ Script → TTS → Stock →      │
-                     │                    Captions → Music → MP4      │
+                     │  Smart Video ───── scenes → voice takes →      │
+                     │                    stock/own clips → render    │
                      │  Motion Renderer ─ local HyperFrames engine    │
                      │  Messaging ─────── Telegram · WhatsApp ·       │
                      │                    Discord · Slack             │
@@ -274,7 +274,7 @@ Every key can be set in `.env` *or* per-user inside the app under **Settings** �
 | **AI (BYOK)** | Anthropic Claude SDK · OpenAI SDK · OpenRouter (300+ models via one key) · any OpenAI-compatible server (Ollama, LM Studio, vLLM…) |
 | **Transcription** | faster-whisper (local, multilingual, CPU int8) |
 | **TTS** | Edge TTS (free) · OpenAI TTS |
-| **Video** | Pexels stock · FFmpeg · Ken Burns image fallback |
+| **Video** | Pexels / Pixabay stock · FFmpeg · Ken Burns for stills |
 | **Captions** | FFmpeg + ASS (word-by-word highlight animation) |
 | **Download** | yt-dlp (1,800+ sites) |
 | **Messaging** | python-telegram-bot · discord.py · slack-sdk · neonize (WhatsApp) |
@@ -308,7 +308,7 @@ Every key can be set in `.env` *or* per-user inside the app under **Settings** �
 <tr>
 <td width="50%" align="center" valign="top">
   <a href="docs/screenshots/smart-video.webp"><img src="docs/screenshots/smart-video.webp" alt="Smart Video studio" /></a>
-  <sub><b>Smart Video studio</b><br/>Script → voiceover → stock footage → word-by-word captions → music, in one pass. Mix in your own clips and pick a visual style.</sub>
+  <sub><b>Smart Video Studio</b><br/>Each sentence or two becomes a scene you can watch, hear and change before you render — up to 40 of them. Mix stock with your own clips and pick a look.</sub>
 </td>
 <td width="50%" align="center" valign="top">
   <a href="docs/screenshots/tools.webp"><img src="docs/screenshots/tools.webp" alt="Tools — 22 single-purpose utilities" /></a>
@@ -321,8 +321,8 @@ Every key can be set in `.env` *or* per-user inside the app under **Settings** �
   <sub><b>Chat — the agent that runs it</b><br/>Paste a URL, name a niche, or ask for a video. It dispatches the right agent and reports back in the same thread.</sub>
 </td>
 <td width="50%" align="center" valign="top">
-  <a href="docs/screenshots/messaging.webp"><img src="docs/screenshots/messaging.webp" alt="Messaging — Telegram, WhatsApp, Discord, Slack" /></a>
-  <sub><b>Messaging — drive it from your phone</b><br/>Connect Telegram, WhatsApp, Discord or Slack to command the same agent and get job alerts as they finish.</sub>
+  <a href="docs/screenshots/messaging.webp"><img src="docs/screenshots/messaging.webp" alt="Settings → Messaging — Telegram, WhatsApp, Discord, Slack" /></a>
+  <sub><b>Messaging — drive it from your phone</b><br/>Connect Telegram, WhatsApp, Discord or Slack in Settings to command the same agent and get job alerts as they finish.</sub>
 </td>
 </tr>
 </table>
@@ -334,7 +334,7 @@ Every key can be set in `.env` *or* per-user inside the app under **Settings** �
 ```
 ViralMint/
 ├── run.py                          # 🚀 Single entry point
-├── launcher.py                     # System-tray launcher (optional)
+├── launcher.py                     # System-tray launcher (the desktop app's entry point)
 │
 ├── backend/
 │   ├── agents/                     # Planner, Scout, Download, Analyzer, Generator
@@ -349,12 +349,12 @@ ViralMint/
 ├── frontend/
 │   └── src/
 │       ├── pages/                  # Chat · Scout · Channels · Library · Smart Video ·
-│       │                           #   Clip Studio · Motion Graphics · Tools · Messaging · MCP
+│       │                           #   Clip Studio · Motion Graphics · Tools · MCP · Settings
 │       ├── components/             # Reusable UI (chat, settings, videos, …)
 │       ├── hooks/                  # WebSocket, settings, jobs, source video
 │       └── store/                  # Zustand global state
 │
-├── tests/                          # pytest suite (3,000+ tests)
+├── tests/                          # pytest suite (4,000+ tests)
 ├── storage/                        # Downloaded videos, audio, generated output (gitignored)
 │
 ├── requirements.txt

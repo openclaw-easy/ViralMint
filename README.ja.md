@@ -6,7 +6,7 @@
 
 ### クリエイターのためのオープンソース・ローカルファーストな動画パイプライン
 
-**トレンド発掘 → 長尺動画をクリップ → キャプション付きショートを生成 → モーショングラフィックスを設計 → 22のローカルツールで仕上げ。**
+**トレンド発掘 → 長尺動画をクリップ → キャプション付きショートをシーンごとに組み立て → モーショングラフィックスを設計 → 22のローカルツールで仕上げ。**
 すべて自分のマシン上で。自分の API キーを使用。間に SaaS なし。テレメトリなし。
 
 <!-- Activity badges (top row) — auto-update from GitHub, so they reflect
@@ -38,7 +38,7 @@
 ---
 
 > **手動のクリエイターが十数個のタブとアプリを横断してやっていることを、ViralMint は1つのローカルワークフローとして実行します。**
-> YouTube・TikTok・Douyin を横断してトレンド動画を見つけ、ローカルの Whisper で文字起こし・分析し、長尺動画を公開できるショートに切り分け、好みの AI でオリジナル台本を書き、キャプション付きストック映像動画をレンダリングする。最後に、AI が下書きしたタイトル・説明文・タグ付きの完成 MP4 が手元に残り、そのまま投稿できます。ブラウザから操作するのも、Telegram・WhatsApp・Discord・Slack でチャットするのも自由自在です。
+> YouTube・TikTok・Douyin を横断してトレンド動画を見つけ、ローカルの Whisper で文字起こし・分析し、長尺動画を公開できるショートに切り分け、好みの AI でオリジナル台本を書き、スタジオでシーンごとにキャプション付き動画を組み立てる（レンダリング前に全セリフを試聴できます）。最後に、AI が下書きしたタイトル・説明文・タグ付きの完成 MP4 が手元に残り、そのまま投稿できます。ブラウザから操作するのも、Telegram・WhatsApp・Discord・Slack でチャットするのも自由自在です。
 
 ## ✨ ViralMint を選ぶ理由
 
@@ -47,11 +47,12 @@
 | 🔒 **100% ローカル** | SQLite、ローカル Whisper、ローカル FFmpeg。台本・文字起こし・ダウンロード・生成動画はマシンの外に出ません。 |
 | 🔑 **BYOK、仲介者なし** | 自分の Anthropic / OpenAI / OpenRouter / YouTube / Pexels キーを使用（OpenAI 互換サーバー — Ollama・LM Studio・vLLM など — にも接続可能）。Fernet（AES-128-CBC + HMAC-SHA256）で暗号化して保存し、プロバイダーへ直接送信 — 間に ViralMint のサーバーはありません。 |
 | 🤖 **チャットのラッパーではなくエージェント** | 目的特化型のエージェント群 — Planner、Scout、Download、Analyzer、Generator — を、実際に処理を実行するストリーミング AI チャットがオーケストレーションします。 |
-| ✂️ **切る・生成する・設計する** | 完成動画への3つの道: 本物のタイムラインで長尺動画からショートを切り出す、台本からキャプション付きストック映像動画を生成する、あるいは映像を一切使わずにモーショングラフィックスを作る。 |
+| ✂️ **切る・組み立てる・設計する** | 完成動画への3つの道: 本物のタイムラインで長尺動画からショートを切り出す、台本をシーンごとにキャプション付き動画に仕上げる、あるいは映像を一切使わずにモーショングラフィックスを作る。 |
+| 🧩 **AI エージェントから操作** | 内蔵の **MCP サーバー**が69個のツール — 発掘、ダウンロード、クリップ、生成、編集ツール、ジョブ管理 — を Claude Code・Claude Desktop・Codex・Cursor・Windsurf・Gemini CLI に公開します。**/mcp** ページからスニペットを1つコピーするだけです。 |
 | 📱 **スマホから操作** | Telegram・WhatsApp・Discord・Slack でプランナーと双方向チャット — 同じスレッドでジョブ通知も届きます。 |
-| 🆓 **すぐに無料で使える** | ローカル Whisper、Edge TTS（400以上の音声）、ロイヤリティフリー音楽、Pexels ストック、22の内蔵ツール（ほとんどは FFmpeg + Whisper だけで動作） — 重い処理はすべて $0。プラグインする AI のぶんだけ課金されます。 |
+| 🆓 **すぐに無料で使える** | ローカル Whisper、Edge TTS（400以上の音声）、ロイヤリティフリー音楽、Pexels または Pixabay のストック、22の内蔵ツール（ほとんどは FFmpeg + Whisper だけで動作） — 重い処理はすべて $0。プラグインする AI のぶんだけ課金されます。 |
 
-<sub>実戦仕込み: 毎コミットで **2,900テストの pytest スイート** と、実アプリをエンドツーエンドで操作するブラウザハーネスが走ります。AGPL-3.0 — フォークして、改変して、その上でビジネスを構築できます。</sub>
+<sub>実戦仕込み: 毎コミットで **4,000テストの pytest スイート** と、実アプリをエンドツーエンドで操作するブラウザハーネスが走ります。AGPL-3.0 — フォークして、改変して、その上でビジネスを構築できます。</sub>
 
 ---
 
@@ -75,8 +76,8 @@
 <tr>
 <td width="50%" valign="top">
 
-### 🎬 Generate
-フルパイプライン: AI 台本 → TTS 音声 → キーワードに合わせた Pexels ストック映像 → フレーズ単位のアニメーションキャプション（CJK / アラビア語 / タイ語対応）→ バランス調整された BGM → AI サムネイル → 完成した MP4。
+### 🎬 Smart Video スタジオ
+台本を書くか貼り付ける（またはトピックから AI に下書きさせる）と、最大40シーンのプロジェクトになります。各シーンには再生できる音声テイクと確認できるストッククリップ（Pexels または Pixabay、縦動画では縦素材を優先）があり、自分のクリップにも差し替えられます。1行を書き直すとそのシーンだけ録り直し。分割・結合・並べ替え・クリップの差し替え、ルック・BGM・キャプションスタイルを選び、プレビューどおりにレンダリング。単語単位キャプションは CJK / アラビア語 / タイ語に対応。
 
 </td>
 <td width="50%" valign="top">
@@ -110,7 +111,7 @@
 <td width="50%" valign="top">
 
 ### 📲 Messaging
-**Telegram・WhatsApp・Discord・Slack** でスマホから双方向チャット。どこからでもプランナーに指示し、ジョブが完了したら通知を受け取る — 同じエージェント、異なるトランスポート。
+**Telegram・WhatsApp・Discord・Slack** でスマホから双方向チャット — Settings → Messaging でワンタイムのペアリングコードを使って接続するので、ボットはあなたにだけ応答します。どこからでもプランナーに指示し、ジョブが完了したら通知を受け取る — 同じエージェント、異なるトランスポート。
 
 </td>
 </tr>
@@ -175,7 +176,7 @@ python run.py
 
 初回起動時に、フロントエンドの依存関係をインストールし、SPA をビルドし、API を起動して、ブラウザで **http://localhost:16888** を開きます。
 
-> 📦 **インストーラーを使いたい場合:** macOS・Windows・Linux 向けのビルド済みアプリは [Releases ページ](https://github.com/openclaw-easy/ViralMint/releases) にあります。macOS 版は **Apple Silicon**（M1 以降）専用です。Intel Mac では上記の手順でソースから実行してください。
+> 📦 **インストーラーを使いたい場合:** macOS・Windows・Linux 向けのビルド済みアプリは [Releases ページ](https://github.com/openclaw-easy/ViralMint/releases) にあります。macOS では、**Apple Silicon**（M1 以降）は `-mac.dmg`、**Intel** Mac は `-mac-intel.dmg` を選んでください（それを含む最初のリリース以降。それより前のリリースは Apple Silicon 専用なので、上記の手順でソースから実行してください）。
 
 > 💡 **まだ API キーがない？** 起動後に **Settings → AI Provider** を開き、Anthropic・OpenAI・OpenRouter のキーを貼り付けてください。OpenRouter は300以上のモデルへの統一ゲートウェイで、1つのキーで Claude・GPT・Gemini・Llama・Mistral を利用できます。自前のサーバーを使う場合は **OpenAI-compatible** を選び、Base URL（Ollama なら `http://localhost:11434/v1`）とモデル名を入力してください。ローカルサーバーならキーは不要です。Edge TTS・Whisper・FFmpeg・yt-dlp はすべて設定不要でオフライン動作します。
 
@@ -192,6 +193,23 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 
 ---
 
+## 🧩 Claude Code・Codex・Cursor から使う（MCP）
+
+ViralMint は `http://127.0.0.1:16888/mcp/` で [Model Context Protocol](https://modelcontextprotocol.io) を提供しているので、AI エージェントがパイプライン全体を自然な言葉で動かせます — *「家庭用エスプレッソで伸びている動画を探して分析し、オリジナルの45秒 Short を作って」*。
+
+1. ViralMint を起動し、サイドバーの **MCP** を開きます。
+2. クライアント（Claude Code、Claude Desktop、Codex、Cursor、Windsurf、Gemini CLI）を選び、表示されるスニペットを貼り付けます。Claude Code なら `claude mcp add` の1行です。
+3. **Test connection** をクリック — クライアントと同じハンドシェイクを実行します。
+
+**69個のツール**が、リサーチ（発掘、ブレイクアウト、ニュース、検索需要、キーワード評価）、取得（ダウンロード、インポート、チャンネル）、制作（Smart Video、台本、一括生成、モーショングラフィックス）、Clip Studio の選定（提案 / 自動カット / 手動カット）、すべての単機能編集ツール、ジョブ管理（`wait_for_job` は完成ファイルのパスを返します）をカバーします。6つの組み込みプロンプト（`viralmint:create_viral_short`、`viralmint:repurpose_long_form` など）が実績あるレシピを提供し、リソースから最近の動画・チャンネル・ニッチ・文字起こしを参照できます。
+
+- **自分のキー、自分の請求。** AI を使うツールは Settings → AI Provider で設定したプロバイダーで動きます — UI とまったく同じです。
+- **トークンで保護。** すべてのリクエストに /mcp ページの Bearer トークンが必要です（`<データフォルダ>/mcp_token` に保存、同ページでローテーション可能）。LAN モードでも、トークンは同じコンピューター上のブラウザにしか表示されません。
+- **ファイルパス系ツールは ViralMint を動かしているマシン上のファイルを読みます。** だからエージェントが *「~/Desktop/clip.mp4 に字幕を付けて」* と言えるのであり、トークンは SSH 鍵と同じように扱ってください。
+- **勝手に投稿はしません。** MCP ツールがアップロードや公開をすることはなく、完成した動画は自分で投稿します。
+
+---
+
 ## 🔑 自分のキーを使う (BYOK)
 
 各キーは `.env` *または* アプリ内の **Settings** でユーザーごとに設定できます — 設定されているほうが優先されます。ユーザーごとのキーは保存前に **Fernet で暗号化**（AES-128-CBC + HMAC-SHA256）されます。キーはプロバイダーへ直接送られ、間に入る ViralMint のバックエンドサーバーはありません。
@@ -200,7 +218,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 |:----|:---------|:------|:-----|
 | AI チャット、台本作成、分析 | **Anthropic** · **OpenAI** · **OpenRouter** · 任意の **OpenAI 互換**サーバー | [console.anthropic.com](https://console.anthropic.com) · [platform.openai.com](https://platform.openai.com/api-keys) · [openrouter.ai/keys](https://openrouter.ai/keys) · サーバーの Base URL — Settings → AI Provider | 従量課金（ローカルサーバーは無料） |
 | YouTube 発掘・コメント・My Channels | YouTube Data API v3 | [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials) — Settings → Service API Keys | 無料 1日1万ユニット |
-| ストック映像 | Pexels | [pexels.com/api](https://www.pexels.com/api/) | 無料 |
+| ストック映像 | **Pexels** または **Pixabay**（どちらか一方） | [pexels.com/api](https://www.pexels.com/api/) · [pixabay.com/api/docs](https://pixabay.com/api/docs/) | 無料 |
 | プレミアムボイスオーバー（任意） | OpenAI TTS | [platform.openai.com](https://platform.openai.com/api-keys) | 従量課金 |
 | TikTok / Douyin 発掘 | **TikHub API**（推奨） | [tikhub.io](https://tikhub.io) | 無料枠あり |
 | Telegram / Discord / Slack | Bot トークン | Settings → Messaging | 無料 |
@@ -218,7 +236,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
                      │       (served by FastAPI in production)        │
                      │  Chat · Scout · Channels · Library             │
                      │  Stock Video · Clip Studio · Motion Graphics   │
-                     │  Tools · Messaging · Settings                  │
+                     │  Tools · MCP · Settings (incl. Messaging)      │
                      └─────────────────┬──────────────────────────────┘
                                        │  HTTP + WebSocket
                                        ▼
@@ -230,8 +248,8 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
                      │                    (+ yt-dlp dynamic search)   │
                      │  Download Agent ── yt-dlp (1,800+ sites)       │
                      │  Analyzer Agent ── Whisper + AI insights       │
-                     │  Generator Agent ─ Script → TTS → Stock →      │
-                     │                    Captions → Music → MP4      │
+                     │  Smart Video ───── scenes → voice takes →      │
+                     │                    stock/own clips → render    │
                      │  Motion Renderer ─ local HyperFrames engine    │
                      │  Messaging ─────── Telegram · WhatsApp ·       │
                      │                    Discord · Slack             │
@@ -255,7 +273,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 | **AI (BYOK)** | Anthropic Claude SDK · OpenAI SDK · OpenRouter (1つのキーで300以上のモデル) · 任意の OpenAI 互換サーバー（Ollama・LM Studio・vLLM…） |
 | **文字起こし** | faster-whisper（ローカル、多言語、CPU int8） |
 | **TTS** | Edge TTS（無料）· OpenAI TTS |
-| **動画** | Pexels ストック · FFmpeg · Ken Burns 画像フォールバック |
+| **動画** | Pexels / Pixabay ストック · FFmpeg · 静止画に Ken Burns |
 | **キャプション** | FFmpeg + ASS（単語ごとのハイライトアニメーション） |
 | **ダウンロード** | yt-dlp (1,800+ sites) |
 | **メッセージング** | python-telegram-bot · discord.py · slack-sdk · neonize (WhatsApp) |
@@ -289,7 +307,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 <tr>
 <td width="50%" align="center" valign="top">
   <a href="docs/screenshots/smart-video.webp"><img src="docs/screenshots/smart-video.webp" alt="Smart Video スタジオ" /></a>
-  <sub><b>Smart Video スタジオ</b><br/>台本 → ナレーション → ストック映像 → 単語単位キャプション → BGM をワンパスで。自分のクリップを混ぜ、ビジュアルスタイルも選べます。</sub>
+  <sub><b>Smart Video スタジオ</b><br/>1〜2文がひとつのシーンになり、レンダリング前に見て・聴いて・直せます（最大40シーン）。自分のクリップを混ぜ、ルックも選べます。</sub>
 </td>
 <td width="50%" align="center" valign="top">
   <a href="docs/screenshots/tools.webp"><img src="docs/screenshots/tools.webp" alt="Tools — 22のユーティリティ" /></a>
@@ -303,7 +321,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 </td>
 <td width="50%" align="center" valign="top">
   <a href="docs/screenshots/messaging.webp"><img src="docs/screenshots/messaging.webp" alt="Messaging — スマホから操作" /></a>
-  <sub><b>Messaging — スマホから操作</b><br/>Telegram / WhatsApp / Discord / Slack を接続して同じエージェントに指示し、ジョブ完了の通知を受け取れます。</sub>
+  <sub><b>Messaging — スマホから操作</b><br/>Settings で Telegram / WhatsApp / Discord / Slack を接続して同じエージェントに指示し、ジョブ完了の通知を受け取れます。</sub>
 </td>
 </tr>
 </table>
@@ -315,7 +333,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 ```
 ViralMint/
 ├── run.py                          # 🚀 Single entry point
-├── launcher.py                     # System-tray launcher (optional)
+├── launcher.py                     # System-tray launcher (the desktop app's entry point)
 │
 ├── backend/
 │   ├── agents/                     # Planner, Scout, Download, Analyzer, Generator
@@ -327,12 +345,12 @@ ViralMint/
 │
 ├── frontend/
 │   └── src/
-│       ├── pages/                  # Chat · Channels · Library · Stock Video · Clip Studio · …
+│       ├── pages/                  # Chat · Scout · Channels · Library · Smart Video · Clip Studio · …
 │       ├── components/             # Reusable UI (chat, settings, videos, …)
 │       ├── hooks/                  # WebSocket, settings, jobs, source video
 │       └── store/                  # Zustand global state
 │
-├── tests/                          # pytest suite (2,900+ tests)
+├── tests/                          # pytest suite (4,000+ tests)
 ├── storage/                        # Downloaded videos, audio, generated output (gitignored)
 │
 ├── requirements.txt

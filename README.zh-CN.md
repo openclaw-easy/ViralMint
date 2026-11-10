@@ -6,7 +6,7 @@
 
 ### 面向创作者的开源、本地优先视频流水线
 
-**发现趋势 → 切片长视频 → 生成带字幕的短视频 → 设计动态图形 → 用 22 个本地工具精修。**
+**发现趋势 → 切片长视频 → 逐个场景搭建带字幕的短视频 → 设计动态图形 → 用 22 个本地工具精修。**
 全部在你自己的机器上运行。自带 API 密钥。中间没有任何 SaaS。零遥测。
 
 <!-- Activity badges (top row) — auto-update from GitHub, so they reflect
@@ -31,14 +31,14 @@
 
 <img src="docs/screenshots/clipper-bench.webp" alt="ViralMint Clip Studio — a cutting bench with a filmstrip timeline, speech lane and pending cuts" width="900" />
 
-<sub><i>在真正的时间轴上把长视频切成短视频——在它自己的帧上拖拽、吸附到句子边界，或者让 AI 先提议。发现选题、转写、脚本配素材成片、动态图形与 22 个剪辑工具，全都在同一个应用里。</i></sub>
+<sub><i>在真正的时间轴上把长视频切成短视频——在它自己的帧上拖拽、吸附到句子边界，或者让 AI 先提议。发现选题、转写、按场景编辑的视频工作室、动态图形与 22 个剪辑工具，全都在同一个应用里。</i></sub>
 
 </div>
 
 ---
 
 > **手动创作者要在十几个标签页和应用之间来回折腾的事，ViralMint 用一条本地工作流全部搞定。**
-> 跨 YouTube、TikTok 和抖音发现热门视频，用本地 Whisper 转写并分析，把长视频切成可发布的短视频，用你选择的 AI 撰写原创脚本，渲染带字幕的素材视频——最后交给你一条成品 MP4，附带 AI 起草的标题、描述和标签，随时可以发布。可以在浏览器里驱动它，也可以在 Telegram、WhatsApp、Discord 或 Slack 上跟它聊。
+> 跨 YouTube、TikTok 和抖音发现热门视频，用本地 Whisper 转写并分析，把长视频切成可发布的短视频，用你选择的 AI 撰写原创脚本，在工作室里逐个场景搭建带字幕的视频、渲染前先听每一句——最后交给你一条成品 MP4，附带 AI 起草的标题、描述和标签，随时可以发布。可以在浏览器里驱动它，也可以在 Telegram、WhatsApp、Discord 或 Slack 上跟它聊。
 
 ## ✨ 为什么选择 ViralMint
 
@@ -47,11 +47,12 @@
 | 🔒 **100% 本地** | SQLite、本地 Whisper、本地 FFmpeg。你的脚本、转写、下载和生成的视频永不离开你的机器。 |
 | 🔑 **BYOK，无中间商** | 使用你自己的 Anthropic / OpenAI / OpenRouter / YouTube / Pexels 密钥（也可以接入任何兼容 OpenAI 接口的服务器，如 Ollama、LM Studio、vLLM），落盘时以 Fernet（AES-128-CBC + HMAC-SHA256）加密，直接发往服务提供方——中间没有任何 ViralMint 服务器。 |
 | 🤖 **是智能体架构，不是套壳聊天** | 各司其职的智能体——Planner、Scout、Download、Analyzer 和 Generator——由一个真正会去执行工作的流式 AI 对话统一编排。 |
-| ✂️ **剪、生成或设计** | 通往成片的三条路：在真正的时间轴上从长视频剪出短视频；用脚本生成带字幕的素材视频；或者完全不用素材，直接创作动态图形。 |
+| ✂️ **剪、搭建或设计** | 通往成片的三条路：在真正的时间轴上从长视频剪出短视频；把脚本逐个场景做成带字幕的视频；或者完全不用素材，直接创作动态图形。 |
+| 🧩 **让你的 AI 智能体来驱动** | 内置 **MCP 服务器**向 Claude Code、Claude Desktop、Codex、Cursor、Windsurf 和 Gemini CLI 暴露 69 个工具——发现、下载、剪辑、生成、各类剪辑工具、任务控制。在 **/mcp** 页面复制一段配置即可。 |
 | 📱 **用手机随时随地掌控** | 通过 Telegram、WhatsApp、Discord 或 Slack 与规划智能体（Planner）双向对话——任务提醒也发到同一个会话里。 |
-| 🆓 **开箱即免费** | 本地 Whisper、Edge TTS（400+ 语音）、免版税音乐、Pexels 素材，以及 22 个内置工具（大多只靠 FFmpeg + Whisper）——最重的活儿花费 $0。只为你主动选择接入的 AI 付费。 |
+| 🆓 **开箱即免费** | 本地 Whisper、Edge TTS（400+ 语音）、免版税音乐、Pexels 或 Pixabay 素材，以及 22 个内置工具（大多只靠 FFmpeg + Whisper）——最重的活儿花费 $0。只为你主动选择接入的 AI 付费。 |
 
-<sub>经过实战检验：一套 **2,900 个测试的 pytest 测试集** 在每次提交时运行，另有一套浏览器测试装置端到端驱动真实应用。AGPL-3.0——尽管 fork、修改，并在其之上创业。</sub>
+<sub>经过实战检验：一套 **4,000 个测试的 pytest 测试集** 在每次提交时运行，另有一套浏览器测试装置端到端驱动真实应用。AGPL-3.0——尽管 fork、修改，并在其之上创业。</sub>
 
 ---
 
@@ -75,8 +76,8 @@
 <tr>
 <td width="50%" valign="top">
 
-### 🎬 Generate（生成）
-完整流水线：AI 脚本 → TTS 配音 → 按关键词匹配的 Pexels 素材 → 感知短语的动态字幕（支持 CJK / 阿拉伯语 / 泰语）→ 音量均衡的背景音乐 → AI 缩略图 → 成品 MP4。
+### 🎬 Smart Video 工作室
+写下或粘贴脚本（也可以让你的 AI 根据主题起草），它会变成最多 40 个场景的项目。每个场景都有可试听的配音和可预览的素材片段（Pexels 或 Pixabay，竖屏视频优先竖屏素材），也可以换成你自己的片段。改写一句，只重新配音那一个场景；拆分、合并、调整顺序、换片段，挑选风格、音乐和字幕样式，然后按你预览的样子渲染。逐字字幕支持 CJK / 阿拉伯语 / 泰语。
 
 </td>
 <td width="50%" valign="top">
@@ -110,7 +111,7 @@
 <td width="50%" valign="top">
 
 ### 📲 Messaging（消息）
-通过 **Telegram、WhatsApp、Discord、Slack** 从手机双向对话。随时随地指挥规划智能体，并在任务完成时收到提醒——同一个智能体，不同的通道。
+通过 **Telegram、WhatsApp、Discord、Slack** 从手机双向对话——在 设置 → Messaging 里用一次性配对码连接，机器人只回应你。随时随地指挥规划智能体，并在任务完成时收到提醒——同一个智能体，不同的通道。
 
 </td>
 </tr>
@@ -175,7 +176,7 @@ python run.py
 
 首次运行会安装前端依赖、构建 SPA、启动 API，并在浏览器中打开 **http://localhost:16888**。
 
-> 📦 **想用安装包？** macOS、Windows 和 Linux 的预构建应用在 [Releases 页面](https://github.com/openclaw-easy/ViralMint/releases)。macOS 版本仅适用于 **Apple Silicon**（M1 及更新机型）；Intel Mac 请按上面的步骤从源码运行。
+> 📦 **想用安装包？** macOS、Windows 和 Linux 的预构建应用在 [Releases 页面](https://github.com/openclaw-easy/ViralMint/releases)。macOS 上，**Apple Silicon**（M1 及更新机型）请下载 `-mac.dmg`，**Intel** Mac 请下载 `-mac-intel.dmg`（从首个提供它的版本开始；更早的版本仅支持 Apple Silicon，请按上面的步骤从源码运行）。
 
 > 💡 **还没有 API 密钥？** 启动后打开「设置 → AI 提供方」，粘贴一个 Anthropic、OpenAI 或 OpenRouter 密钥即可。OpenRouter 是通往 300+ 模型的单一网关——一把密钥就能用上 Claude、GPT、Gemini、Llama 和 Mistral。想用自己的服务器？选择 **OpenAI-compatible**，填入它的 Base URL（例如 Ollama 的 `http://localhost:11434/v1`）和模型名即可，本地服务器无需密钥。Edge TTS、Whisper、FFmpeg 和 yt-dlp 无需任何配置即可离线工作。
 
@@ -192,6 +193,23 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 
 ---
 
+## 🧩 在 Claude Code、Codex 或 Cursor 里使用（MCP）
+
+ViralMint 在 `http://127.0.0.1:16888/mcp/` 提供 [Model Context Protocol](https://modelcontextprotocol.io) 服务，AI 智能体可以用自然语言驱动整条流水线——*“在家用咖啡领域找一个爆款，分析它，再给我做一条原创的 45 秒 Short”*。
+
+1. 启动 ViralMint，在侧边栏打开 **MCP**。
+2. 选择你的客户端（Claude Code、Claude Desktop、Codex、Cursor、Windsurf、Gemini CLI），粘贴它显示的配置片段。Claude Code 只需一行 `claude mcp add`。
+3. 点击 **Test connection**——它会执行和你的客户端完全相同的握手。
+
+**69 个工具**覆盖选题研究（发现、爆款、新闻、搜索需求、关键词评分）、获取（下载、导入、频道）、创作（Smart Video、脚本、批量、动态图形）、Clip Studio 选段（建议 / 自动剪 / 手动剪）、全部单一用途剪辑工具，以及任务控制（`wait_for_job` 会返回成品文件路径）。六个内置提示词（`viralmint:create_viral_short`、`viralmint:repurpose_long_form` 等）给智能体现成的配方，资源则暴露你最近的视频、频道、细分领域和转写稿。
+
+- **你的密钥，你的账单。** 需要 AI 的工具使用你在「设置 → AI 提供方」配置的服务——和界面里完全一样。
+- **令牌保护。** 每个请求都需要 /mcp 页面上的 Bearer 令牌（保存在 `<数据目录>/mcp_token`，可在该页面轮换）。即使在局域网模式下，页面也只向同一台电脑上的浏览器显示令牌。
+- **文件路径类工具读取运行 ViralMint 那台机器上的文件。** 正因如此智能体才能说 *“给 ~/Desktop/clip.mp4 加字幕”*——也因此这个令牌应当像 SSH 密钥一样小心保管。
+- **不会替你发布任何内容。** 没有任何 MCP 工具会上传或发布；成片由你自己发布。
+
+---
+
 ## 🔑 自带密钥 (BYOK)
 
 每把密钥都可以在 `.env` *或* 应用内「设置」中按用户设置——谁被设置了就以谁优先。按用户设置的密钥在存储前会经 **Fernet 加密**（AES-128-CBC + HMAC-SHA256）。密钥直连服务提供方；ViralMint 中间没有任何后端服务器。
@@ -200,7 +218,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 |:----|:---------|:------|:-----|
 | AI 对话、脚本撰写、分析 | **Anthropic** · **OpenAI** · **OpenRouter** · 任意 **OpenAI 兼容**服务器 | [console.anthropic.com](https://console.anthropic.com) · [platform.openai.com](https://platform.openai.com/api-keys) · [openrouter.ai/keys](https://openrouter.ai/keys) · 你的服务器地址 —— 设置 → AI 提供方 | 按用量付费（本地服务器免费） |
 | YouTube 发现 · 评论 · My Channels | YouTube Data API v3 | [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials) —— 设置 → 服务 API 密钥 | 每天免费 10K 配额 |
-| 素材视频 | Pexels | [pexels.com/api](https://www.pexels.com/api/) | 免费 |
+| 素材视频 | **Pexels** 或 **Pixabay**——任选其一 | [pexels.com/api](https://www.pexels.com/api/) · [pixabay.com/api/docs](https://pixabay.com/api/docs/) | 免费 |
 | 高级配音（可选） | OpenAI TTS | [platform.openai.com](https://platform.openai.com/api-keys) | 按用量付费 |
 | TikTok / 抖音发现 | **TikHub API**（推荐） | [tikhub.io](https://tikhub.io) | 有免费额度 |
 | Telegram / Discord / Slack | Bot 令牌 | 设置 → Messaging | 免费 |
@@ -218,7 +236,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
                      │       (served by FastAPI in production)        │
                      │  Chat · Scout · Channels · Library             │
                      │  Stock Video · Clip Studio · Motion Graphics   │
-                     │  Tools · Messaging · Settings                  │
+                     │  Tools · MCP · Settings (incl. Messaging)      │
                      └─────────────────┬──────────────────────────────┘
                                        │  HTTP + WebSocket
                                        ▼
@@ -230,8 +248,8 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
                      │                    (+ yt-dlp dynamic search)   │
                      │  Download Agent ── yt-dlp (1,800+ sites)       │
                      │  Analyzer Agent ── Whisper + AI insights       │
-                     │  Generator Agent ─ Script → TTS → Stock →      │
-                     │                    Captions → Music → MP4      │
+                     │  Smart Video ───── scenes → voice takes →      │
+                     │                    stock/own clips → render    │
                      │  Motion Renderer ─ local HyperFrames engine    │
                      │  Messaging ─────── Telegram · WhatsApp ·       │
                      │                    Discord · Slack             │
@@ -255,7 +273,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 | **AI（BYOK）** | Anthropic Claude SDK · OpenAI SDK · OpenRouter（一把密钥用上 300+ 模型）· 任意 OpenAI 兼容服务器（Ollama、LM Studio、vLLM…） |
 | **转写** | faster-whisper（本地、多语言、CPU int8） |
 | **TTS** | Edge TTS（免费）· OpenAI TTS |
-| **视频** | Pexels 素材 · FFmpeg · Ken Burns 图片兜底 |
+| **视频** | Pexels / Pixabay 素材 · FFmpeg · 静态图片 Ken Burns |
 | **字幕** | FFmpeg + ASS（逐字高亮动画） |
 | **下载** | yt-dlp（1,800+ 站点） |
 | **消息** | python-telegram-bot · discord.py · slack-sdk · neonize（WhatsApp） |
@@ -289,7 +307,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 <tr>
 <td width="50%" align="center" valign="top">
   <a href="docs/screenshots/smart-video.webp"><img src="docs/screenshots/smart-video.webp" alt="Smart Video 工作室" /></a>
-  <sub><b>Smart Video 工作室</b><br/>脚本 → 配音 → 素材 → 逐字字幕 → 音乐，一次完成。可混入你自己的片段并挑选视觉风格。</sub>
+  <sub><b>Smart Video 工作室</b><br/>每一两句话成为一个场景，渲染前就能观看、试听、修改——最多 40 个。可混入你自己的片段并挑选风格。</sub>
 </td>
 <td width="50%" align="center" valign="top">
   <a href="docs/screenshots/tools.webp"><img src="docs/screenshots/tools.webp" alt="Tools——22 个工具" /></a>
@@ -303,7 +321,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 </td>
 <td width="50%" align="center" valign="top">
   <a href="docs/screenshots/messaging.webp"><img src="docs/screenshots/messaging.webp" alt="Messaging——用手机指挥它" /></a>
-  <sub><b>Messaging——用手机指挥它</b><br/>接入 Telegram、WhatsApp、Discord 或 Slack，用同一个智能体干活，并在任务完成时收到提醒。</sub>
+  <sub><b>Messaging——用手机指挥它</b><br/>在设置里接入 Telegram、WhatsApp、Discord 或 Slack，用同一个智能体干活，并在任务完成时收到提醒。</sub>
 </td>
 </tr>
 </table>
@@ -315,7 +333,7 @@ PYTHON_BIN=./venv/bin/python VIRALMINT_VERSION=0.1.0-dev \
 ```
 ViralMint/
 ├── run.py                          # 🚀 Single entry point
-├── launcher.py                     # System-tray launcher (optional)
+├── launcher.py                     # System-tray launcher (the desktop app's entry point)
 │
 ├── backend/
 │   ├── agents/                     # Planner, Scout, Download, Analyzer, Generator
@@ -327,12 +345,12 @@ ViralMint/
 │
 ├── frontend/
 │   └── src/
-│       ├── pages/                  # Chat · Channels · Library · Stock Video · Clip Studio · …
+│       ├── pages/                  # Chat · Scout · Channels · Library · Smart Video · Clip Studio · …
 │       ├── components/             # Reusable UI (chat, settings, videos, …)
 │       ├── hooks/                  # WebSocket, settings, jobs, source video
 │       └── store/                  # Zustand global state
 │
-├── tests/                          # pytest suite (2,900+ tests)
+├── tests/                          # pytest suite (4,000+ tests)
 ├── storage/                        # Downloaded videos, audio, generated output (gitignored)
 │
 ├── requirements.txt
