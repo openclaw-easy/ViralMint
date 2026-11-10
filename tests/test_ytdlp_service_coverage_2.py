@@ -108,10 +108,15 @@ class TestIsChannelOrPlaylistUrl:
     def test_channel_or_playlist_true(self, url):
         assert ys.is_channel_or_playlist_url(url) is True
 
-    def test_watch_url_with_list_is_true(self):
-        # A watch URL that also carries &list= is part of a playlist.
-        url = "https://www.youtube.com/watch?v=abc&list=PLxyz"
-        assert ys.is_channel_or_playlist_url(url) is True
+    @pytest.mark.parametrize("url", [
+        "https://www.youtube.com/watch?v=abc&list=PLxyz",
+        "https://music.youtube.com/watch?v=abc&list=RDAMVMabc",
+        "https://youtu.be/abc?si=x&list=PLxyz",
+    ])
+    def test_a_video_link_that_names_a_playlist_is_the_video(self, url):
+        # The downloaders pass `noplaylist`: the link means the video, so it
+        # takes the single-video path rather than a relabelled channel one.
+        assert ys.is_channel_or_playlist_url(url) is False
 
 
 # ── list_channel_videos ────────────────────────────────────────────────────

@@ -331,9 +331,12 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
 
     await ws_manager.send_progress(job_id, 5, "Listing channel videos...", user_id)
 
-    videos = await list_channel_videos(url, max_videos=max_videos)
+    # raise_errors: a failed listing must say why (private, rate-limited,
+    # timed out) instead of collapsing into "No videos found".
+    from backend.core.exceptions import DownloadError
+    videos = await list_channel_videos(url, max_videos=max_videos, raise_errors=True)
     if not videos:
-        raise Exception(f"No videos found at {url}")
+        raise DownloadError(f"No videos found at {url}")
 
     total = len(videos)
     await ws_manager.send_progress(job_id, 10, f"Found {total} videos — downloading...", user_id)
@@ -352,6 +355,9 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
             continue
 
         if rate_limited:
+            # Counted like run_batch_download_urls does, so the summary's
+            # "Failed N/total" covers every video that never downloaded.
+            errors.append(f"Video {i + 1}/{total} '{video_title[:40]}': Skipped (rate-limited)")
             continue
 
         # Same cooperative gate as run_batch_download_urls — stop before the
@@ -751,6 +757,10 @@ async def run_analyze_imported(job_id: str, downloaded_video_id: str, user_id: s
         }, user_id)
 
 
+# How many of a channel's latest videos the channel analysis reads.
+ANALYSIS_VIDEOS = 30
+
+
 async def run_analyze_channel(job_id: str, url: str, user_id: str = "local"):
     """Channel analysis — fetch metadata + video list + AI strategic analysis."""
     from backend.agents.job_helper import update_job_status
@@ -812,7 +822,7 @@ async def _analyze_tiktok_channel(url: str) -> dict:
     """Fetch TikTok channel data with rich engagement metrics."""
     from backend.services.channel_reader import get_tiktok_channel
 
-    result = await get_tiktok_channel(url, max_videos=30)
+    result = await get_tiktok_channel(url, max_videos=ANALYSIS_VIDEOS)
     user_info = result.get("user") or {}
     videos = result.get("videos") or []
 
@@ -857,9 +867,15 @@ async def _analyze_tiktok_channel(url: str) -> dict:
 
 async def _analyze_youtube_channel(url: str) -> dict:
     """Fetch YouTube channel data via yt-dlp flat extraction."""
-    from backend.services.ytdlp_service import get_video_info
+    from backend.services.ytdlp_service import get_video_info, normalize_youtube_channel_url
 
-    channel_info = await get_video_info(url, flat=True)
+    # A channel ROOT lists its tabs (Videos / Shorts / Live), not videos;
+    # /videos lists the videos. Tab URLs and single videos pass unchanged.
+    url = normalize_youtube_channel_url(url)
+
+    # Only the videos the analysis reads: a big channel's whole /videos tab
+    # can't be listed inside the lookup's time bound.
+    channel_info = await get_video_info(url, flat=True, max_entries=ANALYSIS_VIDEOS)
     if not channel_info:
         return None
 
@@ -872,7 +888,7 @@ async def _analyze_youtube_channel(url: str) -> dict:
 
     entries = channel_info.get("entries") or []
     video_list = []
-    for entry in entries[:30]:
+    for entry in entries[:ANALYSIS_VIDEOS]:
         if not entry:
             continue
         vid_url = entry.get("url") or entry.get("webpage_url", "")

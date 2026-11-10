@@ -103,10 +103,50 @@ def _yt_dlp_base_opts() -> dict:
             "file_access": lambda n: 0.5 * n,                 # quick disk retries
         },
         "throttledratelimit": 100_000,  # 100 KB/s
+        # A link that names a video AND a playlist (YouTube `&list=`, a Music
+        # radio mix, a Bilibili anthology) means the video. Each extractor
+        # decides what that shape is — no URL string matching on our side.
+        # Pure playlist / channel URLs carry no video and are unaffected.
+        # Without it a pasted song + its endless mix downloaded every track
+        # onto one output stem, each overwriting the last.
+        "noplaylist": True,
     }
     if _IMPERSONATE_TARGET is not None:
         opts["impersonate"] = _IMPERSONATE_TARGET
     return opts
+
+
+# Single-video download paths pass this alongside `noplaylist`: a bare
+# playlist URL (no video id, so `noplaylist` can't apply) then fetches ONE
+# item instead of writing every entry onto the same output stem.
+_ONE_ITEM_OPTS = {"playlist_items": "1"}
+
+# A channel root is two levels (channel -> "Videos" tab -> video). Real results
+# stop there; the bound is so a strange extractor can't send us round forever.
+_MAX_PLAYLIST_DEPTH = 5
+
+
+def _single_video_info(info: dict | None) -> dict | None:
+    """Unwrap a playlist-shaped yt-dlp result to its first video, however nested.
+
+    The single-video paths read `title` / `id` / `duration` off the info
+    dict; a playlist wrapper would hand them the playlist's instead (and a
+    channel root's would hand them its "Videos" TAB, one level further out).
+    """
+    for _ in range(_MAX_PLAYLIST_DEPTH):
+        if not info or info.get("_type") != "playlist":
+            return info
+        entries = [e for e in (info.get("entries") or []) if e]
+        if not entries:
+            raise VideoUnavailableError("This link is a playlist with no playable video.")
+        logger.warning(
+            "Single-video download resolved to playlist %r — using its first item %r",
+            info.get("id"), entries[0].get("id"),
+        )
+        info = entries[0]
+    if not info or info.get("_type") != "playlist":
+        return info
+    raise VideoUnavailableError("This link is a playlist with no playable video.")
 
 
 # JS-runtime discovery cache. A positive result is process-lifetime (a runtime
@@ -525,6 +565,27 @@ def _is_permanent_error(error_str: str) -> bool:
         "members only", "this video is not available",
     ]
     return any(ind in error_str.lower() for ind in indicators)
+
+
+def _terminal_download_error(error, url: str | None = None) -> Exception:
+    """Map a yt-dlp error that ended a lookup or a download to the exception
+    callers route on. One copy, shared by the download cascade and the
+    channel listing, so both say the same thing about the same failure.
+
+    Returns the exception — the caller raises it — and records the 429
+    cooldown / failure streak on the way, as the download path always did.
+    """
+    error_str = str(error).lower()
+    if _is_permanent_error(error_str):
+        return VideoUnavailableError(f"Video unavailable: {error}")
+    if "429" in error_str or "rate" in error_str:
+        _record_rate_limit()
+        return RateLimitError(
+            f"YouTube is rate-limiting downloads from this IP. "
+            f"Try again in a few minutes. (Error: {error})"
+        )
+    _record_download_failure()
+    return DownloadError(f"Download failed: {error}")
 
 
 # Format fallback chain — progressively simpler format selections.
@@ -1004,6 +1065,7 @@ async def download_video(
             **_yt_dlp_base_opts(),
             **_yt_dlp_js_opts(),
             "outtmpl": str(output_dir / (filename or "%(id)s")) + ".%(ext)s",
+            **_ONE_ITEM_OPTS,
             "extract_flat": False,
             "socket_timeout": 30,
             "retries": 5,
@@ -1048,23 +1110,13 @@ async def download_video(
         def _attempt_download(opts):
             """Single download attempt — raises on failure."""
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                info = _single_video_info(ydl.extract_info(url, download=True))
                 return Path(ydl.prepare_filename(info)), info
 
         def _classify_and_raise(error):
             """Classify a yt-dlp error and raise the appropriate exception type."""
-            error_str = str(error).lower()
             _cleanup_partial_files(output_dir, file_stem)
-            if _is_permanent_error(error_str):
-                raise VideoUnavailableError(f"Video unavailable: {error}")
-            if "429" in error_str or "rate" in error_str:
-                _record_rate_limit()
-                raise RateLimitError(
-                    f"YouTube is rate-limiting downloads from this IP. "
-                    f"Try again in a few minutes. (Error: {error})"
-                )
-            _record_download_failure()
-            raise DownloadError(f"Download failed: {error}")
+            raise _terminal_download_error(error, url) from error
 
         # ── Main download with multi-layer retry ────────────────────────────
         last_error = None
@@ -1270,6 +1322,7 @@ async def download_video(
                         "preferredquality": "192",
                     }],
                     "http_headers": _yt_dlp_http_headers(),
+                    **_ONE_ITEM_OPTS,
                 }
                 _apply_cookies(audio_opts)
                 try:
@@ -1789,31 +1842,97 @@ async def extract_subtitles_only(
     raise DownloadError("Caption fetch failed.")  # unreachable
 
 
-async def get_video_info(url: str, flat: bool = False) -> dict:
+# Outer bounds for the metadata-only helpers. A healthy call returns in
+# seconds; these exist so a wedged extraction fails the request instead of
+# holding it (and a download-pool worker) open indefinitely. A timed-out call
+# cannot be cancelled — its worker stays held until yt-dlp returns — which is
+# why both also bound what they ask yt-dlp for.
+INFO_TIMEOUT_S = 120
+LISTING_TIMEOUT_S = 180
+
+
+async def get_video_info(url: str, flat: bool = False, max_entries: int | None = None) -> dict:
     """Get video/channel metadata without downloading.
-    Use flat=True for channels/playlists to avoid resolving every video."""
+    Use flat=True for channels/playlists to avoid resolving every video.
+
+    `max_entries` (flat only) stops the listing there. Pass it for any channel:
+    a big channel's whole /videos tab doesn't finish inside INFO_TIMEOUT_S, and
+    the timed-out thread keeps its download_pool slot until yt-dlp returns.
+
+    `flat=False` means "one video's full metadata": a playlist or channel URL
+    resolves to its FIRST video only. Without that cap a channel URL fully
+    extracted every entry — minutes to hours of player-JS work for an answer
+    that read one title. Returns {} on any failure, as before.
+    """
     def _info():
         import yt_dlp
+        if not flat:
+            extra = dict(_ONE_ITEM_OPTS)
+        else:
+            extra = {"playlistend": max_entries} if max_entries else {}
         opts = {**_yt_dlp_base_opts(), **_yt_dlp_js_opts(), "extract_flat": flat, "socket_timeout": 15,
-                "http_headers": _yt_dlp_http_headers()}
+                "http_headers": _yt_dlp_http_headers(), **extra}
         _apply_cookies(opts)
         with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=False)
+            info = ydl.extract_info(url, download=False)
+        return info if flat else _single_video_info(info)
 
     try:
         # yt-dlp can fail to return, so it never runs on the shared default
         # executor (see backend/core/executors.py).
-        return await download_pool.run(_info)
+        return await asyncio.wait_for(download_pool.run(_info), timeout=INFO_TIMEOUT_S) or {}
+    except asyncio.TimeoutError:
+        logger.error("Failed to get video info: timed out after %ss for %s", INFO_TIMEOUT_S, url[:80])
+        return {}
     except Exception as e:
         logger.error(f"Failed to get video info: {e}")
         return {}
 
 
-async def list_channel_videos(url: str, max_videos: int = 5) -> list[dict]:
+_YT_CHANNEL_TABS = {"videos", "shorts", "streams", "live", "playlists", "community", "about", "featured"}
+
+
+def normalize_youtube_channel_url(url: str) -> str:
+    """Append /videos to YouTube channel-root URLs so flat extraction returns
+    the channel's videos instead of its TAB list (Videos / Shorts / Live as
+    sub-playlists). No-op for non-YouTube URLs, tab-specific URLs, and
+    individual videos.
+
+    yt-dlp's flat extraction at a channel root returns `entries` that are the
+    channel's tabs as playlist objects — useless for "give me N videos"
+    callers, which then read a tab's URL as a video's.
+    """
+    if "youtube.com" not in url:
+        return url
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(url)
+    parts = [p for p in parsed.path.split("/") if p]
+    if not parts or parts[-1].lower() in _YT_CHANNEL_TABS:
+        return url
+    is_handle = parts[0].startswith("@") and len(parts) == 1
+    is_legacy = len(parts) == 2 and parts[0] in ("c", "channel", "user")
+    if is_handle or is_legacy:
+        new_path = parsed.path.rstrip("/") + "/videos"
+        return urlunparse(parsed._replace(path=new_path))
+    return url
+
+
+async def list_channel_videos(url: str, max_videos: int = 5,
+                              raise_errors: bool = False) -> list[dict]:
     """
     Extract video list from a channel/playlist URL without downloading.
     Returns list of dicts with video metadata (url, title, duration, views, etc).
+
+    Failures return [] (the long-standing contract for lookups) unless
+    `raise_errors=True`, which raises a classified DownloadError instead —
+    for callers that turn an empty listing into a user-facing failure and
+    must be able to say WHY ("private channel", "rate-limited", a timeout)
+    rather than "No videos found".
     """
+    # Channel-root URLs return tab playlists (Videos / Shorts) under
+    # `entries`, not the actual videos. Hit /videos directly.
+    url = normalize_youtube_channel_url(url)
+
     def _list():
         import yt_dlp
         opts = {
@@ -1821,6 +1940,7 @@ async def list_channel_videos(url: str, max_videos: int = 5) -> list[dict]:
             **_yt_dlp_js_opts(),
             "extract_flat": True,        # Don't download, just list
             "playlistend": max_videos,   # Limit number of videos
+            "socket_timeout": 30,
             "http_headers": _yt_dlp_http_headers(),
         }
         _apply_cookies(opts)
@@ -1863,9 +1983,21 @@ async def list_channel_videos(url: str, max_videos: int = 5) -> list[dict]:
         return results
 
     try:
-        return await download_pool.run(_list)
+        return await asyncio.wait_for(download_pool.run(_list), timeout=LISTING_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.error("Failed to list channel videos: timed out after %ss for %s",
+                     LISTING_TIMEOUT_S, url[:80])
+        if raise_errors:
+            raise DownloadError(
+                f"Listing the channel's videos timed out after {LISTING_TIMEOUT_S // 60} minutes."
+            )
+        return []
     except Exception as e:
         logger.error(f"Failed to list channel videos: {e}")
+        if raise_errors:
+            if isinstance(e, DownloadError):
+                raise
+            raise _terminal_download_error(e, url) from e
         return []
 
 
@@ -1876,7 +2008,9 @@ def is_channel_or_playlist_url(url: str) -> bool:
         "/playlist?", "&list=",               # YouTube playlists
         "/videos",                            # Channel videos tab
     ]
-    # A single video URL like youtube.com/watch?v=xxx without &list= is NOT a channel
-    if "watch?v=" in url and "&list=" not in url:
+    # A watch link is the video, even when it also names a playlist
+    # (`&list=`, a Music radio mix): the downloaders pass `noplaylist`, so
+    # routing it to the channel path would only relabel a one-video download.
+    if "watch?v=" in url or "youtu.be/" in url:
         return False
     return any(ind in url for ind in indicators)
