@@ -64,11 +64,33 @@ pytrends==4.9.2
 # 0.15 broke; our floor is 2026.7.4, where it is fine.
 # Optional at runtime: the service degrades to urllib's fingerprint if it's
 # missing/incompatible (see ytdlp_service._IMPERSONATE_TARGET).
-yt-dlp>=2026.7.4
-curl-cffi>=0.15
+#
+# Floor raised to 2026.10.21: YouTube's new default `tv_samsung` client and an
+# initial-data extraction fix. curl-cffi moved to the 0.16 line with it —
+# 2026.10.21's own `pin-curl-cffi` extra locks 0.16.x and its runtime range is
+# `<0.17`, so 0.16 is the upstream-tested combination. Move the curl-cffi cap
+# together with the yt-dlp release that supports the next line. The 0.15
+# FLOOR rationale above still holds (never below 0.15).
+yt-dlp>=2026.10.21
+curl-cffi>=0.16,<0.17
+
+# certifi — explicit SECURITY floor (GHSA-6q48-6c7w-9gw2: older certifi
+# bundles leave HTTPS open to MITM; yt-dlp's `default` extra requires
+# certifi>=2026.10.19). We install yt-dlp WITHOUT extras, so nothing else would
+# raise it; PyInstaller bundles whatever certifi the build resolved as the CA
+# store for yt-dlp, requests and httpx.
+certifi>=2026.10.19
 
 # Transcription
 faster-whisper
+# PyAV — faster-whisper's audio decoder, CAPPED <19. PyAV 19 removed
+# `av.open(..., metadata_errors=)`, which faster-whisper 1.2.1 (latest) still
+# passes in decode_audio, so EVERY transcription raises TypeError — captions,
+# transcripts and clip picking all go dark. faster-whisper declares only
+# `av>=11`, so an unpinned resolve (a fresh install, CI's desktop build) lands
+# on 19. av 17.0.1 and 18.x accept the kwarg; tests/test_whisper_av_compat.py
+# notices a drift. Lift only when a faster-whisper release stops passing it.
+av>=17,<19
 
 # Video generation
 # This used to be `moviepy==1.0.3`, which nothing imported — it was four
@@ -79,7 +101,11 @@ faster-whisper
 # see because the source tree finds ffmpeg on PATH.
 # Verified: imageio-ffmpeg 0.6.0 ships a working ffmpeg 7.1.
 # (ffprobe is NOT included — desktop/scripts/fetch-ffprobe.sh vendors it.)
-imageio-ffmpeg>=0.6.0
+# PINNED, not a floor: imageio-ffmpeg picks the ffmpeg every packaged build
+# runs, and a clean resolve now lands on 0.8.1 = ffmpeg 9.0, while the vendored
+# ffprobe is 7.1 and every filter graph was verified under 7.1. Moving ffmpeg is
+# a decision with its own test run, not a side effect of a resolve.
+imageio-ffmpeg==0.6.0
 
 # Pillow >=12.2 closes 6 CVEs (CVE-2026-25990 / 40192 / 42308–11) found by
 # pip-audit on 2026-05-26. The Image.ANTIALIAS monkeypatch that used to live
@@ -102,6 +128,14 @@ playwright>=1.59.0
 # fresh installs end-to-end.
 httpx>=0.28.1,<1.0
 aiohttp>=3.14.0,<4  # CVE-2026-34993, CVE-2026-47265
+
+# News article extraction — backend/services/news_scraper.py. trafilatura is
+# the primary extractor (it brings lxml, which the <p>-tag fallback imports
+# directly); feedparser parses Google News + the RSS sources. Neither was ever
+# declared: a dev venv had them as somebody else's dependency or not at all, so
+# a clean install (and every packaged build) hit an ImportError in news scout.
+trafilatura>=1.8
+feedparser>=6.0
 
 # (`python-jose` was removed 2026-08-31: nothing in the tree imports it — this
 # variant has no JWT of its own, it is BYOK against provider APIs — and it was

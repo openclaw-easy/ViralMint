@@ -25,6 +25,8 @@ the backend is launched by running `run.py` with the project's Python.
 import sys
 import os
 import json
+import functools
+import traceback
 import subprocess
 import threading
 import webbrowser
@@ -860,15 +862,73 @@ def _get_tray_icon(state, frame=0):
 
 _tray_icon = None
 _gui_callback = None  # set by GUI if tkinter is available
-_last_tray_state = None
+_last_tray_state = None  # the state the tray currently SHOWS; written on the tray thread only
 _starting_anim_stop = threading.Event()
 _starting_anim_thread = None
+
+
+# ─── Tray thread discipline ───────────────────────────────────────────────────
+#
+# On macOS every native tray call (NSStatusItem image / tooltip / menu) must
+# run on the main thread, which is the thread `tray.run()` blocks on. pystray's
+# `icon.icon` / `.title` / `.menu` setters call AppKit directly from whatever
+# thread assigns them, and macOS 27 turned an off-main call from "tolerated"
+# into a process abort: EXC_BREAKPOINT in
+# `-[BSServiceMainRunLoopQueue assertBarrierOnQueue]` under
+# `-[NSStatusItem setMenu:]`, ~9 s after launch, from the state poller thread.
+# The launcher refreshes the tray from five background threads (poller, pulse
+# animation, auto-start, stop, restart), so every tray mutation below goes
+# through `_on_tray_thread`, and the setters are never touched from anywhere
+# else. The /health probe that decides the state stays on the calling thread —
+# only the native update hops.
+
+
+def _on_tray_thread(fn):
+    """Run `fn` on the thread that owns the tray's native widgets.
+
+    macOS, off the main thread: queued on the main operation queue, which the
+    `NSApplication run` loop inside `tray.run()` drains in order; an operation
+    queued before the loop starts runs as soon as it does. Already on the main
+    thread, or on Windows/Linux (pystray's backends there are thread-safe):
+    runs inline. Either way an exception in `fn` is logged, never propagated
+    — an exception escaping an ObjC block would take the process down.
+    """
+    if sys.platform != "darwin" or threading.current_thread() is threading.main_thread():
+        _call_tray_fn(fn)
+        return
+    from Foundation import NSOperationQueue
+
+    def _block():  # PyObjC bridges only a plain function to a block — never a partial
+        _call_tray_fn(fn)
+
+    NSOperationQueue.mainQueue().addOperationWithBlock_(_block)
+
+
+def _call_tray_fn(fn):
+    try:
+        fn()
+    except Exception:
+        print("Tray update failed:", file=sys.stderr)
+        traceback.print_exc()
+
+
+def _tray_setup(icon):
+    """pystray `setup` callback: show the icon.
+
+    pystray's default setup sets `icon.visible = True` from its own worker
+    thread, which pushes the image and tooltip into the NSStatusItem off-main.
+    Hop it onto the tray thread so the launcher never makes a native tray call
+    from a background thread, not even through pystray.
+    """
+    def _show():
+        icon.visible = True
+    _on_tray_thread(_show)
 
 
 def _start_starting_animation():
     """Begin the breathing-pulse animation while the tray sits in
     "starting" state. Daemon thread alternates icon frames every 750ms;
-    exits when state leaves "starting" or when stop is signaled.
+    exits when the tray leaves "starting" or when stop is signaled.
 
     Cheap: just swaps a pre-cached PIL Image; no PIL ops per frame, no
     menu rebuild. Two-frame breathing reads as "actively loading"
@@ -883,16 +943,12 @@ def _start_starting_animation():
     def _loop():
         frame = 0
         while not _starting_anim_stop.is_set():
-            # Bail if we've left "starting" — _refresh_tray will set the
-            # final running/stopped icon and we shouldn't fight it.
-            if _get_state() != "starting":
+            # Bail if the tray has left "starting" — _apply_tray_state set
+            # the final running/stopped icon and we shouldn't fight it.
+            if _last_tray_state != "starting":
                 return
-            if _tray_icon:
-                try:
-                    _tray_icon.icon = _get_tray_icon("starting", frame=frame)
-                except Exception:
-                    pass
-                frame = 1 - frame
+            _on_tray_thread(functools.partial(_set_starting_frame, frame))
+            frame = 1 - frame
             # Use Event.wait() so a stop signal exits promptly instead of
             # waiting out the full 750ms tick.
             if _starting_anim_stop.wait(0.75):
@@ -904,15 +960,33 @@ def _start_starting_animation():
     _starting_anim_thread.start()
 
 
+def _set_starting_frame(frame):
+    """Swap the pulse frame. Tray thread only. A frame that lands after
+    the tray left "starting" is dropped, so it never overwrites the final
+    running/stopped icon."""
+    if _tray_icon and _last_tray_state == "starting":
+        _tray_icon.icon = _get_tray_icon("starting", frame=frame)
+
+
 def _stop_starting_animation():
     """Signal the pulse thread to exit. Safe to call repeatedly."""
     _starting_anim_stop.set()
 
 
 def _refresh_tray():
-    """Update tray icon + rebuild menu to reflect current state.
+    """Sync the tray with the backend's real state. Safe from any thread:
+    the /health probe runs on the caller, the native update on the tray
+    thread."""
+    if not _tray_icon:
+        return
+    state = _get_state()
+    _on_tray_thread(functools.partial(_apply_tray_state, state))
 
-    Skips the menu rebuild when the state hasn't changed — rebuilding
+
+def _apply_tray_state(state):
+    """Update tray icon, menu and tooltip to `state`. Tray thread only.
+
+    Skips the rebuild when the shown state hasn't changed — rebuilding
     the native NSMenu on every poll tick flickers on macOS.
 
     Tri-state ("running" / "starting" / "stopped") replaces the old
@@ -921,11 +995,11 @@ def _refresh_tray():
     with entering/leaving the "starting" state.
     """
     global _last_tray_state
-    if not _tray_icon:
+    if not _tray_icon or state == _last_tray_state:
         return
-    state = _get_state()
-    if state == _last_tray_state:
-        return
+    # Written before the animation starts: its thread exits as soon as the
+    # shown state isn't "starting".
+    _last_tray_state = state
 
     if state == "starting":
         # Static frame; the animation thread will start swapping.
@@ -935,10 +1009,8 @@ def _refresh_tray():
         _stop_starting_animation()
         _tray_icon.icon = _get_tray_icon(state)
 
-    _tray_icon.menu = _build_tray_menu()
-    _tray_icon.update_menu()
-    _update_tray_title()
-    _last_tray_state = state
+    _tray_icon.menu = _build_tray_menu(state)  # the setter rebuilds the native menu
+    _tray_icon.title = _tray_title_for(state)
 
 
 def _start_state_poller(slow_interval=2.0, fast_interval=0.5):
@@ -1119,8 +1191,8 @@ def _tray_copy_url(icon, item):
     _copy_to_clipboard(URL)
 
 
-def _build_tray_menu():
-    """Build a fresh tray menu reflecting current service state.
+def _build_tray_menu(state):
+    """Build a fresh tray menu reflecting service `state`.
 
     Layout (top → bottom):
       [status header — disabled]
@@ -1142,7 +1214,6 @@ def _build_tray_menu():
     import pystray
     from pystray import MenuItem as Item
 
-    state = _get_state()
     # Emoji renders in its native color even on disabled macOS menu items
     # (the OS keeps colored glyphs); plain ○ inherits the disabled-gray
     # tone, giving a clean traffic-light contrast without a per-item
@@ -1217,11 +1288,10 @@ def create_tray():
     _tray_icon = pystray.Icon(
         APP_NAME,
         _get_tray_icon(initial_state),
-        _tray_safe_text(f"{APP_NAME} — Stopped"),
-        menu=_build_tray_menu(),
+        _tray_title_for(initial_state),
+        menu=_build_tray_menu(initial_state),
     )
     _last_tray_state = initial_state
-    _update_tray_title()
     if initial_state == "starting":
         _start_starting_animation()
     return _tray_icon
@@ -1253,20 +1323,30 @@ def _tray_safe_text(text: str) -> str:
     return text.replace("\u2014", "-").replace("\u2013", "-").replace("\u2026", "...")
 
 
+def _tray_title_for(state) -> str:
+    """Tray tooltip for `state`. Version (read from pyproject.toml at module
+    load) is appended so the user sees what release they're on without
+    having to open the web UI."""
+    ver = f" · v{VERSION}" if VERSION else ""
+    if state == "running":
+        return _tray_safe_text(f"{APP_NAME} — Running (port {PORT}){ver}")
+    if state == "starting":
+        return _tray_safe_text(f"{APP_NAME} — Starting…{ver}")
+    return _tray_safe_text(f"{APP_NAME} — Stopped{ver}")
+
+
 def _update_tray_title():
-    """Keep the tray tooltip text in sync with status. Version (read from
-    pyproject.toml at module load) is appended so the user sees what release
-    they're on without having to open the web UI."""
+    """Re-sync the tooltip with the real state. Safe from any thread."""
     if not _tray_icon:
         return
     state = _get_state()
-    ver = f" · v{VERSION}" if VERSION else ""
-    if state == "running":
-        _tray_icon.title = _tray_safe_text(f"{APP_NAME} — Running (port {PORT}){ver}")
-    elif state == "starting":
-        _tray_icon.title = _tray_safe_text(f"{APP_NAME} — Starting…{ver}")
-    else:
-        _tray_icon.title = _tray_safe_text(f"{APP_NAME} — Stopped{ver}")
+    _on_tray_thread(functools.partial(_set_tray_title, state))
+
+
+def _set_tray_title(state):
+    """Tray thread only."""
+    if _tray_icon:
+        _tray_icon.title = _tray_title_for(state)
 
 
 # ─── GUI Window (tkinter — optional) ──────────────────────────────────────────
@@ -1490,7 +1570,7 @@ def _run_with_gui():
 
     # Start tray
     tray = create_tray()
-    threading.Thread(target=tray.run, daemon=True).start()
+    threading.Thread(target=tray.run, kwargs={"setup": _tray_setup}, daemon=True).start()
 
     # Keep tray in sync with real backend state (external start/stop too)
     _start_state_poller()
@@ -1567,7 +1647,7 @@ def _run_tray_only():
     threading.Thread(
         target=_auto_start_and_open, daemon=True, name="launcher-auto",
     ).start()
-    tray.run()  # blocks until Quit
+    tray.run(setup=_tray_setup)  # blocks until Quit
     stop_service()
 
 
@@ -1593,6 +1673,26 @@ def _acquire_single_instance():
         return None
 
 
+def _exit_after_signal():
+    """Leave the launcher once the backend is stopped.
+
+    Python runs a signal handler on the main thread the next time it executes
+    Python code there. With the tray loop running that is inside a native
+    callback (a `_on_tray_thread` block or a pystray menu action), and a
+    `SystemExit` raised there escapes into Objective-C, which aborts the
+    process with a crash report (seen on SIGTERM). So while the tray runs,
+    end its loop instead — exactly what the Quit menu item does;
+    `_run_tray_only` then returns and the process exits normally. Only when
+    there is no loop to end is `sys.exit` the way out.
+    """
+    if _tray_icon is not None and getattr(_tray_icon, "_running", False):
+        _tray_icon.stop()
+        if _gui_callback:
+            _gui_callback("quit")
+        return
+    sys.exit(0)
+
+
 def _install_signal_handlers():
     """Ensure Ctrl+C / SIGTERM stops the backend instead of orphaning it."""
     import signal
@@ -1601,7 +1701,7 @@ def _install_signal_handlers():
         try:
             stop_service()
         finally:
-            sys.exit(0)
+            _exit_after_signal()
 
     for sig in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None)):
         if sig is None:
