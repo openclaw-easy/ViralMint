@@ -32,6 +32,23 @@ MIN_DISK_SPACE_MB = 500  # Minimum free disk space required to start downloads
 from backend.core.http_utils import jittered_delay
 
 
+def _download_stem(platform_video_id: str | None) -> str:
+    """A file stem owned by exactly ONE download.
+
+    The scout path used to name the file after the platform's video id, so
+    the same video downloaded from two scout rows (two scouts of a niche a
+    week apart) wrote ONE file that both DownloadedVideo rows pointed at:
+    deleting either row deleted the other's video, and two concurrent jobs
+    swept each other's .part files. The id stays as a readable prefix; the
+    suffix makes the stem unique, as the URL path's uuid stems always were.
+    """
+    import re
+    from uuid import uuid4
+    prefix = re.sub(r"[^A-Za-z0-9_-]", "", platform_video_id or "")[:40]
+    suffix = uuid4().hex[:8]
+    return f"{prefix}_{suffix}" if prefix else f"dl_{suffix}"
+
+
 class DownloadAgent:
     async def run(
         self,
@@ -82,6 +99,8 @@ class DownloadAgent:
             await ws_manager.send_progress(job_id, (i / total) * 100, step, user_id)
             await update_job_status(job_id, "running", progress_pct=(i / total) * 100, current_step=step)
 
+            sr = None
+            stem = None
             try:
                 # Load scout result
                 async with AsyncSessionLocal() as db:
@@ -100,10 +119,11 @@ class DownloadAgent:
                     await asyncio.sleep(jittered_delay())
 
                 # Download
+                stem = _download_stem(sr.video_id)
                 dl_result = await download_video(
                     url=sr.video_url,
                     output_dir=settings.VIDEOS_DIR,
-                    filename=sr.video_id,
+                    filename=stem,
                     extract_audio=True,
                 )
 
@@ -177,7 +197,7 @@ class DownloadAgent:
 
             except (DownloadStalledError, DownloadTimeoutError) as e:
                 # An ABANDONED download: its worker thread is still running and
-                # still owns `<video_id>*.part` — its cleanup will delete them
+                # still owns this download's `<stem>*.part` — its cleanup will delete them
                 # later. The AI URL-fix retry below writes into that same stem,
                 # so it must not run here; the error is recorded and the batch
                 # moves on.
@@ -201,10 +221,13 @@ class DownloadAgent:
                     corrected_url = await ai_fix_url(sr.video_url, str(first_error), user_settings)
                     if corrected_url:
                         logger.info(f"Retrying download with AI-corrected URL: {corrected_url}")
+                        # Same stem: the first attempt's thread has returned
+                        # (abandonments never get here), so the stem is
+                        # still this download's alone.
                         dl_result = await download_video(
                             url=corrected_url,
                             output_dir=settings.VIDEOS_DIR,
-                            filename=sr.video_id,
+                            filename=stem or _download_stem(sr.video_id),
                             extract_audio=True,
                         )
                         # Save to DB with full metadata (same as success path above)

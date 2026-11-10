@@ -328,3 +328,48 @@ class TestAIRetryPath:
         ai_fix.assert_awaited()  # the repair was attempted
         assert downloaded == []
         assert "failed" in _final_status_calls(infra["ujs"])
+
+
+class TestEachDownloadOwnsItsFile:
+    """The stem used to be the platform video id, so the same video from two
+    scout rows gave two Library rows ONE file: deleting either deleted the
+    other's video, and two concurrent jobs swept each other's .part files."""
+
+    def test_stems_are_unique_and_keep_a_readable_prefix(self):
+        from backend.agents.downloader import _download_stem
+        a, b = _download_stem("dQw4w9WgXcQ"), _download_stem("dQw4w9WgXcQ")
+        assert a != b
+        assert a.startswith("dQw4w9WgXcQ_") and b.startswith("dQw4w9WgXcQ_")
+
+    def test_unsafe_or_missing_ids_still_give_a_safe_stem(self):
+        from backend.agents.downloader import _download_stem
+        assert "/" not in _download_stem("../../etc/passwd")
+        assert _download_stem(None).startswith("dl_")
+        assert _download_stem("").startswith("dl_")
+
+    def test_the_same_video_twice_writes_two_files(self, infra):
+        from backend.agents.downloader import DownloadAgent
+        sr = _make_sr("a")
+        dl = AsyncMock(return_value={"video_path": "/tmp/v.mp4", "duration": 30})
+        with patch("backend.agents.downloader.AsyncSessionLocal",
+                   side_effect=lambda: _fake_session(sr)), \
+             patch("backend.agents.downloader.download_video", new=dl):
+            _run(DownloadAgent().run("job_1", ["a", "a"], user_id="local"))
+        stems = [c.kwargs["filename"] for c in dl.await_args_list]
+        assert len(stems) == 2 and stems[0] != stems[1]
+        assert all(s.startswith(sr.video_id + "_") for s in stems)
+
+    def test_the_ai_url_fix_retry_reuses_the_attempts_stem(self, infra):
+        from backend.agents.downloader import DownloadAgent
+        from backend.core.exceptions import DownloadError
+        sr = _make_sr("a")
+        dl = AsyncMock(side_effect=[DownloadError("Unsupported URL: typo"),
+                                    {"video_path": "/tmp/v.mp4", "duration": 30}])
+        with patch("backend.agents.downloader.AsyncSessionLocal",
+                   side_effect=lambda: _fake_session(sr)), \
+             patch("backend.agents.downloader.download_video", new=dl), \
+             patch("backend.core.ai_retry.ai_fix_url",
+                   new=AsyncMock(return_value="https://www.youtube.com/watch?v=abd")):
+            _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
+        first, retry = (c.kwargs["filename"] for c in dl.await_args_list)
+        assert first == retry
