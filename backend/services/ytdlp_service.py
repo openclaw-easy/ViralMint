@@ -103,10 +103,50 @@ def _yt_dlp_base_opts() -> dict:
             "file_access": lambda n: 0.5 * n,                 # quick disk retries
         },
         "throttledratelimit": 100_000,  # 100 KB/s
+        # A link that names a video AND a playlist (YouTube `&list=`, a Music
+        # radio mix, a Bilibili anthology) means the video. Each extractor
+        # decides what that shape is — no URL string matching on our side.
+        # Pure playlist / channel URLs carry no video and are unaffected.
+        # Without it a pasted song + its endless mix downloaded every track
+        # onto one output stem, each overwriting the last.
+        "noplaylist": True,
     }
     if _IMPERSONATE_TARGET is not None:
         opts["impersonate"] = _IMPERSONATE_TARGET
     return opts
+
+
+# Single-video download paths pass this alongside `noplaylist`: a bare
+# playlist URL (no video id, so `noplaylist` can't apply) then fetches ONE
+# item instead of writing every entry onto the same output stem.
+_ONE_ITEM_OPTS = {"playlist_items": "1"}
+
+# A channel root is two levels (channel -> "Videos" tab -> video). Real results
+# stop there; the bound is so a strange extractor can't send us round forever.
+_MAX_PLAYLIST_DEPTH = 5
+
+
+def _single_video_info(info: dict | None) -> dict | None:
+    """Unwrap a playlist-shaped yt-dlp result to its first video, however nested.
+
+    The single-video paths read `title` / `id` / `duration` off the info
+    dict; a playlist wrapper would hand them the playlist's instead (and a
+    channel root's would hand them its "Videos" TAB, one level further out).
+    """
+    for _ in range(_MAX_PLAYLIST_DEPTH):
+        if not info or info.get("_type") != "playlist":
+            return info
+        entries = [e for e in (info.get("entries") or []) if e]
+        if not entries:
+            raise VideoUnavailableError("This link is a playlist with no playable video.")
+        logger.warning(
+            "Single-video download resolved to playlist %r — using its first item %r",
+            info.get("id"), entries[0].get("id"),
+        )
+        info = entries[0]
+    if not info or info.get("_type") != "playlist":
+        return info
+    raise VideoUnavailableError("This link is a playlist with no playable video.")
 
 
 # JS-runtime discovery cache. A positive result is process-lifetime (a runtime
@@ -277,7 +317,9 @@ def _try_update_ytdlp() -> bool:
         # fails on modern YouTube). Bounded, pip errors loudly instead of
         # installing a silently-broken downloader.
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp>=2026.7.4"],
+            # Same floor as requirements.txt (2026.10.21: YouTube initial-data
+            # fix + tv_samsung default client) — raise them together.
+            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp>=2026.10.21"],
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode == 0:
@@ -503,6 +545,34 @@ def _is_bot_detection_error(error_str: str) -> bool:
     return any(ind in error_str.lower() for ind in indicators)
 
 
+def _sign_in_message(url: str | None) -> str:
+    """The bot-check / sign-in message, worded for the host that asked.
+
+    yt-dlp's "login required" / "--cookies-from-browser" wording fires on
+    Instagram, TikTok, X and others too — telling those users "YouTube
+    requires sign-in" sent them to the wrong site.
+    """
+    from urllib.parse import urlparse
+    try:
+        host = (urlparse(url or "").hostname or "").lower()
+    except ValueError:
+        host = ""
+    if not host or "youtube" in host or host.endswith("youtu.be"):
+        return (
+            "YouTube requires sign-in to verify you're not a bot. "
+            "Install Chrome/Brave/Firefox and log into YouTube, then retry."
+        )
+    site = host[4:] if host.startswith("www.") else host
+    return (
+        f"{site} wants you signed in before it serves this video. "
+        f"Sign in to {site} in Chrome/Brave/Firefox, open the video once, then retry."
+    )
+
+
+def _is_403(error_str: str) -> bool:
+    return "http error 403" in error_str or "403: forbidden" in error_str
+
+
 def _is_transient_error(error_str: str) -> bool:
     """Check if the error is transient (worth retrying after a delay)."""
     indicators = [
@@ -525,6 +595,37 @@ def _is_permanent_error(error_str: str) -> bool:
         "members only", "this video is not available",
     ]
     return any(ind in error_str.lower() for ind in indicators)
+
+
+def _terminal_download_error(error, url: str | None = None) -> Exception:
+    """Map a yt-dlp error that ended a lookup or a download to the exception
+    callers route on. One copy, shared by the download cascade and the
+    channel listing, so both say the same thing about the same failure.
+
+    Returns the exception — the caller raises it — and records the 429
+    cooldown / failure streak on the way, as the download path always did.
+    """
+    error_str = str(error).lower()
+    if _is_permanent_error(error_str):
+        return VideoUnavailableError(f"Video unavailable: {error}")
+    if _is_403(error_str):
+        # Say what happened: the host refused, and dropping cookies (the one
+        # recovery a 403 has) did not change its mind.
+        from urllib.parse import urlparse
+        host = (urlparse(url or "").hostname or "the site") if url else "the site"
+        _record_download_failure()
+        return DownloadError(
+            f"Download failed: {host} refused the download (HTTP 403 Forbidden), "
+            f"with and without browser cookies. ({error})"
+        )
+    if "429" in error_str or "rate" in error_str:
+        _record_rate_limit()
+        return RateLimitError(
+            f"YouTube is rate-limiting downloads from this IP. "
+            f"Try again in a few minutes. (Error: {error})"
+        )
+    _record_download_failure()
+    return DownloadError(f"Download failed: {error}")
 
 
 # Format fallback chain — progressively simpler format selections.
@@ -919,12 +1020,65 @@ async def _await_with_stall_guard(
             task.cancel()
 
 
+# How often a backoff looks up from its sleep, and how long one look may take.
+_CANCEL_POLL_S = 1
+_CANCEL_CHECK_TIMEOUT_S = 5
+
+
+async def _job_is_cancelled(job_id: str | None) -> bool:
+    """`job_cancelled`, reading nothing for a download with no job."""
+    if not job_id:
+        return False
+    from backend.agents.job_helper import job_cancelled
+    return await job_cancelled(job_id)
+
+
+def _job_cancelled_from_thread(job_id: str | None, loop) -> bool:
+    """`job_cancelled`, for the download worker thread: the read runs on the loop.
+
+    Bounded and never raises, because this thread may have been abandoned by a
+    stall (see backend/core/executors.py) and can outlive a stopped or closed
+    loop: a read that can't finish counts as "not cancelled", as a DB error
+    does in `job_cancelled`. No job means no read, so job-less downloads are
+    unchanged.
+    """
+    if not job_id or loop is None:
+        return False
+    coro = _job_is_cancelled(job_id)
+    try:
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+    except Exception:  # noqa: BLE001 — the loop is gone
+        coro.close()
+        return False
+    try:
+        return future.result(timeout=_CANCEL_CHECK_TIMEOUT_S) is True
+    except Exception:  # noqa: BLE001 — a timeout or a failed read: keep going
+        future.cancel()
+        return False
+
+
+def _backoff_sleep(seconds: float, job_id: str | None, loop) -> None:
+    """Sleep out a retry backoff, ending at once if the job is cancelled. The
+    caller's next attempt then finds the cancel and stops the ladder."""
+    if not job_id:
+        time.sleep(seconds)
+        return
+    remaining = seconds
+    while remaining > 0:
+        if _job_cancelled_from_thread(job_id, loop):
+            return
+        step = min(_CANCEL_POLL_S, remaining)
+        time.sleep(step)
+        remaining -= step
+
+
 async def download_video(
     url: str,
     output_dir: Path = None,
     filename: str = None,
     extract_audio: bool = True,
     options: dict | None = None,
+    job_id: str | None = None,
 ) -> dict:
     """
     Download a video using yt-dlp.
@@ -946,6 +1100,12 @@ async def download_video(
     always the one requested (a cap falls through to the uncapped rungs rather
     than erroring). Surfacing it is what lets a UI say "you asked for 4K, this
     source only had 1080p" instead of implying the cap was honoured.
+
+    `job_id`: when given, a cancel of that job stops the ladder — no further
+    attempt, format rung, cookie refresh or audio re-download starts, and a
+    backoff wakes within a second. The transfer in flight can't be
+    interrupted. The ladder ends with the error it already has (wrapped as
+    "Download cancelled: …"), so the cancelled job keeps its real reason.
     """
     if output_dir is None:
         output_dir = settings.VIDEOS_DIR
@@ -976,6 +1136,9 @@ async def download_video(
         logger.info(f"Rate-limit cooldown active — waiting {cooldown:.0f}s before downloading {url[:60]}")
         await asyncio.sleep(cooldown)
 
+    # The worker thread reads the job's cancel flag through the loop.
+    loop = asyncio.get_running_loop()
+
     def _download():
         """Run one download, sweeping part-files on EVERY exit path.
 
@@ -1004,6 +1167,7 @@ async def download_video(
             **_yt_dlp_base_opts(),
             **_yt_dlp_js_opts(),
             "outtmpl": str(output_dir / (filename or "%(id)s")) + ".%(ext)s",
+            **_ONE_ITEM_OPTS,
             "extract_flat": False,
             "socket_timeout": 30,
             "retries": 5,
@@ -1048,23 +1212,23 @@ async def download_video(
         def _attempt_download(opts):
             """Single download attempt — raises on failure."""
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                info = _single_video_info(ydl.extract_info(url, download=True))
                 return Path(ydl.prepare_filename(info)), info
 
         def _classify_and_raise(error):
             """Classify a yt-dlp error and raise the appropriate exception type."""
-            error_str = str(error).lower()
             _cleanup_partial_files(output_dir, file_stem)
-            if _is_permanent_error(error_str):
-                raise VideoUnavailableError(f"Video unavailable: {error}")
-            if "429" in error_str or "rate" in error_str:
-                _record_rate_limit()
-                raise RateLimitError(
-                    f"YouTube is rate-limiting downloads from this IP. "
-                    f"Try again in a few minutes. (Error: {error})"
-                )
-            _record_download_failure()
-            raise DownloadError(f"Download failed: {error}")
+            raise _terminal_download_error(error, url) from error
+
+        def _stop_if_cancelled(error):
+            """End the ladder when the user has cancelled, with the error we
+            already have, so the caller keeps it as the reason. Not through
+            _classify_and_raise: a cancel is not a yt-dlp failure, so it must
+            not count toward the auto-update streak."""
+            if error is not None and _job_cancelled_from_thread(job_id, loop):
+                logger.info("Download of %s stops here — job %s was cancelled", url[:80], job_id[:8])
+                _cleanup_partial_files(output_dir, file_stem)
+                raise DownloadError(f"Download cancelled: {error}") from error
 
         # ── Main download with multi-layer retry ────────────────────────────
         last_error = None
@@ -1074,15 +1238,25 @@ async def download_video(
         # proved un-embeddable for this source, re-attaching it on the next
         # format rung would just fail the same way.
         opt_pps_dropped = False
+        # Set when an error proved no other format can help (a 403 with no
+        # cookies left to drop) — ends the format chain outright.
+        stop_format_chain = False
 
         # `_format_chain` is FORMAT_FALLBACK_CHAIN unless the caller asked for
         # a specific quality — see download_options.format_chain() on why an
         # unrequested download must keep the module-level chain verbatim.
         for fmt_idx, fmt in enumerate(_format_chain):
+            if fmt_idx > 0:
+                _stop_if_cancelled(last_error)
+            if stop_format_chain:
+                logger.info("Skipping format fallback (HTTP 403 survived the cookie drop)")
+                break
             video_opts = {**base_opts, "format": fmt}
 
             # Up to 2 attempts per format (original + 1 retry for transient errors)
             for attempt in range(2):
+                if attempt > 0:
+                    _stop_if_cancelled(last_error)
                 try:
                     video_path, info = _attempt_download(video_opts)
                     duration = info.get("duration", 0)
@@ -1125,40 +1299,55 @@ async def download_video(
                     # again — including across the format fallbacks, hence the
                     # mirror onto base_opts, which every later format is
                     # rebuilt from.
-                    if ("http error 403" in error_str or "403: forbidden" in error_str) \
-                            and _drop_cookies_for_403(video_opts):
-                        for _ck in ("cookiefile", "cookiesfrombrowser"):
-                            base_opts.pop(_ck, None)
-                        logger.warning(
-                            "HTTP 403 with cookies applied — retrying without them "
-                            "(re-enables the token-free player clients)"
-                        )
+                    if _is_403(error_str):
+                        if _drop_cookies_for_403(video_opts):
+                            for _ck in ("cookiefile", "cookiesfrombrowser"):
+                                base_opts.pop(_ck, None)
+                            logger.warning(
+                                "HTTP 403 with cookies applied — retrying without them "
+                                "(re-enables the token-free player clients)"
+                            )
+                            _cleanup_partial_files(output_dir, file_stem)
+                            continue
+                        if attempt == 0:
+                            # One plain retry: a fresh extraction gets fresh
+                            # signed URLs, which clears an expired one.
+                            logger.warning("HTTP 403 without cookies, retrying once in 5s: %s", e)
+                            _cleanup_partial_files(output_dir, file_stem)
+                            _backoff_sleep(5, job_id, loop)
+                            continue
+                        # Still refused, with no cookies left to drop: that
+                        # was the only recovery a 403 has. A different format
+                        # string is signed and refused the same way, so
+                        # walking the chain only repeats the refusal (with a
+                        # sleep each time).
+                        logger.warning("HTTP 403 persisted — ending the format chain: %s", e)
                         _cleanup_partial_files(output_dir, file_stem)
-                        continue
+                        stop_format_chain = True
+                        break
 
                     # ── Bot detection: retry with fresh cookies ────
-                    if _is_bot_detection_error(str(e)) and attempt == 0:
-                        browser = _detect_cookie_browser()
+                    if _is_bot_detection_error(str(e)):
+                        # attempt > 0: the cookie retry didn't help, so the
+                        # wall is real — end here instead of repeating it on
+                        # every remaining attempt and format rung.
+                        browser = _detect_cookie_browser() if attempt == 0 else None
                         if browser:
+                            _stop_if_cancelled(e)      # before a possible Keychain prompt
                             logger.warning(f"Bot detection triggered, retrying with {browser} cookies")
                             _cleanup_partial_files(output_dir, file_stem)
                             _apply_cookies(video_opts)
-                            import time as _time
-                            _time.sleep(3)
+                            _backoff_sleep(3, job_id, loop)
                             continue  # Retry with cookies
                         else:
                             _cleanup_partial_files(output_dir, file_stem)
-                            raise DownloadError(
-                                "YouTube requires sign-in to verify you're not a bot. "
-                                "Install Chrome/Brave/Firefox and log into YouTube, then retry."
-                            )
+                            raise DownloadError(_sign_in_message(url))
 
                     # ── Transient errors: retry once after delay ────
                     if _is_transient_error(error_str) and attempt == 0:
                         logger.warning(f"Transient error (attempt {attempt + 1}), retrying in 5s: {e}")
                         _cleanup_partial_files(output_dir, file_stem)
-                        import time as _time
-                        _time.sleep(5)
+                        _backoff_sleep(5, job_id, loop)
                         continue  # Retry
 
                     # ── Format-related errors: try next format ────
@@ -1202,8 +1391,7 @@ async def download_video(
                     if attempt == 0:
                         logger.warning(f"Download error (attempt 1), retrying in 5s: {e}")
                         _cleanup_partial_files(output_dir, file_stem)
-                        import time as _time
-                        _time.sleep(5)
+                        _backoff_sleep(5, job_id, loop)
                         continue
 
                     # Second attempt also failed — try next format
@@ -1225,6 +1413,18 @@ async def download_video(
             if actual:
                 logger.info(f"Video file extension changed: expected {video_path.suffix}, found {actual.suffix}")
                 video_path = actual
+
+        # The one invariant every caller saves a Library row on: a success
+        # names a file that exists and holds bytes. yt-dlp returning cleanly
+        # is not that — without this check a missing or empty file became a
+        # row the Library then hides.
+        if not video_path or not video_path.exists() or video_path.stat().st_size == 0:
+            _record_download_failure()
+            raise DownloadError(
+                "Download finished but no usable video file is on disk."
+                if not video_path or not video_path.exists() else
+                "Download finished but the video file is empty (0 bytes)."
+            )
 
         # Extract subtitles from downloaded files
         subtitles = _collect_subtitles(output_dir, file_stem_resolved, info=info)
@@ -1256,7 +1456,7 @@ async def download_video(
         audio_dir.mkdir(parents=True, exist_ok=True)
         if extract_audio and video_path and video_path.exists():
             audio_path = _extract_audio_locally(video_path, audio_dir, file_stem_resolved)
-            if not audio_path:
+            if not audio_path and not _job_cancelled_from_thread(job_id, loop):
                 # Fallback: re-download audio from YouTube
                 logger.info("Local audio extraction failed, falling back to yt-dlp download")
                 audio_opts = {
@@ -1270,6 +1470,7 @@ async def download_video(
                         "preferredquality": "192",
                     }],
                     "http_headers": _yt_dlp_http_headers(),
+                    **_ONE_ITEM_OPTS,
                 }
                 _apply_cookies(audio_opts)
                 try:
@@ -1620,20 +1821,23 @@ def _pick_subtitle_track(
 
     Per language, in caller order: a creator track first (exact key, then a
     regional variant such as `en-US` / `es-419`), then the auto-generated one
-    (exact key, then YouTube's `<lang>-orig` original-language ASR track).
+    (exact key, then YouTube's `<lang>-orig` original-language ASR track,
+    then a script or regional variant — YouTube keys Chinese auto tracks
+    `zh-Hans` / `zh-Hant`, never `zh`, so exact matching skipped them).
     Returns None when nothing in the chain exists in either map.
     """
-    def _manual_key(lang: str) -> str | None:
-        if lang in manual:
-            return lang
-        return next((k for k in sorted(manual)
+    def _variant(tracks: dict, lang: str) -> str | None:
+        return next((k for k in sorted(tracks)
                      if k.lower().startswith(f"{lang}-") and not k.endswith("-orig")), None)
+
+    def _manual_key(lang: str) -> str | None:
+        return lang if lang in manual else _variant(manual, lang)
 
     def _auto_key(lang: str) -> str | None:
         for key in (lang, f"{lang}-orig"):
             if key in auto:
                 return key
-        return None
+        return _variant(auto, lang)
 
     for lang in langs:
         m, a = _manual_key(lang), _auto_key(lang)
@@ -1789,31 +1993,97 @@ async def extract_subtitles_only(
     raise DownloadError("Caption fetch failed.")  # unreachable
 
 
-async def get_video_info(url: str, flat: bool = False) -> dict:
+# Outer bounds for the metadata-only helpers. A healthy call returns in
+# seconds; these exist so a wedged extraction fails the request instead of
+# holding it (and a download-pool worker) open indefinitely. A timed-out call
+# cannot be cancelled — its worker stays held until yt-dlp returns — which is
+# why both also bound what they ask yt-dlp for.
+INFO_TIMEOUT_S = 120
+LISTING_TIMEOUT_S = 180
+
+
+async def get_video_info(url: str, flat: bool = False, max_entries: int | None = None) -> dict:
     """Get video/channel metadata without downloading.
-    Use flat=True for channels/playlists to avoid resolving every video."""
+    Use flat=True for channels/playlists to avoid resolving every video.
+
+    `max_entries` (flat only) stops the listing there. Pass it for any channel:
+    a big channel's whole /videos tab doesn't finish inside INFO_TIMEOUT_S, and
+    the timed-out thread keeps its download_pool slot until yt-dlp returns.
+
+    `flat=False` means "one video's full metadata": a playlist or channel URL
+    resolves to its FIRST video only. Without that cap a channel URL fully
+    extracted every entry — minutes to hours of player-JS work for an answer
+    that read one title. Returns {} on any failure, as before.
+    """
     def _info():
         import yt_dlp
+        if not flat:
+            extra = dict(_ONE_ITEM_OPTS)
+        else:
+            extra = {"playlistend": max_entries} if max_entries else {}
         opts = {**_yt_dlp_base_opts(), **_yt_dlp_js_opts(), "extract_flat": flat, "socket_timeout": 15,
-                "http_headers": _yt_dlp_http_headers()}
+                "http_headers": _yt_dlp_http_headers(), **extra}
         _apply_cookies(opts)
         with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=False)
+            info = ydl.extract_info(url, download=False)
+        return info if flat else _single_video_info(info)
 
     try:
         # yt-dlp can fail to return, so it never runs on the shared default
         # executor (see backend/core/executors.py).
-        return await download_pool.run(_info)
+        return await asyncio.wait_for(download_pool.run(_info), timeout=INFO_TIMEOUT_S) or {}
+    except asyncio.TimeoutError:
+        logger.error("Failed to get video info: timed out after %ss for %s", INFO_TIMEOUT_S, url[:80])
+        return {}
     except Exception as e:
         logger.error(f"Failed to get video info: {e}")
         return {}
 
 
-async def list_channel_videos(url: str, max_videos: int = 5) -> list[dict]:
+_YT_CHANNEL_TABS = {"videos", "shorts", "streams", "live", "playlists", "community", "about", "featured"}
+
+
+def normalize_youtube_channel_url(url: str) -> str:
+    """Append /videos to YouTube channel-root URLs so flat extraction returns
+    the channel's videos instead of its TAB list (Videos / Shorts / Live as
+    sub-playlists). No-op for non-YouTube URLs, tab-specific URLs, and
+    individual videos.
+
+    yt-dlp's flat extraction at a channel root returns `entries` that are the
+    channel's tabs as playlist objects — useless for "give me N videos"
+    callers, which then read a tab's URL as a video's.
+    """
+    if "youtube.com" not in url:
+        return url
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(url)
+    parts = [p for p in parsed.path.split("/") if p]
+    if not parts or parts[-1].lower() in _YT_CHANNEL_TABS:
+        return url
+    is_handle = parts[0].startswith("@") and len(parts) == 1
+    is_legacy = len(parts) == 2 and parts[0] in ("c", "channel", "user")
+    if is_handle or is_legacy:
+        new_path = parsed.path.rstrip("/") + "/videos"
+        return urlunparse(parsed._replace(path=new_path))
+    return url
+
+
+async def list_channel_videos(url: str, max_videos: int = 5,
+                              raise_errors: bool = False) -> list[dict]:
     """
     Extract video list from a channel/playlist URL without downloading.
     Returns list of dicts with video metadata (url, title, duration, views, etc).
+
+    Failures return [] (the long-standing contract for lookups) unless
+    `raise_errors=True`, which raises a classified DownloadError instead —
+    for callers that turn an empty listing into a user-facing failure and
+    must be able to say WHY ("private channel", "rate-limited", a timeout)
+    rather than "No videos found".
     """
+    # Channel-root URLs return tab playlists (Videos / Shorts) under
+    # `entries`, not the actual videos. Hit /videos directly.
+    url = normalize_youtube_channel_url(url)
+
     def _list():
         import yt_dlp
         opts = {
@@ -1821,6 +2091,7 @@ async def list_channel_videos(url: str, max_videos: int = 5) -> list[dict]:
             **_yt_dlp_js_opts(),
             "extract_flat": True,        # Don't download, just list
             "playlistend": max_videos,   # Limit number of videos
+            "socket_timeout": 30,
             "http_headers": _yt_dlp_http_headers(),
         }
         _apply_cookies(opts)
@@ -1863,9 +2134,21 @@ async def list_channel_videos(url: str, max_videos: int = 5) -> list[dict]:
         return results
 
     try:
-        return await download_pool.run(_list)
+        return await asyncio.wait_for(download_pool.run(_list), timeout=LISTING_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.error("Failed to list channel videos: timed out after %ss for %s",
+                     LISTING_TIMEOUT_S, url[:80])
+        if raise_errors:
+            raise DownloadError(
+                f"Listing the channel's videos timed out after {LISTING_TIMEOUT_S // 60} minutes."
+            )
+        return []
     except Exception as e:
         logger.error(f"Failed to list channel videos: {e}")
+        if raise_errors:
+            if isinstance(e, DownloadError):
+                raise
+            raise _terminal_download_error(e, url) from e
         return []
 
 
@@ -1876,7 +2159,9 @@ def is_channel_or_playlist_url(url: str) -> bool:
         "/playlist?", "&list=",               # YouTube playlists
         "/videos",                            # Channel videos tab
     ]
-    # A single video URL like youtube.com/watch?v=xxx without &list= is NOT a channel
-    if "watch?v=" in url and "&list=" not in url:
+    # A watch link is the video, even when it also names a playlist
+    # (`&list=`, a Music radio mix): the downloaders pass `noplaylist`, so
+    # routing it to the channel path would only relabel a one-video download.
+    if "watch?v=" in url or "youtu.be/" in url:
         return False
     return any(ind in url for ind in indicators)

@@ -58,7 +58,7 @@ def downloader(monkeypatch, tmp_path):
     seen_options: list = []
 
     async def fake_download(url, output_dir=None, filename=None,
-                            extract_audio=True, options=None):
+                            extract_audio=True, options=None, job_id=None):
         calls.append(url)
         seen_options.append(options)
         out = outcomes.get(url, "ok")

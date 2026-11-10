@@ -174,3 +174,20 @@ class TestGetYtdlpAgeDays:
         # version string can't be parsed. Either way, an int.
         assert isinstance(age, int)
         assert age >= -1
+
+
+def test_the_self_update_never_asks_for_less_than_requirements():
+    """The auto-update's bounded spec must not lag the requirements floor: a
+    stale bound lets pip "update" to a yt-dlp the install itself refuses."""
+    import inspect
+    import re
+    from pathlib import Path
+    from backend.services import ytdlp_service
+
+    def _v(s):
+        return tuple(int(x) for x in s.split("."))
+    src = inspect.getsource(ytdlp_service._try_update_ytdlp)
+    update_floor = re.search(r'"yt-dlp>=([\d.]+)"', src).group(1)
+    req = (Path(__file__).resolve().parent.parent / "requirements.txt").read_text()
+    req_floor = re.search(r"^yt-dlp>=([\d.]+)", req, re.M).group(1)
+    assert _v(update_floor) >= _v(req_floor), (update_floor, req_floor)

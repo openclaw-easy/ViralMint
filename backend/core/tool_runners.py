@@ -1957,7 +1957,8 @@ async def run_tool_transcript(
         # succeeds with English. Right for "give me whatever it has", a silent
         # substitution for someone who picked a language from a dropdown.
         got_lang = (info.get("language") or "").lower()
-        if language and got_lang and got_lang != language.lower():
+        # The service reports a BASE code ("es" for an es-419 track).
+        if language and got_lang and got_lang != language.lower().split("-")[0]:
             await ws_manager.send_constraint_warning(
                 constraint="transcript_language", severity="warning",
                 message=(f"This video has no '{language}' captions — downloaded the "

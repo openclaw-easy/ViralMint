@@ -207,7 +207,7 @@ async def test_channel_download_reports_partial_failures(monkeypatch):
     monkeypatch.setattr(hu, "jittered_delay", lambda: 0)
     _stub_analyzer(monkeypatch)
 
-    async def listing(url, max_videos=5):
+    async def listing(url, max_videos=5, **kw):
         return [{"url": f"https://y/{i}", "title": f"v{i}"} for i in range(3)]
     monkeypatch.setattr(ys, "list_channel_videos", listing)
 
@@ -235,7 +235,7 @@ async def test_channel_download_where_everything_failed_says_why(monkeypatch):
     monkeypatch.setattr(wsm, "ws_manager", _NullWs())
     monkeypatch.setattr(hu, "jittered_delay", lambda: 0)
 
-    async def listing(url, max_videos=5):
+    async def listing(url, max_videos=5, **kw):
         return [{"url": "https://y/0", "title": "v0"}]
     monkeypatch.setattr(ys, "list_channel_videos", listing)
 
@@ -257,7 +257,7 @@ async def test_channel_download_cancelled_and_failed_keeps_the_reason(monkeypatc
 
     monkeypatch.setattr(wsm, "ws_manager", _NullWs())
 
-    async def listing(url, max_videos=5):
+    async def listing(url, max_videos=5, **kw):
         return [{"url": "https://y/0", "title": "v0"}]
     monkeypatch.setattr(ys, "list_channel_videos", listing)
 
@@ -301,7 +301,7 @@ async def test_scout_download_cancelled_mid_batch_stops_and_says_so(monkeypatch)
 
     pulled = []
 
-    async def fake_download(url, output_dir, filename, extract_audio):
+    async def fake_download(url, output_dir, filename, extract_audio, job_id=None):
         pulled.append(url)
         await cancel_if_live(job_id)        # the user cancels during video 1
         raise RuntimeError("HTTP Error 403: Forbidden")
