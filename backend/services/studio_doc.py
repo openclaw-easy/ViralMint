@@ -505,6 +505,11 @@ def _voice(raw: Any, line: str, *, take_known: Callable[[str], bool] | None, set
         out["duration"] = duration
     if raw.get("cached") is True:
         out["cached"] = True
+    # The voice a stale take was recorded in (studio_ops._voice_moved). Omitted otherwise.
+    take_voice = raw.get("take_voice")
+    if (state == "stale" and "take_key" in out and isinstance(take_voice, list) and len(take_voice) == 4
+            and all(v is None or isinstance(v, str) for v in take_voice)):
+        out["take_voice"] = take_voice
     if state == "failed":
         out["error"] = _str(raw.get("error"), 300)
     return out

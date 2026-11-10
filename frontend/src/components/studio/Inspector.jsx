@@ -181,7 +181,7 @@ export function SceneTab({
         </Stack>
         <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mt: 0.75 }}>
           {settings.voice?.label || settings.voice?.voice} · {voiceKindLabel(provider)}.
-          {voiceState === "stale" ? " The line changed, so this take no longer matches it." : ""}
+          {voiceState === "stale" ? " The line or voice changed, so this take no longer matches it." : ""}
           {voiceState === "ready" ? " Edit the line or change the voice to re-record." : ""}
           {voiceState === "failed" ? ` Recording failed${scene.voice?.error ? ` — ${scene.voice.error}` : ""}.` : ""}
         </Typography>

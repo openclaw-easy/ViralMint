@@ -25,7 +25,7 @@ export const VOICE_STATE = {
   none: { label: "not voiced", tone: "default" },
   generating: { label: "voicing…", tone: "info" },
   ready: { label: "ready", tone: "success" },
-  stale: { label: "line changed", tone: "warning" },
+  stale: { label: "line or voice changed", tone: "warning" },
   failed: { label: "failed", tone: "error" },
 }
 

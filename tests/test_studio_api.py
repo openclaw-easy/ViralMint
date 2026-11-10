@@ -170,12 +170,18 @@ def test_voice_is_recorded_once_and_served(client, captured):
     assert client.get(f"/api/studio/voice/{voices[0]['take_key']}/meta").json()["duration"] == 1.8
     assert client.get("/api/studio/voice/not-a-key").status_code == 404
 
-    # Change the voice and back: every take is cached, so re-voicing records nothing.
+    # Change the voice and back: the takes are simply the scenes' own again.
     rev = done["revision"]
     other = {**EDGE, "voice": "en-US-AvaMultilingualNeural", "label": "Ava"}
     rev = patch(client, p["id"], rev, {"op": "set_setting", "path": "voice", "value": other}).json()["project"]["revision"]
     back = patch(client, p["id"], rev, {"op": "set_setting", "path": "voice", "value": EDGE}).json()["project"]
-    assert {s["voice"]["state"] for s in back["doc"]["scenes"]} == {"stale"}
+    assert {s["voice"]["state"] for s in back["doc"]["scenes"]} == {"ready"}
+
+    # Edit a line and undo the edit by hand: its take is cached, so re-voicing records nothing.
+    uid, line = back["doc"]["scenes"][0]["uid"], back["doc"]["scenes"][0]["line"]
+    rev = patch(client, p["id"], back["revision"], {"op": "set_line", "uid": uid, "line": "Something else."}).json()["project"]["revision"]
+    edited = patch(client, p["id"], rev, {"op": "set_line", "uid": uid, "line": line}).json()["project"]
+    assert edited["doc"]["scenes"][0]["voice"]["state"] == "stale"
     again = client.post(f"/api/studio/projects/{p['id']}/voice", json={"scene_uids": "all"})
     assert again.status_code == 200
     asyncio.run(runners.pop(0))

@@ -44,7 +44,7 @@ const SILENT_LABEL = {
   none: "Not voiced yet — plays silent",
   generating: "Still voicing — plays silent",
   failed: "Voice failed — plays silent",
-  stale: "Line changed — re-voice to hear it",
+  stale: "Line or voice changed — re-voice to hear it",
 }
 
 const kenBurns = keyframes`

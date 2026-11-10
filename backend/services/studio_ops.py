@@ -106,9 +106,24 @@ def _stale_voice(scene: dict) -> None:
     earlier take just stops being wanted — its result won't land."""
     voice = scene.get("voice") or {}
     if voice.get("take_key"):
-        scene["voice"] = {k: v for k, v in voice.items() if k != "error"} | {"state": "stale"}
+        scene["voice"] = {k: v for k, v in voice.items() if k not in ("error", "take_voice")} | {"state": "stale"}
     else:
         scene["voice"] = {"state": "none"}
+
+
+def _voice_moved(scene: dict, before: tuple, after: tuple) -> None:
+    """The voice changed. A ready take goes stale and remembers its voice, so
+    switching back makes it ready again: same take, same line, nothing to redo.
+    A line edit clears the memory (_stale_voice), and so does a new take."""
+    voice = scene.get("voice") or {}
+    if voice.get("state") == "stale" and voice.get("take_voice"):
+        if voice["take_voice"] == list(after):
+            scene["voice"] = {k: v for k, v in voice.items() if k != "take_voice"} | {"state": "ready"}
+        return
+    was_ready = voice.get("state") == "ready"
+    _stale_voice(scene)
+    if was_ready:
+        scene["voice"]["take_voice"] = list(before)
 
 
 def _library_name(track) -> bool:
@@ -270,7 +285,10 @@ def _bind_visual(doc, op, ctx, st, created, changes):
             if canonical is None:
                 raise StudioOpError("That clip isn't one of the search results for this project — search again.")
             new = {**base, "kind": "stock", "state": "bound", "asset": dict(canonical),
-                   "query": canonical.get("query") or base["query"]}
+                   # The scene keeps its own query: a clip can come from another
+                   # scene's search, and a rewrite made the bin re-search under
+                   # the cursor.
+                   "query": base["query"] or canonical.get("query")}
     elif kind == "user_clip":
         asset = ctx.project_assets.get(visual.get("asset_id")) if isinstance(visual.get("asset_id"), str) else None
         if asset is None:
@@ -317,9 +335,10 @@ def _set_setting(doc, op, ctx, st, created, changes):
         before = sd.voice_identity(settings)
         # Replaced, not merged: no instructions left over from the last voice.
         settings["voice"] = {k: value.get(k) for k in ("provider", "voice", "label", "model", "instructions")}
-        if sd.voice_identity(settings) != before:
+        after = sd.voice_identity(settings)
+        if after != before:
             for scene in doc["scenes"]:
-                _stale_voice(scene)
+                _voice_moved(scene, before, after)
     elif path == "music":
         if not isinstance(value, dict):
             raise StudioOpError("set_setting music: send the fields to change.")
