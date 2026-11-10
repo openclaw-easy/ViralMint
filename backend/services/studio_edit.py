@@ -28,7 +28,7 @@ from backend.services import studio_doc as sd
 
 logger = logging.getLogger(__name__)
 
-MAX_CHANGES = 30
+MAX_CHANGES = 49     # every line of a 40-scene video, plus settings
 
 
 def _music_genres() -> tuple[str, ...]:
@@ -83,7 +83,7 @@ def _int(v) -> int | None:
 async def plan_changes(doc: dict, title: str, instruction: str, ai_client) -> tuple[list[dict], str]:
     try:
         answer = await ai_client.chat(messages=[{"role": "user", "content": _prompt(doc, title, instruction)}],
-                                      max_tokens=2000)
+                                      max_tokens=4000)
         data = json.loads(extract_json_text(answer or ""))
     except Exception as e:  # noqa: BLE001 — a sentence, never the exception
         logger.warning("studio edit: planning failed: %s", e)

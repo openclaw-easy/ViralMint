@@ -31,7 +31,8 @@ from backend.core.prompt_rules import extract_json_text
 from backend.services import stock_search_cache
 from backend.services.stock_media import _truncate_query
 from backend.services.ffmpeg_service import ffmpeg_error
-from backend.services.video_utils import cover_vf, orientation_fit_adjustment
+from backend.services.video_utils import (cover_vf, demote_off_topic, intermediate_x264, on_topic,
+                                          orientation_fit_adjustment, probe_dimensions, topic_words)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,8 @@ MIN_HEIGHT_LANDSCAPE = 720
 # How many heuristic-ranked candidates per scene the planner keeps (and the
 # AI re-rank sees).
 MAX_CANDIDATES_PER_SCENE = 8
+# Scenes searched at once by search_all_scenes.
+SEARCH_SCENE_CONCURRENCY = 12
 
 
 def _slug_words(pexels_url: str) -> list[str]:
@@ -64,6 +67,16 @@ def _slug_words(pexels_url: str) -> list[str]:
     return [w for w in slug.split("-") if w]
 
 
+# Portrait-first search: how many on-topic portrait clips make a second call
+# pointless. 3 is what the AI rank compares, and the Pexels key allows only
+# 200 requests an hour.
+PORTRAIT_ENOUGH = 3
+
+
+def _rate_limited(error: Exception) -> bool:
+    return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429
+
+
 async def search_videos(
     query: str,
     orientation: str = "portrait",
@@ -72,24 +85,73 @@ async def search_videos(
 ) -> list[dict]:
     """Search Pexels for stock footage matching a keyword, best-first.
 
-    Orientation is NOT passed to the Pexels API — any orientation can be
-    cover-cropped to the target, which doubles the candidate pool; the score
-    prefers orientation-native files instead. `size=small` IS passed: it is
-    Pexels' "at least HD" floor, so sub-HD files never leave the API.
+    A portrait target asks Pexels for portrait clips FIRST: an any-orientation
+    page can hold none (a real project: 0 of 38), and a landscape clip
+    cover-cropped to 9:16 keeps ~32% of its picture at ~1.8×. When that page
+    holds fewer than PORTRAIT_ENOUGH clips about the query, the
+    any-orientation entry tops it up (cache first, so one call at most), so a
+    niche topic still finds footage and an on-topic landscape clip outranks an
+    off-topic portrait one. A top-up that fails leaves the portrait clips
+    standing. Other targets (16:9 and 1:1 both search as "landscape") keep
+    their single any-orientation call: same request, same cache.
 
     Each result carries `download_url` (the best HD file, for the render) and
     `preview_url` (the smallest file whose short side is ≥ 360, for the
-    Studio's player). Responses are cached 24 h.
+    Studio's player). Responses are cached 24 h. A rate-limited first call
+    never spends a second one, and a planner hears about any refusal
+    (stock_search_cache.watch_refusals).
     """
     if not api_key:
         raise VideoGenerationError("Pexels API key not configured")
 
-    cache_params = {"orientation": orientation, "per_page": per_page, "size": "small"}
+    plain_params = {"orientation": orientation, "per_page": per_page, "size": "small"}
+    if orientation != "portrait":
+        return await _search_pexels(query, orientation, per_page, api_key, plain_params)
+
+    try:
+        native = await _search_pexels(query, orientation, per_page, api_key,
+                                      {**plain_params, "asked": "portrait"}, api_orientation="portrait")
+    except Exception as e:  # noqa: BLE001 — the plain call can still answer
+        if _rate_limited(e):
+            stock_search_cache.note_refusal("pexels")
+            cached = await stock_search_cache.get("pexels", query, **plain_params)
+            if cached is None:
+                raise
+            return cached
+        logger.warning("Pexels portrait search failed for %r, using the plain search: %s", query, e)
+        native = []
+    can_judge = bool(topic_words(re.findall(r"[a-z0-9]+", (query or "").lower())))
+    hits = sum(1 for c in native if on_topic(c, query)) if can_judge else len(native)
+    merged = list(native)
+    if hits < min(PORTRAIT_ENOUGH, per_page):
+        seen = {c["id"] for c in native}
+        try:
+            merged += [c for c in await _search_pexels(query, orientation, per_page, api_key, plain_params)
+                       if c["id"] not in seen]
+        except Exception as e:  # noqa: BLE001 — what the first call found is still good
+            if _rate_limited(e):
+                stock_search_cache.note_refusal("pexels")
+            if not native:
+                raise
+            logger.warning("Pexels top-up failed for %r, keeping %d portrait clips: %s", query, len(native), e)
+    return demote_off_topic(merged, query)[:per_page]
+
+
+async def _search_pexels(
+    query: str, orientation: str, per_page: int, api_key: str, cache_params: dict,
+    api_orientation: str | None = None,
+) -> list[dict]:
+    """One Pexels call, cached under `cache_params`. `orientation` is the
+    TARGET the files are scored for; `api_orientation` is what Pexels is asked
+    to filter by (its own cache key: the plain entry holds any orientation).
+    `size=small` is Pexels' "at least HD" floor, so sub-HD files never leave
+    the API."""
 
     async def _fetch() -> list[dict]:
         resp = await _http.get(
             f"{PEXELS_API}/videos/search",
-            params={"query": query, "per_page": per_page, "size": "small"},
+            params={"query": query, "per_page": per_page, "size": "small",
+                    **({"orientation": api_orientation} if api_orientation else {})},
             headers={"Authorization": api_key},
         )
         resp.raise_for_status()
@@ -194,6 +256,8 @@ async def search_pixabay_videos(
             })
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                stock_search_cache.note_refusal("pixabay")
             # The key rides in the URL, and the exception's text carries the URL.
             raise VideoGenerationError(f"Pixabay search failed ({e.response.status_code})") from None
         except httpx.HTTPError as e:
@@ -238,7 +302,10 @@ async def search_pixabay_videos(
         videos.sort(key=lambda x: x["quality_score"], reverse=True)
         return videos
 
-    return await stock_search_cache.cached_search("pixabay", query, _fetch, **cache_params)
+    found = await stock_search_cache.cached_search("pixabay", query, _fetch, **cache_params)
+    # After the cache, so an entry never holds a demoted score. Same rule as
+    # the Pexels searcher; 16:9 and 1:1 search as "landscape" and keep their list.
+    return demote_off_topic(found, query) if orientation == "portrait" else found
 
 
 async def _search_providers(query: str, orientation: str, per_page: int,
@@ -316,7 +383,16 @@ async def search_all_scenes(
             logger.warning("Search failed for scene %d %r: %s", i, queries[0], e)
             return i, []
 
-    results = await asyncio.gather(*(_search_scene(i, s) for i, s in enumerate(scenes)))
+    # ≤ SEARCH_SCENE_CONCURRENCY scenes search at once (each may call two
+    # providers, and a portrait Pexels search may top up once): a 40-scene plan
+    # would otherwise burst well over 80 calls and trip the providers' rate limits.
+    slots = asyncio.Semaphore(SEARCH_SCENE_CONCURRENCY)
+
+    async def _bounded(i: int, scene: dict) -> tuple[int, list[dict]]:
+        async with slots:
+            return await _search_scene(i, scene)
+
+    results = await asyncio.gather(*(_bounded(i, s) for i, s in enumerate(scenes)))
     return sorted(results, key=lambda x: x[0])
 
 
@@ -390,20 +466,43 @@ def _color_grade_filters(lut_preset: str = "neutral") -> list[str]:
     return filters
 
 
-def _kenburns_crop(target_w: int, target_h: int, duration: float) -> tuple[int, int, str]:
-    """(oversized w, oversized h, crop filter) for one random Ken Burns move."""
+# The margin stacks on the cover-crop. A source that crop already leaves under
+# half of (a landscape clip in a portrait frame keeps ~32%: "looks zoomed in")
+# gets none on the static preset, and just enough to move on a pan. Stock video
+# in the editor's player has no Ken Burns and shows the plain cover-crop, so
+# this also brings the render back to what was approved there.
+KB_HEAVY_CROP_KEEPS = 0.5
+KB_SCALE = {"static": 1.12, "pan": 1.10}
+KB_SCALE_HEAVY_CROP = {"static": 1.0, "pan": 1.03}
+
+
+def kenburns_scale(src_w: int, src_h: int, target_w: int, target_h: int, is_static: bool) -> float:
+    """How far past the frame to scale before the animated crop. Unknown source
+    size → the normal margin."""
+    table = KB_SCALE
+    if src_w > 0 and src_h > 0 and target_w > 0 and target_h > 0:
+        src_ratio, target_ratio = src_w / src_h, target_w / target_h
+        if min(src_ratio, target_ratio) / max(src_ratio, target_ratio) < KB_HEAVY_CROP_KEEPS:
+            table = KB_SCALE_HEAVY_CROP
+    return table["static" if is_static else "pan"]
+
+
+def _kenburns_crop(target_w: int, target_h: int, duration: float,
+                   src: tuple[int, int] = (0, 0)) -> tuple[int, int, str]:
+    """(oversized w, oversized h, crop filter) for one random Ken Burns move
+    on a `src`-sized clip."""
     preset = random.choice(_KENBURNS_PRESETS)
     crop_x = preset[0].format(w=target_w, h=target_h, dur=duration)
     crop_y = preset[1].format(w=target_w, h=target_h, dur=duration)
-    # 12% for the static centre zoom, 10% for the panning presets
-    sf = 1.12 if "t/" not in preset[0] and "t/" not in preset[1] else 1.10
+    is_static = "t/" not in preset[0] and "t/" not in preset[1]
+    sf = kenburns_scale(*src, target_w, target_h, is_static)
     return int(target_w * sf), int(target_h * sf), f"crop={target_w}:{target_h}:{crop_x}:{crop_y}"
 
 
 def _encode_args(clip_path, duration: float, vf: str, output_path) -> list[str]:
     return [
         "ffmpeg", "-y", "-i", str(clip_path), "-t", str(duration), "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:v", "libx264", *intermediate_x264("20"),
         "-pix_fmt", "yuv420p", "-r", "30", "-an", str(output_path),
     ]
 
@@ -429,7 +528,7 @@ async def trim_and_normalize_clip(
     def _trim():
         use_kb = ken_burns and duration >= 1.0
         if use_kb:
-            kb_w, kb_h, crop = _kenburns_crop(target_w, target_h, duration)
+            kb_w, kb_h, crop = _kenburns_crop(target_w, target_h, duration, probe_dimensions(clip_path))
             vf_parts = [cover_vf(kb_w, kb_h)]
             if color_grade:
                 vf_parts.extend(_color_grade_filters(lut_preset))
@@ -464,7 +563,7 @@ async def trim_and_normalize_clip(
 def _trim_fallback(clip_path, duration, target_w, target_h, output_path, ken_burns: bool = False):
     """The graded pass failed: a lighter grade (eq only), Ken Burns kept."""
     if ken_burns and duration >= 1.0:
-        kb_w, kb_h, crop = _kenburns_crop(target_w, target_h, duration)
+        kb_w, kb_h, crop = _kenburns_crop(target_w, target_h, duration, probe_dimensions(clip_path))
         vf = f"{cover_vf(kb_w, kb_h)},eq=contrast=1.08:brightness=0.02:saturation=0.85,{crop}"
     else:
         vf = f"{cover_vf(target_w, target_h)},eq=contrast=1.08:brightness=0.02:saturation=0.85"
@@ -631,9 +730,10 @@ Return a JSON array only (no markdown), exactly {n_chunks} entries in chunk orde
     try:
         resp = await ai_client.chat(
             messages=[{"role": "user", "content": prompt}],
-            # ~100 tokens/scene plus headroom; a flat budget truncated the
-            # JSON at 13+ scenes.
-            max_tokens=min(4000, max(1500, 300 + 120 * n_chunks)),
+            # ~150 tokens/scene plus headroom; a flat budget truncated the
+            # JSON at 13+ scenes, and 4000 cut it at ~25. 6300 holds 40 scenes
+            # (studio_doc.SCENE_MAX).
+            max_tokens=min(6300, max(1500, 300 + 150 * n_chunks)),
         )
         clean = extract_json_text(resp)
         try:

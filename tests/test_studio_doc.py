@@ -47,7 +47,7 @@ def test_long_scripts_are_repacked_never_truncated():
 
 
 def test_a_script_too_long_for_one_video_is_refused():
-    huge = " ".join(("word " * 70).strip() + "." for _ in range(30))
+    huge = " ".join(("word " * 70).strip() + "." for _ in range(sd.SCENE_MAX + 4))
     with pytest.raises(StudioDocError, match="too long"):
         sd.lines_for_new_project(huge)
 
@@ -105,8 +105,8 @@ def test_not_a_document(bad):
 
 
 def test_scene_cap_and_duplicate_ids():
-    with pytest.raises(StudioDocError, match="at most 18"):
-        sd.validate_doc(doc(*[scene(uid=f"s{i}") for i in range(19)]))
+    with pytest.raises(StudioDocError, match=f"at most {sd.SCENE_MAX}"):
+        sd.validate_doc(doc(*[scene(uid=f"s{i}") for i in range(sd.SCENE_MAX + 1)]))
     with pytest.raises(StudioDocError, match="duplicate"):
         sd.validate_doc(doc(scene(uid="a"), scene(uid="a")))
 
@@ -221,7 +221,7 @@ def test_only_a_ready_take_times_a_scene():
 
 def test_enums_are_served_from_one_place():
     e = sd.enums()
-    assert e["limits"]["line_max"] == 400 and e["limits"]["scene_max"] == 18
+    assert e["limits"]["line_max"] == 400 and e["limits"]["scene_max"] == 40
     assert set(e["visual_kinds"]) == {"stock", "user_clip"}
     assert e["music_sources"] == ["library"]
 

@@ -21,15 +21,17 @@ import VideoLibraryOutlinedIcon from "@mui/icons-material/VideoLibraryOutlined"
 import CloseIcon from "@mui/icons-material/Close"
 import TuneRoundedIcon from "@mui/icons-material/TuneRounded"
 import { useStudioRendering } from "./StudioRenderingContext"
+import UseClipButton from "./UseClipButton"
 import SceneAssist from "./SceneAssist"
 import { onActivate } from "../../utils/a11y"
 import {
   FIT_OPTIONS, HOOK_SECONDS, HOOK_TEXT_MAX, KIND_META, LINE_MAX, TRANSITIONS, VOICE_STATE,
   autoRevoices, autoTitle, isFixedVisual, isShortVisual, musicLabel,
   queryGradient, stockLabel, visualSourceLabel, voiceKindLabel,
+  clipInUse,
 } from "./studioModel"
 import { mediaUrl, voiceUrl } from "./studioApi"
-import { PROJECT_MIN } from "./editorLayout"
+import { PROJECT_INITIAL, PROJECT_MIN } from "./editorLayout"
 import useTtsVoices from "./useTtsVoices"
 import useMusicLibrary from "../../hooks/useMusicLibrary"
 import useVoicePreview from "../../hooks/useVoicePreview"
@@ -179,7 +181,7 @@ export function SceneTab({
         </Stack>
         <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mt: 0.75 }}>
           {settings.voice?.label || settings.voice?.voice} · {voiceKindLabel(provider)}.
-          {voiceState === "stale" ? " The line changed, so this take no longer matches it." : ""}
+          {voiceState === "stale" ? " The line or voice changed, so this take no longer matches it." : ""}
           {voiceState === "ready" ? " Edit the line or change the voice to re-record." : ""}
           {voiceState === "failed" ? ` Recording failed${scene.voice?.error ? ` — ${scene.voice.error}` : ""}.` : ""}
         </Typography>
@@ -283,7 +285,7 @@ export function SceneTab({
             </Typography>
             <Box sx={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 0.75 }}>
               {v.alternates.map((alt) => {
-                const current = v.asset?.provider === alt.provider && v.asset?.provider_id === alt.provider_id
+                const current = clipInUse(scene, alt)
                 const label = stockLabel(alt)
                 return (
                   <Box key={`${alt.provider}:${alt.provider_id}`} sx={{ minWidth: 0 }}>
@@ -299,15 +301,8 @@ export function SceneTab({
                     >
                       <PlayArrowRoundedIcon sx={{ color: "#fff", fontSize: 18, opacity: 0.9, filter: "drop-shadow(0 1px 2px rgba(0,0,0,.6))" }} />
                     </Box>
-                    <Stack direction="row" alignItems="center" spacing={0.25}>
-                      <Typography sx={{ fontSize: 10.5, flex: 1, minWidth: 0 }} noWrap title={label}>{current ? "In use" : label}</Typography>
-                      {!current && (
-                        <Button size="small" onClick={() => bindCandidate(alt)}
-                          sx={{ minWidth: 0, p: 0, px: 0.5, fontSize: 10.5, textTransform: "none", fontWeight: 700 }}>
-                          Use
-                        </Button>
-                      )}
-                    </Stack>
+                    <Typography sx={{ fontSize: 10.5, my: 0.25 }} noWrap title={label}>{label}</Typography>
+                    <UseClipButton fullWidth name={label} sceneN={scene.index + 1} inUse={current} onUse={() => bindCandidate(alt)} />
                   </Box>
                 )
               })}
@@ -551,7 +546,7 @@ function ProjectTab({
     <Box>
 
       <Group title="Look" summary={`${style.label} · ${project.doc.aspect_ratio}`} defaultExpanded>
-        <Box sx={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 0.5, justifyItems: "center" }}>
+        <Box sx={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))", gap: 0.5, justifyItems: "center" }}>
           {STYLES.map((st) => (
             <StyleSwatch key={st.id} style={st} mini selected={s.visual_style === st.id}
               onClick={() => onApply([{ op: "set_setting", path: "visual_style", value: st.id }])} />
@@ -642,8 +637,8 @@ export function FinishingGroup({ post, onApply }) {
             </ToggleButtonGroup>
           </Stack>
         ))}
-        <Stack direction="row" alignItems="center" spacing={1}>
-          <Typography variant="caption" sx={{ flex: 1, minWidth: 0 }} noWrap>Caption emoji</Typography>
+        <Stack direction="row" alignItems="center" useFlexGap flexWrap="wrap" sx={{ columnGap: 1, rowGap: 0.5 }}>
+          <Typography variant="caption" sx={{ flex: "1 0 auto" }} noWrap>Caption emoji</Typography>
           <ToggleButtonGroup size="small" exclusive value={p.caption_emoji ?? "settings"} aria-label="Caption emoji"
             onChange={(_, v) => v && onApply([{ op: "set_setting", path: "post", value: { caption_emoji: v === "settings" ? null : v } }])}
             sx={{ "& .MuiToggleButton-root": { textTransform: "none", fontSize: "0.7rem", py: 0.25, px: 1 } }}>
@@ -662,11 +657,10 @@ export function FinishingGroup({ post, onApply }) {
 
 // ── Inspector ──────────────────────────────────────────────────────────────
 
-// Same width as the old Plan drawer (600 default, 460–1000, drag / arrows /
-// double-click reset) via the shared hook — owner, 2026-09-15: "use the width
-// in the old impl". The rendered width is also capped so the player keeps
-// ~900px of the window for sidebar + media bin + a usable preview.
-export const INSPECTOR_WIDTH = { storageKey: "vm_studio_inspector_w", initial: 600, min: PROJECT_MIN, max: 1000, label: "the project panel" }
+// 360 by default, 340–1000 (the panel was too broad next to the player), drag
+// / arrows / double-click reset via the shared hook. The rendered width comes
+// from the editor's row budget (editorLayout.js).
+export const INSPECTOR_WIDTH = { storageKey: "vm_studio_inspector_w", initial: PROJECT_INITIAL, min: PROJECT_MIN, max: 1000, label: "the project panel" }
 
 function Inspector({
   project, timeline, findings = [],

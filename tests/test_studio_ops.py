@@ -98,10 +98,10 @@ def test_split_keeps_the_query_and_restales_only_the_first_half():
 
 
 def test_scene_cap_on_split_and_insert():
-    d = make_doc([f"Line number {i} is long enough to split." for i in range(18)])
-    with pytest.raises(StudioOpError, match="at most 18"):
+    d = make_doc([f"Line number {i} is long enough to split." for i in range(sd.SCENE_MAX)])
+    with pytest.raises(StudioOpError, match=f"at most {sd.SCENE_MAX}"):
         run(d, {"op": "split_scene", "uid": "s1"})
-    with pytest.raises(StudioOpError, match="at most 18"):
+    with pytest.raises(StudioOpError, match=f"at most {sd.SCENE_MAX}"):
         run(d, {"op": "insert_scene", "after_uid": "s1", "line": ""})
 
 
@@ -151,6 +151,74 @@ def test_stock_candidates_bind_only_through_the_server_copy():
     v = run(d, {"op": "bind_visual", "uid": "s1", "visual": {"kind": "stock", "candidate": forged}}, ctx=ctx).doc["scenes"][0]["visual"]
     assert v["state"] == "bound" and v["asset"]["download_url"] == canonical["download_url"]
     assert v["pinned"] is True
+
+
+def _bind_from_search(d, query):
+    canonical = {"provider": "pexels", "provider_id": "1", "download_url": "https://videos.pexels.com/1.mp4", "query": query}
+    ctx = OpContext(resolve_candidate=lambda _c: canonical)
+    op = {"op": "bind_visual", "uid": "s1", "visual": {"kind": "stock", "candidate": {"provider_id": "1"}}}
+    return run(d, op, ctx=ctx).doc["scenes"][0]["visual"]
+
+
+def test_use_keeps_the_scenes_search_query():
+    """A clip can come from another scene's search. Binding it must not rewrite
+    this scene's query: the bin re-searches on that and swaps the list under the
+    cursor, so a double-click could bind a different clip."""
+    v = _bind_from_search(make_doc(["One.", "Two."]), "another scene's words")
+    assert v["query"] == "query 1"
+    assert v["asset"]["query"] == "another scene's words"       # the clip still knows its own
+
+
+def test_use_on_a_scene_with_no_query_takes_the_clips():
+    d = make_doc(["One."])
+    d["scenes"][0]["visual"]["query"] = None
+    assert _bind_from_search(d, "sea")["query"] == "sea"
+
+
+def _voiced_doc():
+    d = make_doc(["One."])
+    d["scenes"][0]["voice"] = {"state": "ready", "take_key": key("andrew-one"), "duration": 2.0}
+    d["settings"]["voice"] = {"provider": "edge_tts", "voice": "en-US-AndrewNeural", "label": None, "model": None,
+                              "instructions": None}
+    return d
+
+
+def _voice_op(name):
+    return {"op": "set_setting", "path": "voice", "value": {"provider": "edge_tts", "voice": name}}
+
+
+def _ctx():
+    return OpContext(take_known=lambda k: k == key("andrew-one"))
+
+
+def test_voice_away_and_back_restores_the_take():
+    d = _voiced_doc()
+    before = copy.deepcopy(d["scenes"][0]["voice"])
+    away = run(d, _voice_op("en-US-AriaNeural"), ctx=_ctx()).doc
+    assert away["scenes"][0]["voice"]["state"] == "stale"
+    further = run(away, _voice_op("en-US-GuyNeural"), ctx=_ctx()).doc
+    assert further["scenes"][0]["voice"]["state"] == "stale"
+    back = run(further, _voice_op("en-US-AndrewNeural"), ctx=_ctx()).doc
+    assert back["scenes"][0]["voice"] == before                 # ready, same take
+
+
+def test_voice_back_does_not_restore_a_take_for_an_edited_line():
+    away = run(_voiced_doc(), _voice_op("en-US-AriaNeural"), {"op": "set_line", "uid": "s1", "line": "Different."},
+               ctx=_ctx()).doc
+    back = run(away, _voice_op("en-US-AndrewNeural"), ctx=_ctx()).doc
+    assert back["scenes"][0]["voice"]["state"] == "stale"
+
+
+def test_a_line_edit_leaves_no_voice_marker():
+    edited = run(_voiced_doc(), {"op": "set_line", "uid": "s1", "line": "Different."}, ctx=_ctx()).doc
+    assert "take_voice" not in edited["scenes"][0]["voice"]
+
+
+def test_the_voice_marker_survives_validation_only_on_a_stale_take():
+    d = run(_voiced_doc(), _voice_op("en-US-AriaNeural"), ctx=_ctx()).doc
+    assert sd.validate_doc(d)["scenes"][0]["voice"]["take_voice"][1] == "en-US-AndrewNeural"
+    d["scenes"][0]["voice"]["state"] = "ready"
+    assert "take_voice" not in sd.validate_doc(d)["scenes"][0]["voice"]
 
 
 def test_user_clips_bind_only_from_project_assets():

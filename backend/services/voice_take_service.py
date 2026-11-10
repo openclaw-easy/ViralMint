@@ -255,6 +255,17 @@ def _decode_peaks(path: Path, count: int = PEAK_COUNT) -> list[float]:
     return peaks[:count]
 
 
+# Bump when the words a take's sidecar caches would come out different — the
+# next take_details re-times the take once (local Whisper). 2 = Latin scripts
+# align to the script too ("Did you know" had been captioned "Did you pay?"
+# from a cached mis-hearing).
+WORDS_VERSION = 2
+
+
+def _words_current(meta: dict) -> bool:
+    return "words" in meta and meta.get("words_version") == WORDS_VERSION
+
+
 async def _word_timings(path: Path, text: str) -> list[dict] | None:
     """Word timings for captions (Whisper timing over the known text). None
     when Whisper can't run."""
@@ -281,7 +292,7 @@ async def take_details(key: object) -> dict | None:
     meta = read_meta(key)
     if meta is None:
         return None
-    if "peaks" in meta and "words" in meta:
+    if "peaks" in meta and _words_current(meta):
         return meta
     lock = _detail_locks.setdefault(key, asyncio.Lock())
     try:
@@ -292,12 +303,13 @@ async def take_details(key: object) -> dict | None:
             mp3, meta_path = _paths(key)
             if "peaks" not in meta:
                 meta["peaks"] = await asyncio.to_thread(_decode_peaks, mp3)
-            words = meta["words"] if "words" in meta else await _word_timings(mp3, meta.get("text") or "")
+            words = meta["words"] if _words_current(meta) else await _word_timings(mp3, meta.get("text") or "")
             # A Whisper failure is NOT persisted: the next request (or the render)
             # tries again instead of that take never getting word-level captions.
-            stored = {**meta, **({"words": words} if words is not None else {})}
+            # (Stale words stay in the sidecar until fresh ones replace them.)
+            stored = {**meta, **({"words": words, "words_version": WORDS_VERSION} if words is not None else {})}
             await asyncio.to_thread(_write_meta, meta_path, stored)
-            meta = {**stored, "words": words}
+            meta = {**stored, "words": words if words is not None else meta.get("words")}
     finally:
         _release_lock_entry(_detail_locks, key, lock)
     return meta

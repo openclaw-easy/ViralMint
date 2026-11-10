@@ -36,7 +36,7 @@ DOC_VERSION = 1
 # One voice take per scene: a line stays short enough that every take is a
 # single TTS request.
 LINE_MAX = 400
-SCENE_MAX = 18
+SCENE_MAX = 40                      # was 18: ~11 min of video at most; today's scripts pack as before
 MIN_SCENE_SECONDS = 1.2
 TAIL_GAP_DEFAULT = 0.15
 TAIL_GAP_MAX = 0.6
@@ -142,6 +142,12 @@ SCENE_TARGET_MIN_CHARS = 60
 # words/s). Counting raw characters made a 60-char Chinese scene ~17 s long —
 # a slideshow. Mirrored by studioModel.js `spokenUnits`.
 CJK_CHAR_WEIGHT = 4.3
+# Pacing: a script packs as if into 18 scenes (total / 18), but a scene never
+# aims past ~8 s (130 units) — a longer script gets MORE scenes, up to
+# SCENE_MAX, instead of longer ones. Everything up to 18 × 130 units packs
+# exactly as it did under the 18-scene limit (tests/test_studio_scene_cap_golden.py).
+SCENE_PACE_SCENES = 18
+SCENE_TARGET_SOFT_MAX = 130
 
 
 def _is_cjk(ch: str) -> bool:
@@ -164,10 +170,14 @@ def join_sentences(a: str, b: str) -> str:
     return f"{a}{b}" if _is_cjk(a[-1]) and _is_cjk(b[0]) else f"{a} {b}"
 
 
+def _pace_target(total: float) -> int:
+    return max(SCENE_TARGET_MIN_CHARS, min(math.ceil(total / SCENE_PACE_SCENES), SCENE_TARGET_SOFT_MAX))
+
+
 def _group(sentences: list[str], target: float | None = None) -> list[str]:
     """One or two sentences per scene (~2.5–6 s spoken); a long script packs more."""
     total = sum(spoken_units(s) for s in sentences)
-    t = target if target is not None else max(SCENE_TARGET_MIN_CHARS, math.ceil(total / 18))
+    t = target if target is not None else _pace_target(total)
     max_sentences = 99 if t > 160 else 2
     lines: list[str] = []
     cur = ""
@@ -192,9 +202,13 @@ def pack_scenes(sentences: list[str]) -> list[str]:
     can't hold the script — the caller refuses that rather than dropping text."""
     parts = [p for s in sentences for p in _split_long(s)]
     lines = _group(parts)
-    target = max(SCENE_TARGET_MIN_CHARS, math.ceil(sum(spoken_units(p) for p in parts) / 18))
+    total = sum(spoken_units(p) for p in parts)
+    target = _pace_target(total)
+    # A script that fits the 18-scene pacing keeps that packing exactly; only a
+    # longer one may use the scenes up to SCENE_MAX.
+    limit = SCENE_MAX if total > SCENE_PACE_SCENES * SCENE_TARGET_SOFT_MAX else SCENE_PACE_SCENES
     ceiling = LINE_MAX * CJK_CHAR_WEIGHT
-    while len(lines) > SCENE_MAX and target < ceiling:
+    while len(lines) > limit and target < ceiling:
         target = min(ceiling, math.ceil(target * 1.25))
         lines = _group(parts, target)
     return lines
@@ -210,7 +224,7 @@ def lines_for_new_project(script: Any) -> list[str]:
         raise StudioDocError("Write at least one sentence to build a storyboard.")
     if len(lines) > SCENE_MAX:
         raise StudioDocError(
-            "This script is too long for one video (about 2½ minutes at most). "
+            f"This script is too long for one video (more than {SCENE_MAX} scenes). "
             "Shorten it or split it into two videos.")
     return lines
 
@@ -505,6 +519,11 @@ def _voice(raw: Any, line: str, *, take_known: Callable[[str], bool] | None, set
         out["duration"] = duration
     if raw.get("cached") is True:
         out["cached"] = True
+    # The voice a stale take was recorded in (studio_ops._voice_moved). Omitted otherwise.
+    take_voice = raw.get("take_voice")
+    if (state == "stale" and "take_key" in out and isinstance(take_voice, list) and len(take_voice) == 4
+            and all(v is None or isinstance(v, str) for v in take_voice)):
+        out["take_voice"] = take_voice
     if state == "failed":
         out["error"] = _str(raw.get("error"), 300)
     return out

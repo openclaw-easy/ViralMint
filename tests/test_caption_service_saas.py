@@ -221,11 +221,60 @@ class TestScriptAlignment:
         assert words[0]["word"] == "这本书被下架了。"
         assert words[1]["word"] == "非常有意思！"
 
-    def test_latin_script_is_untouched(self):
+    def test_latin_mishearing_takes_the_script_word(self):
+        # Seen on a real render: the script said "Did you
+        # know", Whisper heard "Did you pay?" and the caption showed it.
+        from backend.services.caption_service import align_script_to_segments
+        segs = self._segs([(" Did", 0.0, 0.2), (" you", 0.2, 0.4), (" pay?", 0.4, 0.8),
+                           (" this", 0.8, 1.0), (" about", 1.0, 1.3), (" Rome.", 1.3, 1.9)])
+        out = align_script_to_segments("Did you know this about Rome?", segs)
+        words = out[0]["words"]
+        assert [w["word"].strip() for w in words] == ["Did", "you", "know", "this", "about", "Rome?"]
+        assert [(w["start"], w["end"]) for w in words] == [
+            (0.0, 0.2), (0.2, 0.4), (0.4, 0.8), (0.8, 1.0), (1.0, 1.3), (1.3, 1.9)]
+        assert out[0]["text"].strip() == "Did you know this about Rome?"
+
+    def test_latin_split_and_merged_words_keep_the_time_span(self):
+        import itertools
+
+        from backend.services.caption_service import align_script_to_segments
+        # Whisper merged "ice cream" into one word, and split "30s" into two.
+        segs = self._segs([(" I", 0.0, 0.2), (" love", 0.2, 0.5), (" icecream", 0.5, 1.1),
+                           (" in", 1.1, 1.2), (" thirty", 1.2, 1.5), (" seconds", 1.5, 2.0),
+                           (" flat", 2.0, 2.4)])
+        out = align_script_to_segments("I love ice cream in 30s flat", segs)
+        words = out[0]["words"]
+        assert [w["word"].strip() for w in words] == ["I", "love", "ice", "cream", "in", "30s", "flat"]
+        ice, cream, n30 = words[2], words[3], words[5]
+        assert ice["start"] == 0.5 and cream["end"] == 1.1 and ice["end"] == cream["start"]
+        assert (n30["start"], n30["end"]) == (1.2, 2.0)
+        # Monotonic timings, nothing lost.
+        assert all(a["end"] <= b["start"] + 1e-9 for a, b in itertools.pairwise(words))
+
+    def test_latin_missed_word_is_still_captioned(self):
+        from backend.services.caption_service import align_script_to_segments
+        segs = self._segs([(" Make", 0.0, 0.3), (" it", 0.3, 0.5), (" now", 0.5, 0.9)])
+        out = align_script_to_segments("Make it right now", segs)
+        assert " ".join(w["word"].strip() for w in out[0]["words"]) == "Make it right now"
+
+    def test_latin_missed_first_word_shares_the_next_words_time(self):
+        from backend.services.caption_service import align_script_to_segments
+        segs = self._segs([(" you", 0.2, 0.4), (" know", 0.4, 0.8), (" this", 0.8, 1.0)])
+        words = align_script_to_segments("Did you know this", segs)[0]["words"]
+        assert [w["word"].strip() for w in words] == ["Did", "you", "know", "this"]
+        assert words[0]["start"] == 0.2 and words[1]["end"] == 0.4
+
+    def test_latin_punctuation_only_tokens_ride_with_a_word(self):
+        from backend.services.caption_service import align_script_to_segments
+        segs = self._segs([(" Wait", 0.0, 0.4), (" for", 0.4, 0.6), (" it", 0.6, 1.0)])
+        words = align_script_to_segments("— Wait for it —", segs)[0]["words"]
+        assert [w["word"].strip() for w in words] == ["— Wait", "for", "it —"]
+
+    def test_unrelated_latin_script_fails_open(self):
         from backend.services.caption_service import align_script_to_segments
         segs = self._segs([("Hello", 0.0, 0.5), ("world", 0.5, 1.0)])
-        out = align_script_to_segments("Hello world entirely different", segs)
-        assert out is segs  # no-op for Latin-dominant scripts
+        out = align_script_to_segments("A totally unrelated sentence about cooking pasta tonight", segs)
+        assert out is segs  # audio doesn't match the script → keep ASR text
 
     def test_unrelated_script_fails_open(self):
         from backend.services.caption_service import align_script_to_segments

@@ -292,7 +292,7 @@ function StudioTimeline({
             return (
               <Tooltip key={sc.uid} title={
                 state === "ready" ? `Voice take · ${sc.voice.duration?.toFixed(1)}s${sc.voice.cached ? " · from cache" : ""}`
-                  : state === "stale" ? "The line changed — this take no longer matches"
+                  : state === "stale" ? "The line or voice changed — this take no longer matches"
                     : state === "generating" ? "Voicing…"
                       : state === "failed" ? `Voice failed${sc.voice?.error ? ` — ${sc.voice.error}` : ""}. Retry from the scene panel.`
                         : "Not voiced yet"

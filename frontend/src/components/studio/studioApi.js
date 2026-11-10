@@ -161,7 +161,7 @@ const metaCache = new Map()
 export function takeMeta(takeKey) {
   if (!takeKey) return Promise.resolve(null)
   if (!metaCache.has(takeKey)) {
-    metaCache.set(takeKey, http.get(`/api/studio/voice/${takeKey}/meta`)
+    metaCache.set(takeKey, http.get(`/api/studio/voice/${takeKey}/meta`, { timeout: 180000 })    // the first take on a new install waits for the Whisper download
       .then((res) => res.data)
       .catch(() => { metaCache.delete(takeKey); return null }))
   }

@@ -18,6 +18,7 @@ import json
 import logging
 
 from backend.core.exceptions import JobCancelledError, StudioError, StudioNotFoundError, VoiceGenerationError
+from backend.core.task_runner import on_unstarted
 from backend.services.voice_take_service import VOICE_CONCURRENCY  # noqa: F401 — re-exported (tests, render)
 
 logger = logging.getLogger(__name__)
@@ -335,3 +336,46 @@ async def run_studio_render(job_id: str, project_id: str, user_id: str = "local"
             await store.finish_render(project_id, user_id=user_id)   # no-op once the render marked it rendered
         finally:
             store.release_render(project_id)
+
+
+# Every runner here that a route took something for owes it back when it is
+# dropped queued: a coroutine that never started runs no `finally` (the
+# render's claim, a plan's seat, a scene left `generating`), and each of those
+# holds the project until a restart.
+
+async def _stamp_if_cancelled(job_id: str) -> None:
+    from backend.agents.job_helper import job_cancelled
+    if await job_cancelled(job_id):
+        await _stamp_cancelled(job_id)
+
+
+async def _release_unstarted_render(job_id: str, project_id: str, user_id: str = "local", **_kw) -> None:
+    """The render never started (cancelled while queued, or dropped waiting
+    for a slot): the endpoint's claim would stay on the project until a restart."""
+    from backend.services import studio_store as store
+    try:
+        await store.finish_render(project_id, user_id=user_id)
+    finally:
+        store.release_render(project_id)
+    await _stamp_if_cancelled(job_id)
+
+
+on_unstarted("run_studio_render")(_release_unstarted_render)
+on_unstarted("run_studio_from_legacy")(_release_unstarted_render)
+
+
+async def _release_unstarted_plan(job_id: str, project_id: str, **_kw) -> None:
+    if PLANS_IN_FLIGHT.get(project_id) == job_id:
+        PLANS_IN_FLIGHT.pop(project_id, None)
+    await _stamp_if_cancelled(job_id)
+
+
+on_unstarted("run_studio_plan")(_release_unstarted_plan)
+
+
+async def _release_unstarted_voice(job_id: str, project_id: str, uids: list[str], user_id: str = "local", **_kw) -> None:
+    await _settle_generating(project_id, uids, user_id)
+    await _stamp_if_cancelled(job_id)
+
+
+on_unstarted("run_studio_voice")(_release_unstarted_voice)

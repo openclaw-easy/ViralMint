@@ -35,16 +35,21 @@ def _is_portrait(c: dict) -> bool | None:
     return h > w
 
 
-def prefer_native_orientation(candidates: list[dict], want_portrait: bool, window: int = 3) -> list[dict]:
+def prefer_native_orientation(candidates: list[dict], want_portrait: bool, window: int = 3,
+                              off_topic: set[str] | frozenset[str] = frozenset()) -> list[dict]:
     """Bring the best-ranked clip already in the frame's orientation to the
     front when it sits within the top `window`. A landscape clip centre-cropped
     to 9:16 keeps ~31% of its width, upscaled ~2× — soft, faces cut — and most
     such binds had a vertical clip in the same results. Order beyond that is
-    untouched: relevance still decides the rest."""
+    untouched: relevance still decides the rest. A clip in `off_topic` (its
+    description shares nothing with the query) doesn't jump a top clip that IS
+    about it: a pool can hold many verticals since the search asks for them
+    first. A top clip just as off-topic has no such claim."""
     if not candidates or _is_portrait(candidates[0]) in (None, want_portrait):
         return candidates
     for j, c in enumerate(candidates[:window]):
-        if _is_portrait(c) == want_portrait:
+        if _is_portrait(c) == want_portrait and (
+                c.get("provider_id") not in off_topic or candidates[0].get("provider_id") in off_topic):
             return [c] + candidates[:j] + candidates[j + 1:]
     return candidates
 
@@ -55,7 +60,7 @@ def _open(scene: dict) -> bool:
 
 async def plan_project(doc: dict, *, project_id: str, ai_client, pexels_key: str, pixabay_key: str = "",
                        only_uids: set[str] | None = None) -> tuple[list[dict], list[str]]:
-    from backend.services import clip_rank_service, studio_media
+    from backend.services import clip_rank_service, stock_search_cache, studio_media
     from backend.services import stock_video_service as svs
 
     spoken = [(i, s) for i, s in enumerate(doc["scenes"]) if s["line"]
@@ -88,6 +93,7 @@ async def plan_project(doc: dict, *, project_id: str, ai_client, pexels_key: str
 
     pools: dict[int, list[dict]] = {}
     if pexels_key or pixabay_key:
+        refused = stock_search_cache.watch_refusals()
         try:
             results = await svs.search_all_scenes(
                 extracted, studio_media.orientation(doc["aspect_ratio"]), timeline["total"], pexels_key,
@@ -96,6 +102,9 @@ async def plan_project(doc: dict, *, project_id: str, ai_client, pexels_key: str
         except Exception:  # noqa: BLE001
             logger.warning("studio plan: stock search failed", exc_info=True)
             warnings.append("Stock search didn't answer — scenes keep their search terms. Try Re-plan in a minute.")
+        if refused:
+            warnings.append("Stock footage search hit its hourly limit, so some scenes may have fewer clips or none. "
+                            "Try Re-plan in an hour.")
     else:
         warnings.append(studio_media.NO_KEY_MESSAGE)
 
@@ -114,7 +123,9 @@ async def plan_project(doc: dict, *, project_id: str, ai_client, pexels_key: str
         best_first = list(ranked.get(k) or [])
         best_first += [c for c in (pools.get(k) or []) if c not in best_first]
         candidates = [c for c in (studio_media.candidate_from_result(r, query) for r in best_first) if c]
-        candidates = prefer_native_orientation(candidates, want_portrait)
+        off_topic = {str(r.get("id")).removeprefix("pixabay_") for r in best_first
+                     if svs.on_topic(r, query) is False} if want_portrait else frozenset()
+        candidates = prefer_native_orientation(candidates, want_portrait, off_topic=off_topic)
         studio_media.remember(project_id, candidates)
         if not _open(scene):
             continue
