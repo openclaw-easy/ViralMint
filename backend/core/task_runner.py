@@ -540,7 +540,12 @@ async def _download_single_video_to_db(job_id: str, url: str, title: str, user_i
         # under it — so no AI URL-fix retry here.
         raise
     except Exception as first_error:
-        # AI-assisted retry: ask AI to fix the URL and try once more
+        # AI-assisted retry: ask AI to fix the URL and try once more — only
+        # for errors a different URL could fix (shared gate with the scout
+        # path; it used to fire on rate limits, bot checks, private videos).
+        from backend.agents.downloader import url_fix_worth_trying
+        if not url_fix_worth_trying(first_error):
+            raise
         from backend.core.ai_retry import ai_fix_url
         from backend.models.user_settings import UserSettings
         from sqlalchemy import select

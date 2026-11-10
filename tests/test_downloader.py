@@ -373,3 +373,20 @@ class TestEachDownloadOwnsItsFile:
             _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
         first, retry = (c.kwargs["filename"] for c in dl.await_args_list)
         assert first == retry
+
+
+class TestScoutPathUsesTheGate:
+    def test_a_network_error_is_not_sent_to_the_ai(self, infra):
+        from backend.agents.downloader import DownloadAgent
+        from backend.core.exceptions import DownloadError
+        sr = _make_sr("a")
+        fix = AsyncMock(return_value="https://www.youtube.com/watch?v=abd")
+        dl = AsyncMock(side_effect=DownloadError("Download failed: Connection reset by peer"))
+        with patch("backend.agents.downloader.AsyncSessionLocal",
+                   side_effect=lambda: _fake_session(sr)), \
+             patch("backend.agents.downloader.download_video", new=dl), \
+             patch("backend.core.ai_retry.ai_fix_url", new=fix):
+            downloaded = _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
+        assert downloaded == [] and dl.await_count == 1
+        fix.assert_not_awaited()
+        assert "failed" in _final_status_calls(infra["ujs"])

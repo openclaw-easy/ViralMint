@@ -56,6 +56,33 @@ Broken text:
 Return ONLY the corrected valid JSON object — no explanation, no markdown fences."""
 
 
+def _is_public_web_url(candidate: str) -> bool:
+    """True for an http(s) URL whose host is a public name or address.
+
+    No DNS lookup: this guards against a model (or text it was shown)
+    steering the downloader at localhost, a private/link-local range or a
+    cloud metadata address — not against a public name that resolves
+    somewhere odd, which no URL-shape check could catch.
+    """
+    import ipaddress
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(candidate)
+        hostname = parsed.hostname
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https") or not hostname:
+        return False
+    host = hostname.lower().rstrip(".")
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".lan", ".home.arpa")):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return "." in host   # a bare single-label name is a LAN host
+    return ip.is_global
+
+
 async def ai_fix_url(url: str, error: str, user_settings=None) -> str | None:
     """Ask AI to fix a failed download URL. Returns corrected URL or None."""
     try:
@@ -73,10 +100,15 @@ async def ai_fix_url(url: str, error: str, user_settings=None) -> str | None:
             logger.info(f"AI says URL error is not fixable: {url}")
             return None
 
-        # Basic sanity: must look like a URL
-        if corrected.startswith("http") and corrected != url:
+        # The model's URL goes straight to yt-dlp, so it is validated like
+        # user input: http(s), a real public host — never this machine, a
+        # LAN address or a metadata endpoint. The error text the model read
+        # can carry page content, i.e. text a site controls.
+        if corrected != url and _is_public_web_url(corrected):
             logger.info(f"AI suggested URL fix: {url} → {corrected}")
             return corrected
+        if corrected != url:
+            logger.warning("AI URL fix rejected (not a public http(s) URL): %r", corrected[:120])
 
         return None
     except Exception as e:
