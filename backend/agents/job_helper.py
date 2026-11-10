@@ -255,3 +255,57 @@ async def job_cancelled(job_id: str | None) -> bool:
         return row == "cancelled"
     except Exception:
         return False
+
+
+async def fail_job(
+    job_id: str,
+    error: str,
+    user_id: str = "local",
+    *,
+    progress_pct: float = None,
+    current_step: str = None,
+) -> None:
+    """Mark a job failed AND tell the UI — the two halves of a failure.
+
+    `update_job_status` writes the DB only; the `job_failed` WS event is the
+    runner's job. Runner paths that wrote "failed" and stopped there (early
+    exits such as a missing source video, the generator's catch-all, the
+    task_runner wrappers) left the job "running" in the UI — a chat card, an
+    Activity row, a busy button — until a page reload.
+
+    Announces at most once, so it is safe in a wrapper's catch-all:
+      - a live (pending/running) job → DB failed + job_failed
+      - already terminal → the DB write happens exactly as update_job_status
+        did before, but nothing is re-announced: whoever finalised the job
+        already sent its job_complete / job_failed, and a second, contradicting
+        toast is worse than none
+      - cancelled (before or during) → stays "cancelled" with the error kept as
+        the reason (update_job_status enforces that), and no job_failed toast
+        for something the user stopped
+      - row missing → still announced, so a card the UI tracks can clear
+
+    Messaging (Telegram/Slack/…) notifications are NOT sent here — callers
+    that notified before keep doing so themselves; this adds no new ones.
+    """
+    from sqlalchemy import select
+    prev = None
+    try:
+        async with AsyncSessionLocal() as db:
+            prev = (await db.execute(
+                select(Job.status).where(Job.id == job_id)
+            )).scalar_one_or_none()
+    except Exception as e:  # a read failure must not stop the failure write
+        logger.warning("fail_job: could not read job %s status: %s", job_id[:8], e)
+
+    await update_job_status(job_id, "failed", progress_pct=progress_pct,
+                            current_step=current_step, error_message=error)
+
+    if prev in _TERMINAL:
+        return
+    if await job_cancelled(job_id):  # a cancel landed between read and write
+        return
+    try:
+        from backend.core.ws_manager import ws_manager
+        await ws_manager.send({"type": "job_failed", "job_id": job_id, "error": error}, user_id)
+    except Exception as e:  # best-effort, like every other WS emit
+        logger.warning("job_failed WS emit failed (non-fatal) for %s: %s", job_id[:8], e)

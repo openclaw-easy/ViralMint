@@ -313,7 +313,9 @@ export default function useWebSocket() {
           severity: msg.severity,
           wizardId: msg.wizard_id,
         })
-        showSnackbar(msg.message, msg.severity === "error" ? "error" : "warning")
+        // The backend's own severity: an "info" notice (e.g. "this video had no audio
+        // to begin with") must not wear a warning icon. Anything else reads as a warning.
+        showSnackbar(msg.message, ["error", "info"].includes(msg.severity) ? msg.severity : "warning")
       }),
 
       ws.on("morning_digest", (msg) => {

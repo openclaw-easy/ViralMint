@@ -27,6 +27,7 @@ import asyncio
 import logging
 import math
 import subprocess
+import time
 from pathlib import Path
 
 # The one ffmpeg-stderr formatter. ffmpeg prints ~200 characters of version
@@ -103,6 +104,26 @@ async def _tool_progress(job_id: str, pct: float, step: str, user_id: str):
     from backend.core.ws_manager import ws_manager
     await update_job_status(job_id, "running", progress_pct=pct, current_step=step)
     await ws_manager.send_progress(job_id, pct, step, user_id)
+
+
+def _tts_part_progress(job_id: str, low: float, high: float, label: str, user_id: str):
+    """Build a sync `on_progress(fraction, part, parts)` for a long free-voice script: the bar moves
+    with the audio received. At most one write every 2 s: the audio arrives in bursts of messages."""
+    last = 0.0
+
+    def _report(fraction: float, part: int, parts: int):
+        nonlocal last
+        now = time.monotonic()
+        if now - last < 2.0:
+            return
+        last = now
+        step = f"{label}, part {part} of {parts}…" if parts > 1 else f"{label}…"
+        try:
+            asyncio.get_running_loop().create_task(
+                _tool_progress(job_id, round(low + (high - low) * fraction, 1), step, user_id))
+        except RuntimeError:
+            pass
+    return _report
 
 
 async def _tool_success(
@@ -1212,6 +1233,7 @@ async def run_tool_voiceover(
     so, the same rule the Smart Video pipeline follows: a render that speaks
     in a voice the user did not pick must never be silent about it.
     """
+    from backend.agents.job_helper import job_cancelled
     from backend.api.tools import tool_out_path
     from backend.config import settings
     from backend.services.tts_service import (
@@ -1252,6 +1274,9 @@ async def run_tool_voiceover(
             voice_id=voice_id or DEFAULT_VOICES[tts_provider],
             api_key=api_key,
             output_path=mp3_path,
+            on_progress=_tts_part_progress(job_id, 30, 70 if video_path else 95,
+                                           f"Generating voice ({label})", user_id),
+            should_stop=lambda: job_cancelled(job_id),
         )
 
         out_path = mp3_path

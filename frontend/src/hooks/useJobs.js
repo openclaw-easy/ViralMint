@@ -47,6 +47,15 @@ export default function useJobs(pollInterval = 5000, pageSize = 20) {
       const prev = useAppStore.getState().jobs
       if (!sameJobs(prev, next)) setJobs(next)
       setJobTotal(data.total || 0)
+      // Repair a tracked job whose terminal WS event never arrived. Only a
+      // listing that holds EVERY row (first page, total within it) may
+      // declare a tracked job gone; a capped window can only finalize one
+      // whose terminal row it actually holds (liveIds=null).
+      const complete = offset === 0 && (data.total || 0) <= next.length
+      const liveIds = complete
+        ? new Set(next.filter((j) => ACTIVE_STATUSES.has(j.status)).map((j) => j.id))
+        : null
+      useAppStore.getState().reconcileActiveJobs(next, liveIds)
       return next
     } catch (err) {
       console.error("Failed to fetch jobs:", err)
@@ -60,7 +69,12 @@ export default function useJobs(pollInterval = 5000, pageSize = 20) {
     const tick = () => {
       if (document.visibilityState === "hidden") return
       // When nothing is in flight, only poll every IDLE_MULTIPLIER-th tick.
-      const anyActive = useAppStore.getState().jobs.some((j) => ACTIVE_STATUSES.has(j.status))
+      // "In flight" includes a job the UI is still SHOWING as running (a card,
+      // a busy button) — exactly the state a missed terminal event leaves
+      // behind, and it should clear in seconds, not at the idle rate.
+      const st = useAppStore.getState()
+      const anyActive = st.jobs.some((j) => ACTIVE_STATUSES.has(j.status)) ||
+        Object.values(st.activeJobs).some((j) => j.status === "running")
       tickRef.current = anyActive ? 0 : tickRef.current + 1
       if (anyActive || tickRef.current >= IDLE_MULTIPLIER) {
         tickRef.current = 0

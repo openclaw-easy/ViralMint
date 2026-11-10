@@ -24,7 +24,7 @@ from backend.models.scout_result import ScoutResult
 from backend.models.user_settings import UserSettings
 from backend.core.ai_provider import get_ai_client
 from backend.core.ws_manager import ws_manager
-from backend.agents.job_helper import update_job_status
+from backend.agents.job_helper import fail_job, update_job_status
 from backend.config import settings
 from backend.core.exceptions import safe_json_loads
 from backend.core.prompt_rules import extract_json_text
@@ -107,7 +107,7 @@ class GeneratorAgent:
                 )
                 source = result.scalar_one_or_none()
             if not source:
-                await update_job_status(job_id, "failed", error_message="Source video not found")
+                await fail_job(job_id, "Source video not found", user_id)
                 return
 
         # Load user settings
@@ -142,7 +142,7 @@ class GeneratorAgent:
                 await ws_manager.send_progress(job_id, 5, "Generating script...", user_id)
                 script = await self._generate_script(source, aspect_ratio, user_settings)
             else:
-                await update_job_status(job_id, "failed", error_message="No script provided and no source video to generate from")
+                await fail_job(job_id, "No script provided and no source video to generate from", user_id)
                 return
 
             # Step 1b: Verify script quality before proceeding
@@ -179,7 +179,7 @@ class GeneratorAgent:
             )
 
             if not video_path:
-                await update_job_status(job_id, "failed", error_message="Video generation failed — check API keys")
+                await fail_job(job_id, "Video generation failed — check API keys", user_id)
                 return
 
             # Step 5: Mix background music (60%)
@@ -337,7 +337,7 @@ class GeneratorAgent:
 
         except Exception as e:
             logger.error(f"Generation pipeline failed: {e}", exc_info=True)
-            await update_job_status(job_id, "failed", error_message=str(e))
+            await fail_job(job_id, str(e), user_id)
 
     # ── Options & validation ────────────────────────────────────────────
 

@@ -13,7 +13,7 @@ from backend.models.user_settings import UserSettings
 from backend.core.ai_provider import get_ai_client
 from backend.core.prompt_rules import OUTPUT_LANGUAGE_RULE, extract_json_text
 from backend.core.ws_manager import ws_manager
-from backend.agents.job_helper import update_job_status
+from backend.agents.job_helper import fail_job, update_job_status
 
 logger = logging.getLogger(__name__)
 
@@ -543,11 +543,10 @@ class AnalyzerAgent:
         succeeded = total - failed_count
         if succeeded == 0 and total > 0:
             logger.warning("ANALYZER DONE | job=%s | ALL %d videos failed", job_id[:8], total)
-            await update_job_status(
-                job_id, "failed",
+            await fail_job(
+                job_id, f"Failed to analyze any of {total} videos", user_id,
                 progress_pct=100,
                 current_step=f"All {total} videos failed analysis",
-                error_message=f"Failed to analyze any of {total} videos",
             )
         else:
             step_msg = f"Analyzed {succeeded}/{total} videos" if failed_count else f"Analyzed {total} videos"
@@ -574,7 +573,7 @@ class AnalyzerAgent:
             )
             dv = result.scalar_one_or_none()
         if not dv:
-            await update_job_status(job_id, "failed", error_message="Video not found")
+            await fail_job(job_id, "Video not found", user_id)
             return
 
         async with AsyncSessionLocal() as db:
@@ -586,7 +585,7 @@ class AnalyzerAgent:
         try:
             audio_path = dv.audio_path or dv.video_path
             if not audio_path or not Path(audio_path).exists():
-                await update_job_status(job_id, "failed", error_message="No audio/video file found")
+                await fail_job(job_id, "No audio/video file found", user_id)
                 return
 
             # Check if model needs downloading first

@@ -24,6 +24,7 @@ import BuildIcon from "@mui/icons-material/BuildOutlined"
 import SettingsIcon from "@mui/icons-material/SettingsOutlined"
 import TravelExploreIcon from "@mui/icons-material/TravelExploreOutlined"
 import HubIcon from "@mui/icons-material/HubOutlined"
+import { cancelNotice } from "../utils/cancelJob"
 
 const DRAWER_WIDTH = 240
 const COLLAPSED_WIDTH = 64
@@ -347,16 +348,7 @@ export default function Layout() {
           try {
             const { data } = await http.delete(`/api/jobs/${jobId}`)
             removeJob(jobId)
-            // Cancellation is cooperative: the row flips at once, but a
-            // transfer or ffmpeg pass already in flight finishes on its own.
-            // A bare "Job cancelled" reads as a completed stop and invites a
-            // duplicate, so when the server reports best_effort, say so.
-            showSnackbar(
-              data?.best_effort
-                ? "Cancelling — the step already running will finish on its own"
-                : "Job cancelled",
-              "info",
-            )
+            showSnackbar(cancelNotice(data), "info")
           } catch (e) {
             showSnackbar(e.response?.data?.detail || "Could not cancel that job", "error")
           } finally {

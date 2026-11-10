@@ -13,7 +13,7 @@ from backend.models.generated_video import GeneratedVideo
 from backend.models.user_settings import UserSettings
 from backend.core.crypto import decrypt, DecryptionError
 from backend.core.ws_manager import ws_manager
-from backend.agents.job_helper import update_job_status
+from backend.agents.job_helper import fail_job, update_job_status
 from backend.core.exceptions import UploadAuthError, safe_json_loads
 
 logger = logging.getLogger(__name__)
@@ -38,11 +38,11 @@ class UploadAgent:
             video = result.scalar_one_or_none()
 
         if not video:
-            await update_job_status(job_id, "failed", error_message="Generated video not found")
+            await fail_job(job_id, "Generated video not found", user_id)
             return
 
         if not video.video_path:
-            await update_job_status(job_id, "failed", error_message="Video file path is missing")
+            await fail_job(job_id, "Video file path is missing", user_id)
             return
 
         # Load user settings
@@ -132,10 +132,7 @@ class UploadAgent:
                 output_data={"uploaded_platforms": uploaded, "errors": errors},
             )
         else:
-            await update_job_status(
-                job_id, "failed",
-                error_message=f"Upload failed: {'; '.join(errors)}",
-            )
+            await fail_job(job_id, f"Upload failed: {'; '.join(errors)}", user_id)
 
     async def _mark_platform_uploaded(
         self, video_id: str, platform: str, id_field: str, id_value: str,

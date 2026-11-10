@@ -46,6 +46,7 @@ import SourceTree from "../components/librarynext/SourceTree"
 import AssetDrawer from "../components/librarynext/AssetDrawer"
 import PendingTile from "../components/librarynext/PendingTile"
 import { MEDIA, ORIGINS, originTextColor, activityFromJob } from "../components/librarynext/assetModel"
+import { cancelNotice } from "../utils/cancelJob"
 
 // NOTE: there is no "Use in…" hand-off here. Every tool page takes an UPLOAD —
 // no endpoint in this variant accepts a library reference — so a button that
@@ -499,14 +500,7 @@ export default function Library() {
   const cancelJob = async (jobId) => {
     try {
       const { data } = await http.delete(`/api/jobs/${jobId}`)
-      // See Layout.jsx: a running job's cancel is best-effort, and the user
-      // needs to know that before they retry and end up with two of them.
-      showSnackbar(
-        data?.best_effort
-          ? "Cancelling — the step already running will finish on its own"
-          : "Job cancelled",
-        "info",
-      )
+      showSnackbar(cancelNotice(data), "info")
     } catch (e) {
       showSnackbar(e.response?.data?.detail || "Could not cancel that job", "error")
     }

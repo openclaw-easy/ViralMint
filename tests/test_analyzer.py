@@ -261,12 +261,13 @@ class TestReanalyzeSingle:
     async def test_video_not_found_fails_job(self):
         factory, _ = _session_cm([_result_scalar_one(None)])
         with patch.object(analyzer_mod, "AsyncSessionLocal", factory), \
-             patch.object(analyzer_mod, "update_job_status", AsyncMock()) as ujs:
+             patch.object(analyzer_mod, "update_job_status", AsyncMock()), \
+             patch.object(analyzer_mod, "fail_job", AsyncMock()) as fj:
             await AnalyzerAgent().reanalyze_single(
                 job_id="j5", video_id="missing", user_id="local"
             )
-        ujs.assert_awaited()
-        assert ujs.await_args_list[-1].args[1] == "failed"
+        # Failed AND announced (fail_job), so the UI stops showing it running.
+        fj.assert_awaited_once_with("j5", "Video not found", "local")
 
     @pytest.mark.asyncio
     async def test_missing_audio_file_fails_job(self):
@@ -276,10 +277,11 @@ class TestReanalyzeSingle:
             _result_scalar_one(None),   # fetch user settings
         ])
         with patch.object(analyzer_mod, "AsyncSessionLocal", factory), \
-             patch.object(analyzer_mod, "update_job_status", AsyncMock()) as ujs, \
+             patch.object(analyzer_mod, "update_job_status", AsyncMock()), \
+             patch.object(analyzer_mod, "fail_job", AsyncMock()) as fj, \
              patch.object(analyzer_mod.ws_manager, "send_progress", AsyncMock()):
             await AnalyzerAgent().reanalyze_single(
                 job_id="j6", video_id=dv.id, user_id="local"
             )
-        assert ujs.await_args_list[-1].args[1] == "failed"
-        assert "audio" in ujs.await_args_list[-1].kwargs["error_message"].lower()
+        fj.assert_awaited_once()
+        assert "audio" in fj.await_args.args[1].lower()

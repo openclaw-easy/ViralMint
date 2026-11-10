@@ -17,6 +17,7 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber"
 import http from "../../api/http"
 import { toolJobTypeFor } from "../../components/tools/toolJobType"
 import useAppStore from "../../store/appStore"
+import CancelJobButton from "../../components/tools/CancelJobButton"
 import useDocumentTitle from "../../hooks/useDocumentTitle"
 
 // Mirrors backend/api/tools.py MERGE_CLIPS_MIN/MAX. Keep in sync.
@@ -451,9 +452,13 @@ export default function ToolMergeClips() {
                   {job.step || "Working…"}
                 </Typography>
                 <LinearProgress variant="determinate" value={job.percent || 0} sx={{ borderRadius: 1, height: 8 }} />
-                <Typography variant="caption" sx={{ color: "text.secondary", mt: 0.5, display: "block" }}>
-                  {Math.round(job.percent || 0)}%
-                </Typography>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mt: 0.5 }}>
+                  <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                    {Math.round(job.percent || 0)}%
+                  </Typography>
+                  {/* Cancel keeps the clips on the page: a retry needs no re-upload. */}
+                  <CancelJobButton jobId={jobId} onCancelled={() => { setJobId(null); setTerminal(null) }} />
+                </Stack>
               </GlassPanel>
             </>
           )}

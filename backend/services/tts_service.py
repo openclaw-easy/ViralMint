@@ -37,6 +37,10 @@ async def generate_tts(
     voice_id: str = None,
     api_key: str = "",
     output_path: Path = None,
+    # Long free-voice scripts (edge_tts_service): real movement for the job's bar,
+    # and a cancel that stops it. Ignored by the other providers.
+    on_progress=None,
+    should_stop=None,
 ) -> Path:
     """Generate speech using any supported TTS provider. Returns audio file path."""
     if output_path is None:
@@ -57,7 +61,8 @@ async def generate_tts(
 
     elif provider == TTSProvider.EDGE_TTS:
         from backend.services.edge_tts_service import generate_voice
-        return await generate_voice(text, voice_id=voice, output_path=output_path)
+        return await generate_voice(text, voice_id=voice, output_path=output_path,
+                                    on_progress=on_progress, should_stop=should_stop)
 
     raise VoiceGenerationError(f"Unknown TTS provider: {provider}")
 

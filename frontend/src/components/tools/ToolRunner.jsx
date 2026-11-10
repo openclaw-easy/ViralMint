@@ -18,6 +18,7 @@ import { toolJobTypeFor } from "./toolJobType"
 import ToolInputContext from "./ToolInputContext"
 import PageHero from "../PageHero"
 import { GlassPanel, glassPanelSx } from "../../utils/glassFx"
+import CancelJobButton from "./CancelJobButton"
 
 // Default result preview — used when a tool doesn't pass its own
 // `resultPreview`. Probes the cheap /download-meta endpoint for the output's
@@ -197,6 +198,12 @@ export default function ToolRunner({
       setJobId(match.jobId)
     }
   }, [activeJobs, jobId, terminal, endpoint])
+
+  // After a Cancel: forget the job, keep the inputs so a retry is one click.
+  const resetJob = useCallback(() => {
+    setJobId(null)
+    setTerminal(null)
+  }, [])
 
   const reset = useCallback(() => {
     setFile(null)
@@ -402,8 +409,9 @@ export default function ToolRunner({
           // so the user can immediately generate again (with tweaked inputs)
           // after a result lands — no page refresh needed. When a result
           // exists but its rail was dismissed, a secondary "View result"
-          // button reopens it.
-          !jobRunning && (
+          // button reopens it. While one runs the same spot is its Cancel: the header
+          // stays on screen, where a long script pushes the progress panel out of view.
+          jobRunning ? <CancelJobButton jobId={jobId} onCancelled={resetJob} variant="outlined" /> : (
             <Stack direction="row" spacing={1}>
               {jobSuccess && !resultOpen && (
                 <Button

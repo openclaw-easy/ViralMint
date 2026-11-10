@@ -27,6 +27,7 @@ import asyncio
 import logging
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
+from urllib.parse import urlsplit
 
 from sqlalchemy import select
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -78,6 +79,34 @@ STOP_TIMEOUT_S = 5.0
 # A bot that can't reach Telegram at launch (offline, DNS) used to stay off for
 # the whole session with nothing but a log line. Retry with backoff instead.
 START_RETRY_DELAYS_S = (15, 30, 60, 120, 300, 600)
+
+
+class WebhookInUse(ValueError):
+    """The bot delivers to a webhook, so polling it here would cut that service off. A ValueError:
+    the connect route answers it as a 400 with these words."""
+
+
+async def _refuse_if_webhook(bot: Bot) -> None:
+    """Call before polling. python-telegram-bot's start_polling deletes any webhook without asking,
+    so pasting the token of a bot another service serves silently took that service offline.
+    Only the host is named: a webhook's path can hold its secret."""
+    url = (await bot.get_webhook_info()).url
+    if url:
+        host = urlsplit(url).hostname or "another service"
+        raise WebhookInUse(
+            f"This bot already sends its messages to another service ({host}). Using it here would "
+            "cut that service off, so nothing was changed. Turn it off there first, or create a new "
+            "bot with @BotFather.")
+
+
+async def _warn_webhook(user_id: str, refusal: WebhookInUse) -> None:
+    """A saved bot that gained a webhook stays off and keeps its row, so the next start brings it
+    back once the webhook is gone. A refusal isn't an outage: no retries."""
+    logger.warning("Telegram bot for user=%s not started: it has a webhook", user_id)
+    try:
+        await ws_manager.send_constraint_warning(constraint="telegram_webhook", message=str(refusal))
+    except Exception:  # noqa: BLE001 — a warning must not stop the other bots starting
+        logger.debug("telegram webhook warning failed", exc_info=True)
 
 
 class _UserBot:
@@ -158,6 +187,8 @@ class TelegramChannel(MessagingChannel):
             except InvalidToken:
                 logger.warning("Telegram token for user=%s was revoked — reconnect it in Settings → Messaging",
                                cfg.user_id)
+            except WebhookInUse as e:
+                await _warn_webhook(cfg.user_id, e)
             except Exception as e:
                 logger.warning("Failed to start Telegram bot for user=%s: %s — retrying",
                                cfg.user_id, e)
@@ -188,6 +219,9 @@ class TelegramChannel(MessagingChannel):
                     return
                 except InvalidToken:
                     logger.warning("Telegram token for user=%s is invalid — giving up", user_id)
+                    return
+                except WebhookInUse as e:
+                    await _warn_webhook(user_id, e)
                     return
                 except Exception as e:
                     logger.warning("Telegram retry for user=%s failed: %s", user_id, e)
@@ -265,6 +299,7 @@ class TelegramChannel(MessagingChannel):
             try:
                 async with Bot(bot_token) as probe:
                     await probe.get_me()
+                    await _refuse_if_webhook(probe)
             except InvalidToken:
                 raise ValueError("Invalid Telegram bot token.")
             except TelegramError as e:
@@ -359,6 +394,7 @@ class TelegramChannel(MessagingChannel):
             chat_id = None
         app = ApplicationBuilder().token(bot_token).build()
         me = await app.bot.get_me()
+        await _refuse_if_webhook(app.bot)
 
         user_bot = _UserBot(user_id=user_id, app=app, chat_id=chat_id, bot_username=me.username or "")
         self._register_handlers(app, user_id)

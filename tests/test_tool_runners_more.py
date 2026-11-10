@@ -304,13 +304,16 @@ def test_unreadable_dimensions_still_reframe():
 @pytest.mark.asyncio
 class TestVoiceover:
     async def test_audio_only_success(self, terminal_spies, out_dir):
-        async def _gen(text, voice_id=None, output_path=None):
+        async def _gen(text, voice_id=None, output_path=None, on_progress=None, should_stop=None):
             Path(output_path).write_bytes(b"x")
 
         with patch("backend.services.edge_tts_service.generate_voice",
                    new=AsyncMock(side_effect=_gen)) as gen:
             await trun.run_tool_voiceover("j1", "hello world", "en-US-Guy")
         gen.assert_awaited_once()
+        # The runner hands the synth its progress reporter and its cancel check.
+        assert callable(gen.await_args.kwargs["on_progress"])
+        assert callable(gen.await_args.kwargs["should_stop"])
         terminal_spies["success"].assert_awaited()
 
     async def test_tts_failure_routes_to_fail(self, terminal_spies, out_dir):
