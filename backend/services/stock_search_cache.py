@@ -28,6 +28,7 @@ import logging
 import sqlite3
 import time
 from contextlib import closing
+from contextvars import ContextVar
 from pathlib import Path
 
 from backend.config import settings
@@ -125,6 +126,25 @@ async def put(source: str, query: str, candidates: list, **params) -> None:
         )
     except Exception as e:
         logger.debug("stock search cache put failed (skipping): %s", e)
+
+
+# A search can survive a refusal (Pixabay answered, the first Pexels call had
+# clips), so nothing raises as far as the planner: this is how it can still say
+# why a scene came up short. The list is shared with the gathered searches.
+_refusals: ContextVar[list | None] = ContextVar("stock_search_refusals", default=None)
+
+
+def watch_refusals() -> list:
+    """From here on in this task, rate-limited searches land in the returned list."""
+    seen: list = []
+    _refusals.set(seen)
+    return seen
+
+
+def note_refusal(source: str) -> None:
+    seen = _refusals.get()
+    if seen is not None:
+        seen.append(source)
 
 
 # In-flight dedup: a plan fires up to 18 scene

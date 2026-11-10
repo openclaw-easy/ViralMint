@@ -3,6 +3,7 @@
 """Shared video utility functions — used across multiple services."""
 import logging
 import math
+import re
 import subprocess
 from pathlib import Path
 
@@ -16,12 +17,51 @@ def run_ffmpeg(args: list[str], *, timeout: float = 600, binary_stdout: bool = F
                           capture_output=True, text=not binary_stdout, timeout=timeout)
 
 
+# Sinks a clip about something else below an on-topic 1920x1080, which an
+# off-topic portrait otherwise beats by ~40 on orientation_fit_adjustment alone
+# (and only the top of the pool reaches the AI rank). Every off-topic clip pays
+# it, whatever its shape or library: when a slug can't speak for the footage
+# ("satisfying"), the vertical still leads.
+OFF_TOPIC_PENALTY = 60
+_TOPIC_FILLER = frozenset(
+    "the and for with from into over under that this your you are was its our their out off about video videos "
+    "footage clip clips shot shots stock close closeup slow motion view".split())
+
+
+def topic_words(words) -> set[str]:
+    """Content words of a description. Pixabay's tags can hold several words
+    ("honey bee"), so each is split."""
+    return {w for x in words for w in str(x).lower().split() if len(w) >= 3 and w not in _TOPIC_FILLER}
+
+
+def on_topic(candidate: dict, query: str) -> bool | None:
+    """Does a clip's description share a word with its query? None = can't
+    tell (no description, or a query in a language the English slugs don't
+    speak). Loose on purpose (bee/honeybees, dancer/dancing): only a clear miss
+    may cost a clip anything, and the AI rank still judges what's left."""
+    wanted = topic_words(re.findall(r"[a-z0-9]+", (query or "").lower()))
+    described = topic_words(candidate.get("desc_words") or [])
+    if not wanted or not described:
+        return None
+    return any(a in b or b in a or a[:4] == b[:4] for a in wanted for b in described)
+
+
+def demote_off_topic(candidates: list[dict], query: str) -> list[dict]:
+    """Tall targets only: a new best-first list, the input untouched (it may be
+    the cached copy)."""
+    scored = [{**c, "quality_score": c.get("quality_score", 0) - OFF_TOPIC_PENALTY}
+              if on_topic(c, query) is False else c for c in candidates]
+    scored.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
+    return scored
+
+
 def orientation_fit_adjustment(w: int, h: int, orientation: str) -> float:
     """Quality-score adjustment for how well a stock candidate fits the target
     orientation once cover-cropped.
 
-    The searchers accept ANY orientation (a landscape clip can crop to
-    portrait), but a 1920×1080 file keeps only ~31% of its width for a 9:16
+    A pool can still mix orientations (Pixabay can't filter, and the Pexels
+    portrait search tops up from any orientation when it comes back short).
+    A 1920×1080 file keeps only ~31% of its width for a 9:16
     canvas and gets upscaled ~1.8×. Adjustment = orientation-match bonus −
     upscale penalty:
       * +25 when the file's orientation matches the target
