@@ -210,6 +210,7 @@ async def test_telegram_switching_bots_clears_the_owner(monkeypatch):
         async def __aenter__(self): return self
         async def __aexit__(self, *a): return False
         async def get_me(self): return SimpleNamespace(username="new_bot")
+        async def get_webhook_info(self): return SimpleNamespace(url="")
 
     spun = []
 
@@ -505,6 +506,7 @@ async def test_telegram_a_group_bound_by_an_old_build_asks_to_pair_again(monkeyp
 
     fake_app = MagicMock()
     fake_app.bot.get_me = AsyncMock(return_value=SimpleNamespace(username="vm_bot"))
+    fake_app.bot.get_webhook_info = AsyncMock(return_value=SimpleNamespace(url=""))
     builder = MagicMock()
     builder.token.return_value.build.return_value = fake_app
     monkeypatch.setattr(tcm, "ApplicationBuilder", lambda: builder)

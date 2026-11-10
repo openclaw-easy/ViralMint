@@ -35,6 +35,7 @@ def _app(*, updater_running=True, running=True):
     app.updater.start_polling = AsyncMock()
     app.updater.stop = AsyncMock()
     app.bot.send_message = AsyncMock()
+    app.bot.get_webhook_info = AsyncMock(return_value=SimpleNamespace(url=""))
     return app
 
 
@@ -349,6 +350,9 @@ class _ProbeBot:
         if self.error:
             raise self.error
         return SimpleNamespace(username="vm_bot")
+
+    async def get_webhook_info(self):
+        return SimpleNamespace(url="")
 
 
 class TestConfigure:
