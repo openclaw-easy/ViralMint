@@ -1476,34 +1476,78 @@ def _job_id_of(coro) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+# What a runner owes the world if it is dropped BEFORE its first line runs. A
+# coroutine that never started never runs its `finally`, so a cancel while it
+# queued for a slot (the skip gate below), a cancelled wait for the slot, or
+# any error before `await coro` would leave whatever the endpoint took for it
+# (a render claim, a plan's seat, a scene left `generating`) taken until a
+# restart. Keyed by the runner's function name; the handler gets the runner's
+# bound arguments as keywords.
+_UNSTARTED_CLEANUPS: dict = {}
+
+
+def on_unstarted(runner_name: str):
+    """Register `async fn(**runner_args)` to run when `runner_name`'s coroutine is dropped unstarted."""
+    def register(fn):
+        _UNSTARTED_CLEANUPS[runner_name] = fn
+        return fn
+    return register
+
+
+async def _settle_unstarted(coro) -> None:
+    import inspect
+    try:
+        if inspect.getcoroutinestate(coro) != inspect.CORO_CREATED:
+            return                                    # it ran (its own finally settled) or was closed already
+        args = dict(coro.cr_frame.f_locals)
+        name = coro.cr_code.co_name
+    except Exception:  # noqa: BLE001 — not a coroutine we can read: nothing to settle
+        return
+    coro.close()                                      # also silences "coroutine was never awaited"
+    cleanup = _UNSTARTED_CLEANUPS.get(name)
+    if cleanup is None:
+        return
+    try:
+        await cleanup(**args)
+    except Exception:  # noqa: BLE001 — a cleanup must never raise out of the dispatcher
+        logger.warning("TASK CLEANUP FAILED | runner=%s", name, exc_info=True)
+
+
 async def _run_with_limit(coro, semaphore: asyncio.Semaphore | None = None):
     """Run a coroutine with concurrency limiting (the heavy pool by default).
 
     A job cancelled while it QUEUED for a slot never starts: the cancel API
     answers `best_effort: false` ("cancelled before it started") for a pending
     job, and before this gate that was untrue — the queued runner still ran
-    the whole download / ffmpeg pass once a slot came free.
+    the whole download / ffmpeg pass once a slot came free. A runner dropped
+    unstarted gets its `on_unstarted` cleanup instead of its own `finally`.
     """
     job_id = _job_id_of(coro)
     try:
-        async with semaphore or _task_semaphore:
-            if job_id:
-                from backend.agents.job_helper import job_cancelled
-                if await job_cancelled(job_id):
-                    coro.close()   # never started — nothing to unwind
-                    logger.info("TASK SKIPPED | job=%s was cancelled while queued",
-                                job_id[:8])
-                    return
-                _active_runners.add(job_id)
-            try:
-                await coro
-            finally:
-                if job_id:
-                    _active_runners.discard(job_id)
+        try:
+            await _run_slot(coro, semaphore or _task_semaphore, job_id)
+        finally:
+            await _settle_unstarted(coro)
     except Exception as e:
         # Last-resort catch — individual task runners should handle their own errors,
         # but if something leaks through, log it instead of crashing silently.
         logger.error("Unhandled exception in background task: %s", e, exc_info=True)
+
+
+async def _run_slot(coro, semaphore: asyncio.Semaphore, job_id: str | None) -> None:
+    async with semaphore:
+        if job_id:
+            from backend.agents.job_helper import job_cancelled
+            if await job_cancelled(job_id):
+                # Never started: _settle_unstarted closes it and settles what it owed.
+                logger.info("TASK SKIPPED | job=%s was cancelled while queued", job_id[:8])
+                return
+            _active_runners.add(job_id)
+        try:
+            await coro
+        finally:
+            if job_id:
+                _active_runners.discard(job_id)
 
 
 async def run_news_scout(
