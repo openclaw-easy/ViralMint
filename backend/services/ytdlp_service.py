@@ -543,6 +543,34 @@ def _is_bot_detection_error(error_str: str) -> bool:
     return any(ind in error_str.lower() for ind in indicators)
 
 
+def _sign_in_message(url: str | None) -> str:
+    """The bot-check / sign-in message, worded for the host that asked.
+
+    yt-dlp's "login required" / "--cookies-from-browser" wording fires on
+    Instagram, TikTok, X and others too — telling those users "YouTube
+    requires sign-in" sent them to the wrong site.
+    """
+    from urllib.parse import urlparse
+    try:
+        host = (urlparse(url or "").hostname or "").lower()
+    except ValueError:
+        host = ""
+    if not host or "youtube" in host or host.endswith("youtu.be"):
+        return (
+            "YouTube requires sign-in to verify you're not a bot. "
+            "Install Chrome/Brave/Firefox and log into YouTube, then retry."
+        )
+    site = host[4:] if host.startswith("www.") else host
+    return (
+        f"{site} wants you signed in before it serves this video. "
+        f"Sign in to {site} in Chrome/Brave/Firefox, open the video once, then retry."
+    )
+
+
+def _is_403(error_str: str) -> bool:
+    return "http error 403" in error_str or "403: forbidden" in error_str
+
+
 def _is_transient_error(error_str: str) -> bool:
     """Check if the error is transient (worth retrying after a delay)."""
     indicators = [
@@ -578,6 +606,16 @@ def _terminal_download_error(error, url: str | None = None) -> Exception:
     error_str = str(error).lower()
     if _is_permanent_error(error_str):
         return VideoUnavailableError(f"Video unavailable: {error}")
+    if _is_403(error_str):
+        # Say what happened: the host refused, and dropping cookies (the one
+        # recovery a 403 has) did not change its mind.
+        from urllib.parse import urlparse
+        host = (urlparse(url or "").hostname or "the site") if url else "the site"
+        _record_download_failure()
+        return DownloadError(
+            f"Download failed: {host} refused the download (HTTP 403 Forbidden), "
+            f"with and without browser cookies. ({error})"
+        )
     if "429" in error_str or "rate" in error_str:
         _record_rate_limit()
         return RateLimitError(
@@ -1126,11 +1164,17 @@ async def download_video(
         # proved un-embeddable for this source, re-attaching it on the next
         # format rung would just fail the same way.
         opt_pps_dropped = False
+        # Set when an error proved no other format can help (a 403 with no
+        # cookies left to drop) — ends the format chain outright.
+        stop_format_chain = False
 
         # `_format_chain` is FORMAT_FALLBACK_CHAIN unless the caller asked for
         # a specific quality — see download_options.format_chain() on why an
         # unrequested download must keep the module-level chain verbatim.
         for fmt_idx, fmt in enumerate(_format_chain):
+            if stop_format_chain:
+                logger.info("Skipping format fallback (HTTP 403 survived the cookie drop)")
+                break
             video_opts = {**base_opts, "format": fmt}
 
             # Up to 2 attempts per format (original + 1 retry for transient errors)
@@ -1177,20 +1221,40 @@ async def download_video(
                     # again — including across the format fallbacks, hence the
                     # mirror onto base_opts, which every later format is
                     # rebuilt from.
-                    if ("http error 403" in error_str or "403: forbidden" in error_str) \
-                            and _drop_cookies_for_403(video_opts):
-                        for _ck in ("cookiefile", "cookiesfrombrowser"):
-                            base_opts.pop(_ck, None)
-                        logger.warning(
-                            "HTTP 403 with cookies applied — retrying without them "
-                            "(re-enables the token-free player clients)"
-                        )
+                    if _is_403(error_str):
+                        if _drop_cookies_for_403(video_opts):
+                            for _ck in ("cookiefile", "cookiesfrombrowser"):
+                                base_opts.pop(_ck, None)
+                            logger.warning(
+                                "HTTP 403 with cookies applied — retrying without them "
+                                "(re-enables the token-free player clients)"
+                            )
+                            _cleanup_partial_files(output_dir, file_stem)
+                            continue
+                        if attempt == 0:
+                            # One plain retry: a fresh extraction gets fresh
+                            # signed URLs, which clears an expired one.
+                            logger.warning("HTTP 403 without cookies, retrying once in 5s: %s", e)
+                            _cleanup_partial_files(output_dir, file_stem)
+                            import time as _time
+                            _time.sleep(5)
+                            continue
+                        # Still refused, with no cookies left to drop: that
+                        # was the only recovery a 403 has. A different format
+                        # string is signed and refused the same way, so
+                        # walking the chain only repeats the refusal (with a
+                        # sleep each time).
+                        logger.warning("HTTP 403 persisted — ending the format chain: %s", e)
                         _cleanup_partial_files(output_dir, file_stem)
-                        continue
+                        stop_format_chain = True
+                        break
 
                     # ── Bot detection: retry with fresh cookies ────
-                    if _is_bot_detection_error(str(e)) and attempt == 0:
-                        browser = _detect_cookie_browser()
+                    if _is_bot_detection_error(str(e)):
+                        # attempt > 0: the cookie retry didn't help, so the
+                        # wall is real — end here instead of repeating it on
+                        # every remaining attempt and format rung.
+                        browser = _detect_cookie_browser() if attempt == 0 else None
                         if browser:
                             logger.warning(f"Bot detection triggered, retrying with {browser} cookies")
                             _cleanup_partial_files(output_dir, file_stem)
@@ -1200,10 +1264,7 @@ async def download_video(
                             continue  # Retry with cookies
                         else:
                             _cleanup_partial_files(output_dir, file_stem)
-                            raise DownloadError(
-                                "YouTube requires sign-in to verify you're not a bot. "
-                                "Install Chrome/Brave/Firefox and log into YouTube, then retry."
-                            )
+                            raise DownloadError(_sign_in_message(url))
 
                     # ── Transient errors: retry once after delay ────
                     if _is_transient_error(error_str) and attempt == 0:
@@ -1277,6 +1338,18 @@ async def download_video(
             if actual:
                 logger.info(f"Video file extension changed: expected {video_path.suffix}, found {actual.suffix}")
                 video_path = actual
+
+        # The one invariant every caller saves a Library row on: a success
+        # names a file that exists and holds bytes. yt-dlp returning cleanly
+        # is not that — without this check a missing or empty file became a
+        # row the Library then hides.
+        if not video_path or not video_path.exists() or video_path.stat().st_size == 0:
+            _record_download_failure()
+            raise DownloadError(
+                "Download finished but no usable video file is on disk."
+                if not video_path or not video_path.exists() else
+                "Download finished but the video file is empty (0 bytes)."
+            )
 
         # Extract subtitles from downloaded files
         subtitles = _collect_subtitles(output_dir, file_stem_resolved, info=info)
