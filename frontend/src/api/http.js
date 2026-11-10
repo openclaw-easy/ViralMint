@@ -8,7 +8,8 @@ const http = axios.create({
 http.interceptors.response.use(
   res => res,
   err => {
-    console.error("API error:", err.response?.data || err.message)
+    // A cancel is ours (a request that a newer one replaced), not an error. Everything else still logs.
+    if (!axios.isCancel(err)) console.error("API error:", err.response?.data || err.message)
     return Promise.reject(err)
   }
 )

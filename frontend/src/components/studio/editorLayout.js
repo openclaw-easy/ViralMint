@@ -18,6 +18,10 @@
 //      a selected scene opens in that drawer (audit 2026-09-25 — the column
 //      used to be clipped off the right edge instead).
 //
+//   6. a row too narrow for the media column at all (a phone) folds that too:
+//      a rail each side, the player between them, the bin a drawer over the
+//      row's left edge. A desktop window never gets here.
+//
 // Saved (dragged) widths are preferences: they are clamped here, never
 // rewritten, so they come back when the room does.
 
@@ -35,6 +39,8 @@ export const PROJECT_RAIL_W = 44
 export const BIN_FLOOR = 240
 // The Project drawer's width when it opens over the row.
 export const PROJECT_DRAWER_W = 360
+// Under this the media column folds as well: BIN_FLOOR + a rail left the 9:16 player under 340.
+export const PHONE_ROW_W = 600
 
 // 16:9 is width-limited in any centre column, so it needs the most.
 export const playerMinWidth = (aspect) => (aspect === "9:16" ? 340 : aspect === "16:9" ? 560 : 480)
@@ -52,6 +58,14 @@ export function editorColumns({ rowW, binSaved, projectSaved, aspect, sceneSelec
     return { bin: binSaved, project: projectSaved, binMin: BIN_MIN,
       projectMin: sceneSelected ? PROJECT_MIN_WITH_SCENE : PROJECT_MIN, centerMin: playerMin, sceneAsDrawer: false,
       projectAsDrawer: false }
+  }
+  if (rowW < PHONE_ROW_W) {
+    return {
+      bin: PROJECT_RAIL_W, project: PROJECT_RAIL_W, binMin: PROJECT_RAIL_W, projectMin: PROJECT_RAIL_W,
+      centerMin: Math.max(0, rowW - 2 * PROJECT_RAIL_W),
+      sceneAsDrawer: !!sceneSelected, projectAsDrawer: true, binAsDrawer: true,
+      drawerW: Math.min(PROJECT_DRAWER_W, Math.max(280, rowW - 120)),
+    }
   }
   if (rowW < TIGHT_MIN + playerMin + TIGHT_MIN) {
     // Folded: bin | player | rail. The bin gives way down to BIN_FLOOR; below

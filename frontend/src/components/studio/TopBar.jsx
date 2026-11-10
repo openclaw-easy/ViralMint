@@ -12,6 +12,7 @@ import MovieCreationOutlinedIcon from "@mui/icons-material/MovieCreationOutlined
 import CloudDoneOutlinedIcon from "@mui/icons-material/CloudDoneOutlined"
 import CloudOffOutlinedIcon from "@mui/icons-material/CloudOffOutlined"
 import NotesOutlinedIcon from "@mui/icons-material/NotesOutlined"
+import PlayCircleOutlineIcon from "@mui/icons-material/PlayCircleOutline"
 import ShortcutsPopover from "../ShortcutsPopover"
 import { ASPECTS } from "./studioModel"
 import { formatClock } from "../../utils/format"
@@ -50,6 +51,12 @@ function useWidth() {
 // 1024-1280px windows it wrapped to two lines and was pushed off the edge).
 const HIDE_DURATION_BELOW = 1100
 const COMPACT_BELOW = 960
+// Narrower than this (a phone, a split window) no single row holds it all, so
+// the bar takes two rows and Render ends the second.
+const TWO_ROWS_BELOW = 760
+// On a phone the second row holds Render only if Last render is an icon: as
+// words it took a third row.
+const PHONE_BELOW = 480
 
 function TopBar({
   project, timeline, saving, saveError, canUndo, canRedo, onUndo, onRedo, onRename, onAspect,
@@ -66,11 +73,13 @@ function TopBar({
 
   const [barRef, barW] = useWidth()
   const measured = barW > 0
+  const twoRows = measured && barW < TWO_ROWS_BELOW
+  const phone = measured && barW < PHONE_BELOW
   const showDuration = !measured || barW >= HIDE_DURATION_BELOW
   const compact = measured && barW < COMPACT_BELOW
   return (
     <Box ref={barRef} sx={{ flexShrink: 0, bgcolor: "background.paper", position: "relative" }}>
-      <Stack direction="row" alignItems="center" spacing={1} sx={{ px: 1.25, py: 0.75, minHeight: 52, flexWrap: "nowrap", minWidth: 0 }}>
+      <Stack direction="row" alignItems="center" spacing={1} useFlexGap={twoRows} data-testid="topbar-row" sx={{ px: 1.25, py: 0.75, minHeight: 52, flexWrap: twoRows ? "wrap" : "nowrap", minWidth: 0 }}>
         <Tooltip title="All projects">
           <IconButton size="small" aria-label="All projects" onClick={onBack} sx={{ flexShrink: 0 }}><ArrowBackIcon fontSize="small" /></IconButton>
         </Tooltip>
@@ -79,7 +88,7 @@ function TopBar({
           onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur() }}
           inputProps={{ "aria-label": "Project title" }}
           sx={{
-            fontWeight: 800, fontSize: "1rem", flex: "0 1 460px", minWidth: 72, maxWidth: 460, px: 0.75, borderRadius: 1,
+            fontWeight: 800, fontSize: "1rem", flex: twoRows ? "1 1 0" : "0 1 460px", minWidth: 72, maxWidth: 460, px: 0.75, borderRadius: 1,
             "&:hover": { bgcolor: "action.hover" }, "&.Mui-focused": { bgcolor: "action.hover" },
           }}
         />
@@ -105,7 +114,7 @@ function TopBar({
           )}
         </Tooltip>
 
-        <Box sx={{ flex: 1, minWidth: 0 }} />
+        <Box sx={twoRows ? { flexBasis: "100%", height: 0 } : { flex: 1, minWidth: 0 }} />
 
         <Tooltip title="Undo (⌘Z)"><span><IconButton size="small" aria-label="Undo" disabled={!canUndo} onClick={onUndo}><UndoIcon fontSize="small" /></IconButton></span></Tooltip>
         <Tooltip title="Redo (⇧⌘Z)"><span><IconButton size="small" aria-label="Redo" disabled={!canRedo} onClick={onRedo}><RedoIcon fontSize="small" /></IconButton></span></Tooltip>
@@ -130,16 +139,20 @@ function TopBar({
         )}
 
         <ShortcutsPopover shortcuts={STUDIO_SHORTCUTS} />
-        {onOpenLast && (
+        {onOpenLast && (phone ? (
+          <Tooltip title="Last render">
+            <IconButton size="small" color="primary" aria-label="Last render" onClick={onOpenLast} sx={{ flexShrink: 0 }}><PlayCircleOutlineIcon fontSize="small" /></IconButton>
+          </Tooltip>
+        ) : (
           <Button size="small" onClick={onOpenLast} sx={{ textTransform: "none", fontWeight: 700, flexShrink: 0, whiteSpace: "nowrap" }}>
             Last render
           </Button>
-        )}
+        ))}
         <Button
           variant="contained" disabled={!!rendering || !timeline.scenes.length} onClick={onRender}
           startIcon={rendering ? <CircularProgress size={14} color="inherit" /> : <MovieCreationOutlinedIcon />}
           // Pinned: never shrinks, never wraps — everything else gives way first.
-          sx={{ textTransform: "none", fontWeight: 800, px: 2, flexShrink: 0, whiteSpace: "nowrap" }}
+          sx={{ textTransform: "none", fontWeight: 800, px: 2, flexShrink: 0, whiteSpace: "nowrap", ...(twoRows ? { ml: "auto" } : null) }}
         >
           {rendering ? `Rendering ${rendering.pct}%` : "Render"}
         </Button>

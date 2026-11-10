@@ -5,6 +5,25 @@ import { BIN_FLOOR, BIN_INITIAL, PROJECT_INITIAL, PROJECT_MIN, PROJECT_RAIL_W, T
 
 const fits = (c, rowW) => c.bin + c.project + c.centerMin <= rowW
 
+describe("a phone", () => {
+  for (const rowW of [320, 390, 430, 599]) {
+    for (const aspect of ["9:16", "16:9", "1:1"]) {
+      it(`row ${rowW} ${aspect}: a rail each side and the player between them`, () => {
+        const c = editorColumns({ rowW, binSaved: 380, projectSaved: 360, aspect, sceneSelected: false })
+        expect(c.binAsDrawer).toBe(true)
+        expect(c.projectAsDrawer).toBe(true)
+        expect(c.bin + c.project + c.centerMin).toBe(rowW)
+        expect(c.centerMin).toBeGreaterThan(rowW - 100)
+      })
+    }
+  }
+  it("a window at the line keeps its media column, as before", () => {
+    const c = editorColumns({ rowW: 600, binSaved: 380, projectSaved: 360, aspect: "9:16", sceneSelected: false })
+    expect(c.binAsDrawer).toBeFalsy()
+    expect(c.bin).toBeGreaterThanOrEqual(240)
+  })
+})
+
 describe("editorColumns — the row never overflows", () => {
   // The row widths measured in the browser at 1600 / 1440 / 1280 px windows.
   for (const rowW of [1360, 1200, 1040]) {

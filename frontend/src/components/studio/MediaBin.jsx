@@ -3,8 +3,10 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react"
 import {
   Box, Button, Chip, CircularProgress, IconButton, InputAdornment, Stack, Tab, Tabs,
-  TextField, Tooltip, Typography, alpha,
+  TextField, Tooltip, Typography, alpha, ButtonBase,
 } from "@mui/material"
+import CloseIcon from "@mui/icons-material/Close"
+import PermMediaOutlinedIcon from "@mui/icons-material/PermMediaOutlined"
 import SearchIcon from "@mui/icons-material/SearchOutlined"
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded"
 import FileUploadOutlinedIcon from "@mui/icons-material/FileUploadOutlined"
@@ -69,7 +71,7 @@ export const MEDIA_BIN_WIDTH = { storageKey: "vm_studio_bin_w", initial: BIN_INI
 
 function MediaBin({
   selected, scenes = [], onPreview, onUseStock, onUseMine, onUpload, onSearch, mine,
-  onMatchClips, onRemoveClip, request, width, resize,
+  onMatchClips, onRemoveClip, request, width, resize, folded = false, drawerW = 280, open = false, onOpenChange,
 }) {
   const [tab, setTab] = useState("stock")
   const [input, setInput] = useState("")
@@ -93,6 +95,7 @@ function MediaBin({
   useEffect(() => {
     if (!request) return
     if (request.tab) setTab(request.tab)
+    onOpenChange?.(true)        // on a phone the bin is a drawer: whoever asked for it needs to see it
     if (request.query != null) { setInput(request.query); runSearch(request.query) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request])
@@ -121,9 +124,17 @@ function MediaBin({
   const openScenes = scenes.filter((sc) => sc.line && !isFixedVisual(sc)).length
   const { dragging, handleProps } = resize
 
-  return (
-    <Box sx={{ flex: `0 0 ${width}px`, minWidth: 0, position: "relative", display: "flex", flexDirection: "column", borderRight: 1, borderColor: "divider", bgcolor: "background.paper", minHeight: 0 }}>
-      <Box
+  const column = (
+    <Box data-testid={folded ? "media-drawer" : undefined} sx={folded
+      ? (t) => ({ position: "absolute", top: 0, bottom: 0, left: "100%", width: drawerW, zIndex: 6, display: "flex", flexDirection: "column", minHeight: 0, bgcolor: "background.paper", borderRight: 1, borderColor: "divider",
+        boxShadow: t.palette.mode === "dark" ? "16px 0 40px rgba(0,0,0,0.55)" : "16px 0 40px rgba(30,30,60,0.16)" })
+      : { flex: `0 0 ${width}px`, minWidth: 0, position: "relative", display: "flex", flexDirection: "column", borderRight: 1, borderColor: "divider", bgcolor: "background.paper", minHeight: 0 }}>
+      {folded ? (
+        <Stack direction="row" alignItems="center" sx={{ pl: 2, pr: 0.75, minHeight: 40, flexShrink: 0, borderBottom: 1, borderColor: "divider" }}>
+          <Typography component="h2" variant="body2" sx={{ fontWeight: 700, flex: 1 }}>Media</Typography>
+          <IconButton size="small" aria-label="Close media panel" onClick={() => onOpenChange?.(false)}><CloseIcon fontSize="small" /></IconButton>
+        </Stack>
+      ) : <Box
         {...handleProps}
         // Arrow keys resize here; don't let the editor's window handler also step scenes.
         onKeyDown={(e) => { handleProps.onKeyDown(e); if (e.key.startsWith("Arrow")) e.stopPropagation() }}
@@ -133,7 +144,7 @@ function MediaBin({
           transition: "background-color .12s",
           "&:hover, &:focus-visible": { bgcolor: alpha(t.palette.primary.main, 0.35), outline: "none" },
         })}
-      />
+      />}
       <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="fullWidth"
         sx={{ minHeight: 40, borderBottom: 1, borderColor: "divider", "& .MuiTab-root": { minHeight: 40, minWidth: 0, textTransform: "none", fontWeight: 700, fontSize: "0.8rem" } }}>
         <Tab value="stock" label="Stock" />
@@ -258,6 +269,19 @@ function MediaBin({
           </>
         )}
       </Box>
+    </Box>
+  )
+  if (!folded) return column
+  // A row too narrow for this column (editorLayout.js): a rail, and the bin opens over the row's left edge.
+  return (
+    <Box sx={{ flex: `0 0 ${width}px`, minWidth: 0, position: "relative", minHeight: 0, borderRight: 1, borderColor: "divider", bgcolor: "background.paper" }}>
+      <ButtonBase aria-label="Media panel" aria-expanded={open} onClick={() => onOpenChange?.(!open)}
+        sx={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", justifyContent: "flex-start", alignItems: "center", gap: 1, pt: 1.25, color: open ? "primary.main" : "text.secondary", "&:hover": { bgcolor: "action.hover" },
+          "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main", outlineOffset: -2 } }}>
+        <PermMediaOutlinedIcon fontSize="small" />
+        <Typography sx={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: "0.75rem", fontWeight: 800, letterSpacing: "0.03em", userSelect: "none" }}>Media</Typography>
+      </ButtonBase>
+      {open && column}
     </Box>
   )
 }

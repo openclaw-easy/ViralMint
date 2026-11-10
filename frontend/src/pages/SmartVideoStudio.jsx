@@ -347,6 +347,12 @@ function StudioEditor({ projectId }) {
     aspect: project?.doc.aspect_ratio, sceneSelected: !!selectedUid,
   })
   const { sceneAsDrawer, projectAsDrawer } = columns
+  // On a phone the media bin is a drawer too (editorLayout.js). It covers the player, so a preview closes it,
+  // and while it's open it comes first: the scene drawer waits, or a scene tapped in the timeline hides the bin.
+  const binAsDrawer = !!columns.binAsDrawer
+  const [binOpen, setBinOpen] = useState(false)
+  const binShown = binAsDrawer && binOpen
+  useEffect(() => { if (preview) setBinOpen(false) }, [preview])
   // The folded Project column's drawer (a row too narrow for three columns).
   // A selected scene opens in it on its own; this is the Project view.
   const [projectOpen, setProjectOpen] = useState(false)
@@ -773,6 +779,7 @@ function StudioEditor({ projectId }) {
           onUpload={openUpload} onSearch={runSearch} mine={mine}
           onMatchClips={matchClips} onRemoveClip={removeClip} request={binRequest}
           width={columns.bin} resize={binResize}
+          folded={binAsDrawer} drawerW={columns.drawerW} open={binShown} onOpenChange={setBinOpen}
         />
         <Box sx={{
           flex: "1 1 0", display: "flex", flexDirection: "column", position: "relative",
@@ -787,7 +794,7 @@ function StudioEditor({ projectId }) {
             />
           )}
           <Box sx={{ flex: 1, minHeight: 0, display: "flex" }}>
-            <Box sx={{ flex: "1 1 auto", minWidth: playerMinWidth(project.doc.aspect_ratio), display: "flex", flexDirection: "column" }}>
+            <Box sx={{ flex: "1 1 auto", minWidth: Math.min(playerMinWidth(project.doc.aspect_ratio), columns.centerMin), display: "flex", flexDirection: "column" }}>
               <SequencePlayer
                 projectId={project.id}
                 timeline={timeline} settings={project.doc.settings} aspectRatio={project.doc.aspect_ratio}
@@ -811,8 +818,9 @@ function StudioEditor({ projectId }) {
           mine={mine}
           onReplan={replan} onFix={fixFinding} onShuffle={shuffleFootage} onPausePlayback={pausePlayback}
           width={columns.project} resize={projectResize}
-          drawer={sceneAsDrawer ? scenePanel : null}
-          folded={projectAsDrawer} drawerW={columns.drawerW} open={projectOpen} onOpenChange={onProjectOpen}
+          drawer={sceneAsDrawer && !binShown ? scenePanel : null}
+          folded={projectAsDrawer} drawerW={columns.drawerW} open={projectOpen && !binShown}
+          onOpenChange={(next) => { setBinOpen(false); onProjectOpen(next) }}
         />
       </Box>
 

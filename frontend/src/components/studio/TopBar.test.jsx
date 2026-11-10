@@ -85,6 +85,31 @@ describe("TopBar — narrow bars give way before Render does", () => {
     expect(screen.getByRole("button", { name: "Script" })).toHaveTextContent("Script")
   })
 
+  it("a phone: the bar takes two rows, so Render is on screen", () => {
+    withWidth(390, () => render(<TopBar {...baseProps()} />))
+    expect(screen.getByTestId("topbar-row")).toHaveStyle({ flexWrap: "wrap" })
+    expect(screen.getByRole("button", { name: /Render/ })).toBeInTheDocument()
+  })
+
+  it("from 760 up the bar stays one row", () => {
+    withWidth(760, () => render(<TopBar {...baseProps()} />))
+    expect(screen.getByTestId("topbar-row")).toHaveStyle({ flexWrap: "nowrap" })
+  })
+
+  it("on a phone Last render is an icon that still opens it, so Render stays on the second row", () => {
+    const onOpenLast = vi.fn()
+    withWidth(390, () => render(<TopBar {...baseProps()} onOpenLast={onOpenLast} />))
+    const last = screen.getByRole("button", { name: "Last render" })
+    expect(last).not.toHaveTextContent("Last render")
+    fireEvent.click(last)
+    expect(onOpenLast).toHaveBeenCalledOnce()
+  })
+
+  it("from 480 up Last render stays in words", () => {
+    withWidth(620, () => render(<TopBar {...baseProps()} onOpenLast={vi.fn()} />))
+    expect(screen.getByRole("button", { name: "Last render" })).toHaveTextContent("Last render")
+  })
+
   it("narrow (a 1024px window): duration hidden, Script an icon — Render intact", () => {
     withWidth(760, () => render(<TopBar {...baseProps()} />))
     expect(screen.queryByText(/0:12 · 2 scenes/)).toBeNull()
