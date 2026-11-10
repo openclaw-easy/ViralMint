@@ -9,9 +9,10 @@ import SearchIcon from "@mui/icons-material/SearchOutlined"
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded"
 import FileUploadOutlinedIcon from "@mui/icons-material/FileUploadOutlined"
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline"
+import UseClipButton from "./UseClipButton"
 import { onActivate } from "../../utils/a11y"
-import { BIN_MIN } from "./editorLayout"
-import { isFixedVisual, queryGradient, stockLabel } from "./studioModel"
+import { BIN_INITIAL, BIN_MIN } from "./editorLayout"
+import { clipInUse, isFixedVisual, queryGradient, stockLabel } from "./studioModel"
 
 // The media bin: find something to put in the selected scene — stock
 // footage, or your own uploaded clips. Tiles are thumbnails, never <video> —
@@ -21,10 +22,18 @@ import { isFixedVisual, queryGradient, stockLabel } from "./studioModel"
 // are added, placed and removed. The Project panel and the Scene panel link
 // here instead of repeating them.
 
-function StockTile({ candidate, canUse, onPreview, onUse }) {
+// A clip card's frame: the clip in use is ringed (a shadow, so the card doesn't
+// shift by a pixel when it changes state).
+const clipCardSx = (inUse, idleBorder = "divider") => ({
+  borderRadius: 1.5, overflow: "hidden", border: 1, bgcolor: "background.paper",
+  borderColor: inUse ? "primary.main" : idleBorder,
+  boxShadow: (t) => (inUse ? `0 0 0 1px ${t.palette.primary.main}` : "none"),
+})
+
+function StockTile({ candidate, canUse, sceneN, inUse, onPreview, onUse }) {
   const label = stockLabel(candidate)
   return (
-    <Box sx={{ borderRadius: 1.5, overflow: "hidden", border: 1, borderColor: "divider", bgcolor: "background.paper" }}>
+    <Box data-testid="stock-tile" sx={clipCardSx(inUse)}>
       <Box
         role="button" tabIndex={0} aria-label={`Preview ${label}`}
         onClick={() => onPreview({ candidate, label, useAs: { kind: "stock", candidate } })}
@@ -44,26 +53,19 @@ function StockTile({ candidate, canUse, onPreview, onUse }) {
           </Typography>
         )}
       </Box>
-      <Stack direction="row" alignItems="center" sx={{ pl: 0.75, pr: 0.25 }}>
+      <Stack direction="row" alignItems="center" spacing={0.5} sx={{ pl: 1, pr: 0.625, py: 0.625 }}>
         <Typography variant="caption" noWrap sx={{ flex: 1, minWidth: 0, fontWeight: 600, fontSize: 11 }} title={label}>{label}</Typography>
-        <Tooltip title={canUse ? "Use for the selected scene" : "Select a scene in the timeline first"}>
-          <span>
-            <Button size="small" disabled={!canUse} onClick={() => onUse(candidate)}
-              sx={{ minWidth: 0, px: 0.75, textTransform: "none", fontWeight: 700, fontSize: 11.5 }}>
-              Use
-            </Button>
-          </span>
-        </Tooltip>
+        <UseClipButton name={label} sceneN={sceneN} inUse={inUse} disabled={!canUse} onUse={() => onUse(candidate)} />
       </Stack>
     </Box>
   )
 }
 
-// The left column: 432px by default (owner, 2026-09-16: 50% wider than the
-// old 288), drag its right edge to resize — the width is remembered; tile
+// The left column: 380px by default (room for the player), drag its right
+// edge to resize — the width is remembered; tile
 // grids add columns as it widens. The editor owns the hook and passes the
 // width its row budget allows (editorLayout.js).
-export const MEDIA_BIN_WIDTH = { storageKey: "vm_studio_bin_w", initial: 432, min: BIN_MIN, max: 900, label: "the media panel", anchor: "left" }
+export const MEDIA_BIN_WIDTH = { storageKey: "vm_studio_bin_w", initial: BIN_INITIAL, min: BIN_MIN, max: 900, label: "the media panel", anchor: "left" }
 
 function MediaBin({
   selected, scenes = [], onPreview, onUseStock, onUseMine, onUpload, onSearch, mine,
@@ -139,7 +141,7 @@ function MediaBin({
       </Tabs>
       {!selected && (
         <Typography variant="caption" data-testid="bin-no-scene"
-          sx={{ px: 1.5, py: 0.75, color: "text.secondary", borderBottom: 1, borderColor: "divider", display: "block" }}>
+          sx={(t) => ({ px: 1.5, py: 0.75, fontWeight: 600, bgcolor: alpha(t.palette.primary.main, 0.08), borderBottom: 1, borderColor: "divider", display: "block" })}>
           Select a scene in the timeline to use a visual for it.
         </Typography>
       )}
@@ -180,9 +182,10 @@ function MediaBin({
                 No footage found for “{search.query}” — try fewer or simpler words.
               </Typography>
             )}
-            <Box sx={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 0.75, mt: 1.25 }}>
+            <Box sx={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 0.75, mt: 1.25 }}>
               {search.results.map((c) => (
-                <StockTile key={`${c.provider}:${c.provider_id}`} candidate={c} canUse={canUse} onPreview={onPreview} onUse={onUseStock} />
+                <StockTile key={`${c.provider}:${c.provider_id}`} candidate={c} canUse={canUse} sceneN={selected ? selected.index + 1 : null}
+                  inUse={clipInUse(selected, c)} onPreview={onPreview} onUse={onUseStock} />
               ))}
             </Box>
           </>
@@ -215,12 +218,13 @@ function MediaBin({
                 </Tooltip>
               </Stack>
             )}
-            <Box sx={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 0.75, mt: 1.25 }}>
+            <Box sx={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 0.75, mt: 1.25 }}>
               {mine.map((item) => {
                 const at = usedOn[item.asset_id]
+                const inUse = clipInUse(selected, item)
                 return (
                   <Box key={item.asset_id} data-testid="mine-tile"
-                    sx={(t) => ({ borderRadius: 1.5, overflow: "hidden", border: 1, borderColor: at ? alpha(t.palette.success.main, 0.6) : "divider" })}>
+                    sx={(t) => clipCardSx(inUse, at ? alpha(t.palette.success.main, 0.6) : "divider")}>
                     <Box
                       role="button" tabIndex={0} aria-label={`Preview ${item.title}`}
                       onClick={() => onPreview({ url: item.url, image: item.media === "image", label: item.title, useAs: { kind: "user_clip", asset: item } })}
@@ -238,17 +242,14 @@ function MediaBin({
                         {at ? `Scene ${at.join(", ")}` : "Not used"}
                       </Typography>
                     </Box>
-                    <Stack direction="row" alignItems="center" sx={{ pl: 0.75, pr: 0.25 }}>
+                    <Stack direction="row" alignItems="center" spacing={0.25} sx={{ pl: 1, pr: 0.625, py: 0.625 }}>
                       <Typography variant="caption" noWrap sx={{ flex: 1, minWidth: 0, fontWeight: 600, fontSize: 11 }} title={item.title}>{item.title}</Typography>
                       <Tooltip title={`Remove from this project${at ? " — its scenes go back to stock" : ""}`}>
                         <IconButton size="small" aria-label={`Remove ${item.title}`} onClick={() => onRemoveClip?.(item)} sx={{ p: 0.4 }}>
                           <DeleteOutlineIcon sx={{ fontSize: 16 }} />
                         </IconButton>
                       </Tooltip>
-                      <Button size="small" disabled={!canUse} onClick={() => onUseMine(item)}
-                        sx={{ minWidth: 0, px: 0.75, textTransform: "none", fontWeight: 700, fontSize: 11.5 }}>
-                        Use
-                      </Button>
+                      <UseClipButton name={item.title} sceneN={selected ? selected.index + 1 : null} inUse={inUse} disabled={!canUse} onUse={() => onUseMine(item)} />
                     </Stack>
                   </Box>
                 )

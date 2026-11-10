@@ -76,6 +76,17 @@ export const providerLabel = (provider) => (provider === "pixabay" ? "Pixabay" :
 export const stockLabel = (asset) =>
   `${providerLabel(asset?.provider)}${asset?.creator ? ` · ${asset.creator}` : ""}`
 
+// Is this clip card what the scene already shows? Stock by provider + id, your
+// own clips by asset id.
+export const clipInUse = (scene, clip) => {
+  const v = scene?.visual
+  const a = v?.asset
+  if (!a || !clip) return false
+  if (v.kind === "stock") return a.provider_id != null && clip.provider === a.provider && String(clip.provider_id) === String(a.provider_id)
+  if (v.kind === "user_clip") return !!a.asset_id && clip.asset_id === a.asset_id
+  return false
+}
+
 // ── Voices (D3, D8) ────────────────────────────────────────────────────────
 // Edge TTS runs locally and fast, so a changed line re-records by itself.
 // OpenAI TTS runs on the user's own key: it records only when asked (Voice

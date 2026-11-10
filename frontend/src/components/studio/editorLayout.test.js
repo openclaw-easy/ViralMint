@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2025-2026 ViralMint Contributors
 import { describe, expect, it } from "vitest"
-import { BIN_FLOOR, PROJECT_RAIL_W, TIGHT_MIN, editorColumns, playerMinWidth } from "./editorLayout"
+import { BIN_FLOOR, BIN_INITIAL, PROJECT_INITIAL, PROJECT_MIN, PROJECT_RAIL_W, TIGHT_MIN, editorColumns, playerMinWidth } from "./editorLayout"
 
 const fits = (c, rowW) => c.bin + c.project + c.centerMin <= rowW
 
@@ -72,5 +72,42 @@ describe("editorColumns — a narrow row folds the Project column into a drawer"
     const c = editorColumns({ rowW: 784, binSaved: 900, projectSaved: 600, aspect: "9:16", sceneSelected: false })
     expect(c.centerMin).toBe(playerMinWidth("9:16"))
     expect(c.bin).toBe(784 - playerMinWidth("9:16") - PROJECT_RAIL_W)
+  })
+})
+
+describe("editorColumns — the player gets the room", () => {
+  const at = (rowW, aspect, sceneSelected = false) => editorColumns({
+    rowW, binSaved: BIN_INITIAL, projectSaved: PROJECT_INITIAL, aspect, sceneSelected,
+  })
+  const centre = (c, rowW) => rowW - c.bin - c.project
+
+  it("the side columns are narrow by default, and the centre takes the rest", () => {
+    expect(PROJECT_INITIAL).toBeLessThanOrEqual(360)
+    expect(BIN_INITIAL).toBeLessThanOrEqual(380)
+    expect(centre(at(1440, "16:9"), 1440)).toBeGreaterThanOrEqual(700)
+    expect(centre(at(1680, "16:9"), 1680)).toBeGreaterThanOrEqual(940)
+  })
+
+  it("16:9 keeps a useful width wherever all three columns show", () => {
+    for (const rowW of [1160, 1200, 1300]) expect(centre(at(rowW, "16:9"), rowW)).toBeGreaterThanOrEqual(560)
+  })
+
+  it("selecting a scene doesn't move the player when it opens in the Project column", () => {
+    for (const [rowW, aspect] of [[1040, "9:16"], [1200, "9:16"], [1200, "16:9"], [1440, "16:9"], [1680, "16:9"], [1200, "1:1"], [1440, "1:1"]]) {
+      const idle = at(rowW, aspect)
+      const open = at(rowW, aspect, true)
+      expect(open.sceneAsDrawer).toBe(true)
+      expect([open.bin, open.project]).toEqual([idle.bin, idle.project])
+    }
+  })
+
+  it("a scene opens beside the player only when the picture keeps its size", () => {
+    expect(at(1440, "9:16", true).sceneAsDrawer).toBe(false)
+    expect(at(1680, "1:1", true).sceneAsDrawer).toBe(false)
+    expect(at(2320, "16:9", true).sceneAsDrawer).toBe(false)
+  })
+
+  it("the Project column has one floor while idle", () => {
+    expect(at(1300, "9:16").projectMin).toBe(PROJECT_MIN)
   })
 })

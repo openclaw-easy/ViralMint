@@ -79,7 +79,7 @@ function TopBar({
           onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur() }}
           inputProps={{ "aria-label": "Project title" }}
           sx={{
-            fontWeight: 800, fontSize: "1rem", flex: "0 1 340px", minWidth: 72, maxWidth: 340, px: 0.75, borderRadius: 1,
+            fontWeight: 800, fontSize: "1rem", flex: "0 1 460px", minWidth: 72, maxWidth: 460, px: 0.75, borderRadius: 1,
             "&:hover": { bgcolor: "action.hover" }, "&.Mui-focused": { bgcolor: "action.hover" },
           }}
         />
@@ -95,11 +95,11 @@ function TopBar({
 
         <Tooltip title="Edit the whole script as a document">
           {compact ? (
-            <IconButton size="small" aria-label="Script" onClick={onScript} sx={{ flexShrink: 0, color: "primary.main" }}>
+            <IconButton size="small" aria-label="Script" onClick={onScript} sx={{ flexShrink: 0 }}>
               <NotesOutlinedIcon fontSize="small" />
             </IconButton>
           ) : (
-            <Button size="small" aria-label="Script" startIcon={<NotesOutlinedIcon fontSize="small" />} onClick={onScript} sx={{ textTransform: "none", fontWeight: 700, flexShrink: 0 }}>
+            <Button size="small" color="inherit" aria-label="Script" startIcon={<NotesOutlinedIcon fontSize="small" />} onClick={onScript} sx={{ textTransform: "none", fontWeight: 700, flexShrink: 0 }}>
               Script
             </Button>
           )}

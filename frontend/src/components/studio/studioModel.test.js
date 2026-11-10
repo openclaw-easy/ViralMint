@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 ViralMint Contributors
 import { describe, it, expect } from "vitest"
 import {
-  aspectCss, autoRevoices, hashString,
+  aspectCss, autoRevoices, clipInUse, hashString,
   musicLabel, musicTrackName, queryGradient, stockLabel, voiceKindLabel, withTimeline,
 } from "./studioModel"
 
@@ -58,5 +58,25 @@ describe("presentation helpers", () => {
     expect(queryGradient("x")).toMatch(/^linear-gradient\(135deg, hsl\(/)
     expect(aspectCss("16:9")).toBe("16 / 9")
     expect(aspectCss("4:3")).toBe("9 / 16")
+  })
+})
+
+describe("clipInUse — is this card what the scene already shows", () => {
+  const stock = (asset) => ({ visual: { kind: "stock", asset } })
+  it("stock: same provider and id, whatever the id's type", () => {
+    expect(clipInUse(stock({ provider: "pexels", provider_id: 7 }), { provider: "pexels", provider_id: "7" })).toBe(true)
+    expect(clipInUse(stock({ provider: "pexels", provider_id: 7 }), { provider: "pixabay", provider_id: 7 })).toBe(false)
+    expect(clipInUse(stock({ provider: "pexels", provider_id: 7 }), { provider: "pexels", provider_id: 8 })).toBe(false)
+  })
+  it("your own clip: same asset id, and never a stock card", () => {
+    const mine = { visual: { kind: "user_clip", asset: { asset_id: "a1" } } }
+    expect(clipInUse(mine, { asset_id: "a1" })).toBe(true)
+    expect(clipInUse(mine, { asset_id: "a2" })).toBe(false)
+    expect(clipInUse(mine, { provider: "pexels", provider_id: 7 })).toBe(false)
+  })
+  it("nothing bound, or no scene, is never in use", () => {
+    expect(clipInUse(null, { provider: "pexels", provider_id: 7 })).toBe(false)
+    expect(clipInUse(stock(null), { provider: "pexels", provider_id: 7 })).toBe(false)
+    expect(clipInUse(stock({ provider: "pexels" }), { provider: "pexels" })).toBe(false)
   })
 })
