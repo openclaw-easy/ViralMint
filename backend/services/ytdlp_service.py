@@ -1819,20 +1819,23 @@ def _pick_subtitle_track(
 
     Per language, in caller order: a creator track first (exact key, then a
     regional variant such as `en-US` / `es-419`), then the auto-generated one
-    (exact key, then YouTube's `<lang>-orig` original-language ASR track).
+    (exact key, then YouTube's `<lang>-orig` original-language ASR track,
+    then a script or regional variant — YouTube keys Chinese auto tracks
+    `zh-Hans` / `zh-Hant`, never `zh`, so exact matching skipped them).
     Returns None when nothing in the chain exists in either map.
     """
-    def _manual_key(lang: str) -> str | None:
-        if lang in manual:
-            return lang
-        return next((k for k in sorted(manual)
+    def _variant(tracks: dict, lang: str) -> str | None:
+        return next((k for k in sorted(tracks)
                      if k.lower().startswith(f"{lang}-") and not k.endswith("-orig")), None)
+
+    def _manual_key(lang: str) -> str | None:
+        return lang if lang in manual else _variant(manual, lang)
 
     def _auto_key(lang: str) -> str | None:
         for key in (lang, f"{lang}-orig"):
             if key in auto:
                 return key
-        return None
+        return _variant(auto, lang)
 
     for lang in langs:
         m, a = _manual_key(lang), _auto_key(lang)

@@ -91,6 +91,18 @@ class TestPickTrack:
         assert ys._pick_subtitle_track({"en": []}, {"en": []}, ["en"], prefer_manual=False) \
             == ("en", "en", True)
 
+    def test_a_script_keyed_auto_track_counts(self):
+        # YouTube keys Chinese auto tracks zh-Hans / zh-Hant, never plain zh.
+        assert ys._pick_subtitle_track({}, {"zh-Hans": [], "zh-Hant": []}, ["zh"]) \
+            == ("zh-Hans", "zh", True)
+
+    def test_a_regional_auto_track_counts(self):
+        assert ys._pick_subtitle_track({}, {"pt-BR": []}, ["pt"]) == ("pt-BR", "pt", True)
+
+    def test_the_orig_track_beats_a_variant(self):
+        assert ys._pick_subtitle_track({}, {"es-419": [], "es-orig": []}, ["es"]) \
+            == ("es-orig", "es", True)
+
     def test_nothing_in_the_chain(self):
         assert ys._pick_subtitle_track({"it": []}, {}, ["en", "de"]) is None
 
@@ -405,6 +417,10 @@ class TestLanguageWarning:
 
     async def test_the_requested_language_says_nothing(self, terminal_spies, dirs):
         assert await self._run(dirs, "en", "en") == []
+
+    async def test_a_regional_request_answered_by_its_base_says_nothing(self, terminal_spies, dirs):
+        # The service reports the BASE code ("es" for an es-419 track).
+        assert await self._run(dirs, "es-419", "es") == []
 
     async def test_auto_never_warns(self, terminal_spies, dirs):
         assert await self._run(dirs, None, "de") == []
