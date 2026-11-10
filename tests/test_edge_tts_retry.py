@@ -34,12 +34,11 @@ class _FakeCommunicate:
     def __init__(self, *a, **k):
         pass
 
-    async def save(self, path):
+    async def stream(self):
         type(self).calls += 1
         if type(self).plan:
             raise type(self).plan.pop(0)
-        with open(path, "wb") as f:
-            f.write(b"ID3fakeaudio")
+        yield {"type": "audio", "data": b"ID3fakeaudio"}
 
 
 @pytest.fixture
@@ -84,14 +83,13 @@ def test_concurrency_is_capped(fake_edge, tmp_path, monkeypatch):
     live, peak = 0, 0
 
     class _Slow(_FakeCommunicate):
-        async def save(self, path):
+        async def stream(self):
             nonlocal live, peak
             live += 1
             peak = max(peak, live)
             await asyncio.sleep(0.02)
             live -= 1
-            with open(path, "wb") as f:
-                f.write(b"ID3")
+            yield {"type": "audio", "data": b"ID3"}
 
     import edge_tts
     monkeypatch.setattr(edge_tts, "Communicate", _Slow)
@@ -107,10 +105,9 @@ def test_cap_survives_a_second_event_loop(fake_edge, tmp_path, monkeypatch):
     """Each asyncio.run is a new loop; a module-level Semaphore contended in
     one loop raises "bound to a different event loop" in the next."""
     class _Slow(_FakeCommunicate):
-        async def save(self, path):
+        async def stream(self):
             await asyncio.sleep(0.01)
-            with open(path, "wb") as f:
-                f.write(b"ID3")
+            yield {"type": "audio", "data": b"ID3"}
 
     import edge_tts
     monkeypatch.setattr(edge_tts, "Communicate", _Slow)

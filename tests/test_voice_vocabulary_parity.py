@@ -151,7 +151,7 @@ async def test_the_voiceover_runner_routes_to_the_provider_it_was_given(monkeypa
 
     seen = {}
 
-    async def fake_generate_tts(text, provider=None, voice_id=None, api_key="", output_path=None):
+    async def fake_generate_tts(text, provider=None, voice_id=None, api_key="", output_path=None, **_progress):
         seen.update(provider=provider, voice_id=voice_id, api_key=api_key)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"\xff\xfb" + b"\0" * 4096)
@@ -180,7 +180,7 @@ async def test_a_paid_provider_without_a_key_degrades_loudly_to_edge(monkeypatch
 
     seen, warnings = {}, []
 
-    async def fake_generate_tts(text, provider=None, voice_id=None, api_key="", output_path=None):
+    async def fake_generate_tts(text, provider=None, voice_id=None, api_key="", output_path=None, **_progress):
         seen.update(provider=provider, voice_id=voice_id)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"\xff\xfb" + b"\0" * 4096)
@@ -211,7 +211,7 @@ async def test_an_unknown_provider_falls_back_rather_than_raising(monkeypatch):
 
     seen = {}
 
-    async def fake_generate_tts(text, provider=None, voice_id=None, api_key="", output_path=None):
+    async def fake_generate_tts(text, provider=None, voice_id=None, api_key="", output_path=None, **_progress):
         seen["provider"] = provider
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"\xff\xfb" + b"\0" * 4096)
