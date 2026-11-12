@@ -205,3 +205,46 @@ class TestRealRender:
             f"an enhanced file must read as already-normalized, got "
             f"{m1['input_i']} LUFS / {m1['input_tp']} dBTP"
         )
+
+
+# ── A quiet voice must not come out muffled (2026-11-12) ─────────────────────
+# Ported from the hosted repo's "under the water" report. afftdn without noise
+# tracking assumes a fixed -50 dB floor, so on a quiet recording the voice's
+# own high end sits under that floor and is removed: speech-like audio lost
+# 2.8 dB of its 2-8 kHz band at -35 dB and 7 dB at -40 dB. `tn=1` tracks the
+# real floor and keeps the voice.
+
+def _speechlike(path: Path, gain_db: float) -> Path:
+    """Harmonic 'syllables' (180 Hz-5.2 kHz, 3 Hz envelope) over pink noise."""
+    voice = ("aevalsrc='(0.5+0.5*sin(2*PI*3*t))*(sin(2*PI*180*t)+0.6*sin(2*PI*360*t)"
+             "+0.4*sin(2*PI*1100*t)+0.3*sin(2*PI*2500*t)+0.25*sin(2*PI*3800*t)"
+             "+0.2*sin(2*PI*5200*t))*0.15':s=48000:d=6")
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", voice,
+         "-f", "lavfi", "-i", "anoisesrc=color=pink:amplitude=0.01:sample_rate=48000:duration=6",
+         "-filter_complex", f"[0:a][1:a]amix=inputs=2:normalize=0,volume={gain_db}dB",
+         "-ac", "1", str(path)],
+        capture_output=True, check=True)
+    return path
+
+
+def _treble_share_db(path: Path) -> float:
+    """2-8 kHz RMS minus full-band RMS (dB)."""
+    def rms(af: str) -> float:
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(path), "-af",
+                            f"{af}astats=measure_overall=RMS_level", "-f", "null", "-"],
+                           capture_output=True, text=True)
+        line = next(l for l in r.stderr.splitlines() if "RMS level dB" in l)
+        return float(line.rsplit(" ", 1)[-1])
+    return rms("highpass=f=2000,lowpass=f=8000,") - rms("")
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+@pytest.mark.parametrize("gain_db", [0, -35, -40])
+def test_the_denoiser_keeps_a_quiet_voice_treble(tmp_path, gain_db):
+    src = _speechlike(tmp_path / "in.wav", gain_db)
+    out = tmp_path / "out.wav"
+    subprocess.run(["ffmpeg", "-y", "-i", str(src), "-af", AUDIO_DENOISE_FILTER, str(out)],
+                   capture_output=True, check=True)
+    before, after = _treble_share_db(src), _treble_share_db(out)
+    assert after >= before - 2.0, f"treble lost at {gain_db} dB: {before:.1f} -> {after:.1f} (muffled)"
