@@ -150,6 +150,7 @@ export default function ClipStudio() {
   // Export selection
   const [checkedClips, setCheckedClips] = useState(new Set())
   const [zipping, setZipping] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [deleting, setDeleting] = useState(false)
 
   // Delete confirmation
@@ -546,6 +547,32 @@ export default function ClipStudio() {
       else next.add(clipId)
       return next
     })
+  }
+
+  // Save the checked clips into a folder the user picks (ported from the hosted repo, 2026-11-12):
+  // a ZIP download always lands in the browser's download folder. The native picker blocks until
+  // the user chooses, so it must not ride the global axios timeout (the backend bounds it at 300 s).
+  const handleExportClips = async () => {
+    if (checkedClips.size === 0) return
+    setExporting(true)
+    try {
+      const { data: pick } = await http.post("/api/videos/pick-folder", null, { timeout: 0 })
+      if (!pick.ok || !pick.path) {
+        // A cancel is silent; a picker FAILURE must not be (it reads as "the button does nothing").
+        if (pick.error) showSnackbar(`Couldn't open the folder picker: ${pick.error}`, "error")
+        return
+      }
+      const { data } = await http.post("/api/videos/save-clips", {
+        clip_ids: [...checkedClips],
+        destination: pick.path,
+      })
+      showSnackbar(`Saved ${data.count} clip${data.count !== 1 ? "s" : ""} to ${pick.path}`, "success")
+      setCheckedClips(new Set())
+    } catch (e) {
+      showSnackbar(`Save failed: ${e.response?.data?.detail || e.message}`, "error")
+    } finally {
+      setExporting(false)
+    }
   }
 
   const handleZipChecked = async () => {
@@ -1379,9 +1406,18 @@ export default function ClipStudio() {
                   {checkedClips.size > 0 && (
                     <>
                       <Button
+                        size="small" variant="contained"
+                        startIcon={exporting ? <CircularProgress size={14} color="inherit" /> : <FolderOpenIcon />}
+                        disabled={exporting || deleting || zipping}
+                        onClick={(e) => { e.stopPropagation(); handleExportClips() }}
+                        sx={{ textTransform: "none", height: 28, fontSize: "0.75rem", fontWeight: 700, px: 1.5, borderRadius: 2, ml: 0.5 }}
+                      >
+                        {exporting ? "Saving..." : `Save ${checkedClips.size} clip${checkedClips.size !== 1 ? "s" : ""}`}
+                      </Button>
+                      <Button
                         size="small" variant="outlined" color="secondary"
                         startIcon={zipping ? <CircularProgress size={14} color="inherit" /> : <FolderZipIcon />}
-                        disabled={zipping || deleting}
+                        disabled={zipping || deleting || exporting}
                         onClick={(e) => { e.stopPropagation(); handleZipChecked() }}
                         sx={{ textTransform: "none", height: 28, fontSize: "0.75rem", fontWeight: 700, px: 1.5, borderRadius: 2, ml: 0.5 }}
                       >
@@ -1390,7 +1426,7 @@ export default function ClipStudio() {
                       <Button
                         size="small" variant="outlined" color="error"
                         startIcon={deleting ? <CircularProgress size={14} color="inherit" /> : <DeleteIcon />}
-                        disabled={deleting || zipping}
+                        disabled={deleting || zipping || exporting}
                         onClick={(e) => { e.stopPropagation(); openConfirm(
                           `Delete ${checkedClips.size} clip${checkedClips.size !== 1 ? "s" : ""}?`,
                           "This will permanently remove the selected clips and their files from disk.",

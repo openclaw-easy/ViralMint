@@ -433,6 +433,157 @@ async def bulk_delete_videos(body: dict = None, db: AsyncSession = Depends(get_d
     return {"ok": True, "deleted": len(videos)}
 
 
+# Ported from the hosted repo 2026-11-12 (user report: "can't save clips directly to
+# any folder in the pc"): a native folder picker + a copy into the folder the user chose.
+@router.post("/videos/pick-folder")
+async def pick_folder():
+    """Open a native OS folder picker dialog and return the selected path."""
+    import asyncio
+    import platform
+    import subprocess
+
+    # A non-zero exit means EITHER "the user pressed Cancel" OR "the picker
+    # could not run". Reporting both as a cancel is what "Save clips does
+    # nothing" looks like from the outside — the Windows branch was fixed for
+    # exactly that on 2026-09-01 and the other two kept the bug. Each host
+    # tells the two apart differently, so each says so explicitly.
+    _CANCEL_MARKERS = ("-128", "user canceled", "user cancelled")
+
+    def _pick():
+        system = platform.system()
+        if system == "Darwin":
+            # macOS: native AppleScript folder picker.
+            result = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose folder with prompt "Save clips to...")'],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode != 0:
+                # A cancel is AppleScript error -128, which this Mac reports
+                # as `execution error: User cancelled. (-128)`. The NUMBER
+                # leads the marker list on purpose — the words are localized,
+                # the code is not. Anything else is a real failure, most often
+                # Automation permission denied for the host app: a silently
+                # no-op button on macOS, exactly what the ownerless dialog was
+                # on Windows.
+                err = (result.stderr or "").strip()
+                if any(m in err.lower() for m in _CANCEL_MARKERS):
+                    return None
+                raise RuntimeError(err[:200] or "folder picker failed")
+            return result.stdout.strip() or None
+        elif system == "Windows":
+            # Windows: PowerShell folder browser dialog.
+            #
+            # Two things here are load-bearing (the dialog "did nothing" on
+            # Windows before them, while macOS worked):
+            #  - ShowDialog() is given an OWNER form that is TopMost. With no
+            #    owner, a dialog spawned from a windowless backend process has
+            #    no foreground rights, so it opens BEHIND the browser with no
+            #    taskbar presence — to the user, the click did nothing. (And
+            #    from an MTA thread an ownerless ShowDialog can return Cancel
+            #    instantly; -STA pins the apartment rather than trusting the
+            #    host default.)
+            #  - CREATE_NO_WINDOW stops a console window flashing up for the
+            #    powershell process itself.
+            ps_script = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$owner = New-Object System.Windows.Forms.Form -Property @{ "
+                "TopMost = $true; TopLevel = $true; ShowInTaskbar = $false; "
+                "StartPosition = 'CenterScreen'; Width = 0; Height = 0 }; "
+                "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                "$d.Description = 'Save clips to...'; "
+                "if ($d.ShowDialog($owner) -eq 'OK') { $d.SelectedPath } else { '' }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-STA", "-Command", ps_script],
+                capture_output=True, text=True, timeout=300,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    (result.stderr or "").strip()[:200] or "folder picker failed"
+                )
+            path = result.stdout.strip()
+            return path if path else None
+        else:
+            # Linux: zenity folder picker. A cancel exits 1 with nothing on
+            # stderr; a picker that could not start (no DISPLAY/WAYLAND under
+            # a headless or systemd-launched backend) exits non-zero AND
+            # explains itself there. `zenity` missing entirely raises
+            # FileNotFoundError, which the caller already reports.
+            result = subprocess.run(
+                ["zenity", "--file-selection", "--directory", "--title=Save clips to..."],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode != 0:
+                err = (result.stderr or "").strip()
+                if err:
+                    raise RuntimeError(err[:200])
+                return None
+            return result.stdout.strip() or None
+
+    try:
+        folder = await asyncio.to_thread(_pick)
+    except Exception as e:  # noqa: BLE001 — picker error must reach the UI,
+        # not masquerade as a cancel: "Save clips did nothing" is exactly what
+        # a swallowed picker error looks like.
+        return {"ok": False, "path": None, "error": str(e)[:200]}
+    if not folder:
+        return {"ok": False, "path": None}
+    return {"ok": True, "path": folder}
+
+
+@router.post("/videos/save-clips")
+async def save_clips(body: dict, db: AsyncSession = Depends(get_db)):
+    """
+    Copy selected clip video files to a user-chosen destination folder.
+    Body: { "clip_ids": ["id1", "id2"], "destination": "/path/to/folder" }
+    Returns: { "ok": true, "count": N, "destination": "..." }
+    """
+    import shutil
+
+    clip_ids = _id_list(body, "clip_ids", BULK_EXPORT_MAX)
+    destination = body.get("destination")
+    if not destination:
+        raise HTTPException(status_code=400, detail="No destination folder provided")
+
+    dest_dir = Path(destination).resolve()
+    if not dest_dir.is_dir():
+        raise HTTPException(status_code=400, detail="Destination folder does not exist")
+
+    result = await db.execute(
+        select(GeneratedVideo).where(GeneratedVideo.id.in_(clip_ids))
+    )
+    clips = result.scalars().all()
+    if not clips:
+        raise HTTPException(status_code=404, detail="No clips found")
+
+    copied = 0
+    for clip in clips:
+        if not clip.video_path:
+            continue
+        # Guard the source against escapes out of STORAGE_ROOT, matching
+        # bulk_export_videos. Soft-skip on failure so one bad row can't
+        # tank the rest of the batch. Destination is intentionally NOT
+        # restricted — the user explicitly chose it via the OS folder
+        # picker, that's the security boundary for the write side.
+        try:
+            src = _safe_resolve_path(clip.video_path)
+        except HTTPException:
+            continue
+        if not src.exists():
+            continue
+        safe_title = _sanitize_filename(clip.title or f"clip_{clip.id[:8]}")
+        dest_file = dest_dir / f"{safe_title}{src.suffix}"
+        counter = 1
+        while dest_file.exists():
+            dest_file = dest_dir / f"{safe_title}_{counter}{src.suffix}"
+            counter += 1
+        shutil.copy2(str(src), str(dest_file))
+        copied += 1
+
+    return {"ok": True, "count": copied, "destination": str(dest_dir)}
+
+
 @router.post("/videos/bulk-export")
 async def bulk_export_videos(body: dict = None, db: AsyncSession = Depends(get_db)):
     """Several generated videos as one ZIP (the Clipper's "Download ZIP").
