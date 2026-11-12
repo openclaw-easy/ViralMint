@@ -1,11 +1,12 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react"
 import {
   Box, Typography, Stack, Button, LinearProgress, Alert, IconButton,
-  Paper, Slide, ButtonBase, Tooltip,
+  Paper, Slide, ButtonBase, Tooltip, CircularProgress,
 } from "@mui/material"
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined"
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined"
 import DownloadOutlinedIcon from "@mui/icons-material/DownloadOutlined"
+import DriveFolderUploadOutlinedIcon from "@mui/icons-material/DriveFolderUploadOutlined"
 import CloseIcon from "@mui/icons-material/Close"
 import CheckCircleOutlinedIcon from "@mui/icons-material/CheckCircleOutlined"
 import AutoAwesomeOutlinedIcon from "@mui/icons-material/AutoAwesomeOutlined"
@@ -204,6 +205,30 @@ export default function ToolRunner({
     setJobId(null)
     setTerminal(null)
   }, [])
+
+  // Save to a folder the user picks (ported 2026-11-12): a browser download always lands in the
+  // browser's download folder. Same native picker as Clipper's "Save clips"; the backend copies
+  // the result there (POST /api/tools/save/{jobId}). Pages with a custom `downloadHref` keep
+  // just their Download.
+  const [savingToFolder, setSavingToFolder] = useState(false)
+  const saveToFolder = async () => {
+    if (!jobId || savingToFolder) return
+    setSavingToFolder(true)
+    try {
+      // The picker blocks until the user chooses: no client timeout (the backend bounds it at 300 s).
+      const { data: pick } = await http.post("/api/videos/pick-folder", null, { timeout: 0 })
+      if (!pick?.ok || !pick.path) {
+        if (pick?.error) showSnackbar(`Couldn't open the folder picker: ${pick.error}`, "error")
+        return
+      }
+      const { data } = await http.post(`/api/tools/save/${jobId}`, { destination: pick.path })
+      showSnackbar(`Saved to ${data.path}`, "success")
+    } catch (e) {
+      showSnackbar(`Save failed: ${e.response?.data?.detail || e.message}`, "error")
+    } finally {
+      setSavingToFolder(false)
+    }
+  }
 
   const reset = useCallback(() => {
     setFile(null)
@@ -657,6 +682,18 @@ export default function ToolRunner({
           {/* Footer actions */}
           <Stack direction="row" spacing={1} sx={{ p: 2, borderTop: 1, borderColor: "divider", flexShrink: 0 }}>
             <Button fullWidth variant="outlined" onClick={reset}>Run again</Button>
+            {!downloadHref && (
+              <Button
+                fullWidth
+                variant="outlined"
+                startIcon={savingToFolder ? <CircularProgress size={14} color="inherit" /> : <DriveFolderUploadOutlinedIcon />}
+                disabled={!jobId || savingToFolder}
+                onClick={saveToFolder}
+                sx={{ whiteSpace: "nowrap" }}
+              >
+                {savingToFolder ? "Saving…" : "Save to folder…"}
+              </Button>
+            )}
             <Button
               fullWidth
               variant="contained"

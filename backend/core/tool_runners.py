@@ -338,7 +338,12 @@ async def run_tool_reframe(job_id: str, in_path: Path, user_id: str = "local"):
 # The denoise half of the chain. highpass/lowpass trim rumble + hiss, afftdn
 # removes broadband noise. Kept separate from loudnorm because the measurement
 # pass has to run THROUGH it — see _measure_loudness.
-AUDIO_DENOISE_FILTER = "highpass=f=80,lowpass=f=12000,afftdn=nr=12"
+# `tn=1` (2026-11-12): afftdn TRACKS the noise floor instead of assuming a fixed
+# -50 dB one. Without it a quiet recording's own high end sits under that floor
+# and is removed: a muffled, "under the water" voice (speech-like audio lost
+# 2.8 dB of its 2-8 kHz band at -35 dB, 7 dB at -40 dB). Pinned by
+# tests/test_audio_enhance_quality.py::test_the_denoiser_keeps_a_quiet_voice_treble.
+AUDIO_DENOISE_FILTER = "highpass=f=80,lowpass=f=12000,afftdn=nr=12:nf=-50:tn=1"
 
 # EBU R128 targets. -16 LUFS matches YouTube/TikTok playback reference within
 # ~2 LU.

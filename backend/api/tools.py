@@ -227,6 +227,53 @@ async def download_tool_result(job_id: str, request: Request):
         path, request, filename=f"viralmint_{tool_label}{path.suffix}")
 
 
+@router.post("/save/{job_id}")
+async def save_tool_result(job_id: str, body: dict):
+    """Copy a finished tool's output into a folder the user picked.
+
+    Ported from the hosted repo (user report 2026-11-12: "can't save clips
+    directly to any folder in the pc"). A browser download always lands in the
+    browser's download folder; ToolRunner's "Save to folder…" opens the native
+    picker (POST /api/videos/pick-folder) and posts the chosen path here.
+    Body: {"destination": "/path"}. Returns {"ok": true, "path": "..."}.
+    Never overwrites (a taken name gets _1, _2, ...). The source is confined by
+    safe_tools_path; the destination is what the user chose in the OS dialog."""
+    import asyncio
+    import shutil
+
+    destination = (body or {}).get("destination")
+    if not destination or not isinstance(destination, str):
+        raise HTTPException(400, "No destination folder provided")
+    dest_dir = Path(destination).expanduser().resolve()
+    if not dest_dir.is_dir():
+        raise HTTPException(400, "Destination folder does not exist")
+
+    async with AsyncSessionLocal() as db:
+        job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job.status != "success":
+        raise HTTPException(400, f"Job is {job.status}, not ready to save")
+    path_str = json.loads(job.output_json or "{}").get("file")
+    if not path_str:
+        raise HTTPException(404, "Output file path missing from job")
+    src = safe_tools_path(path_str)
+    if not src.exists():
+        raise HTTPException(404, "Output file no longer on disk (expired?)")
+
+    stem = f"viralmint_{job.job_type.replace(':', '_')}"
+    dest = dest_dir / f"{stem}{src.suffix}"
+    n = 1
+    while dest.exists():
+        dest = dest_dir / f"{stem}_{n}{src.suffix}"
+        n += 1
+    try:
+        await asyncio.to_thread(shutil.copy2, str(src), str(dest))
+    except OSError as e:
+        raise HTTPException(400, f"Couldn't write to that folder: {e.strerror or e}")
+    return {"ok": True, "path": str(dest)}
+
+
 # ── Tool endpoints ─────────────────────────────────────────────────────────────
 # Each endpoint is a thin wrapper: validate upload → create job → dispatch runner.
 
