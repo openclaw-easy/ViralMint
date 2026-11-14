@@ -1,7 +1,7 @@
 # Web
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
-python-multipart==0.0.32
+python-multipart==0.0.33
 # websockets is a uvicorn[standard] extra — nothing here imports it directly,
 # so the pin exists only to keep the WS transport reproducible.
 websockets==17.1
@@ -71,15 +71,22 @@ pytrends==4.9.2
 # `<0.17`, so 0.16 is the upstream-tested combination. Move the curl-cffi cap
 # together with the yt-dlp release that supports the next line. The 0.15
 # FLOOR rationale above still holds (never below 0.15).
-yt-dlp>=2026.10.21
-curl-cffi>=0.16,<0.17
+#
+# Floor raised to 2026.10.26 with curl-cffi 0.17 (a SECURITY pair): curl-cffi
+# 0.17's bundled brotli fixes GHSA-9v8h-qqgm-4m35 and it finishes the certifi
+# fix (GHSA-6q48-6c7w-9gw2). yt-dlp 2026.10.26 is the first release whose
+# `pin-curl-cffi` extra locks 0.17 (runtime range <0.18); 2026.10.21 caps it
+# <0.17. The self-update floor in backend/download/health.py moves with it.
+yt-dlp>=2026.10.26
+curl-cffi>=0.17,<0.18
 
 # certifi — explicit SECURITY floor (GHSA-6q48-6c7w-9gw2: older certifi
 # bundles leave HTTPS open to MITM; yt-dlp's `default` extra requires
 # certifi>=2026.10.19). We install yt-dlp WITHOUT extras, so nothing else would
 # raise it; PyInstaller bundles whatever certifi the build resolved as the CA
-# store for yt-dlp, requests and httpx.
-certifi>=2026.10.19
+# store for yt-dlp, requests and httpx. Raised to 2026.10.23: that release
+# removes the compromised eMudhra root (curl-cffi 0.17's security notice).
+certifi>=2026.10.23
 
 # Transcription
 faster-whisper
@@ -112,7 +119,12 @@ imageio-ffmpeg==0.6.0
 # in backend/main.py went with moviepy — it existed solely because moviepy
 # 1.0.3 used constants Pillow 11 removed. Nothing in the tree, and nothing in
 # a resolved install, references them any more.
-Pillow>=12.3.0,<13.0
+# Pillow 13 (SECURITY): pip-audit lists 42 advisories against 12.3.0, all fixed
+# in 13.0.0 (stale storage after a mode change, a JPEG scanline overflow, TIFF /
+# PDF / GIF / EPS / BMP decoder bugs, the bundled OpenJPEG overflow
+# GHSA-78g4-xqwv-q3g8). 13's removals (fromarray's mode=, get_child_images,
+# Image._show, ImageCms product_name, ExifTags.IFD.Makernote) are used nowhere here.
+Pillow>=13.0.0,<14
 
 # Multi-TTS providers
 edge-tts>=7.3.1
