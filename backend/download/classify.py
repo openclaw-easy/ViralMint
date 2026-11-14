@@ -20,6 +20,7 @@ one breaks that test first.
 """
 from __future__ import annotations
 
+import re
 from enum import Enum
 from urllib.parse import urlparse
 
@@ -64,6 +65,12 @@ def classifiable_text(err: str | BaseException, url: str | None = None) -> str:
         except Exception:
             pass
     return s.lower()
+
+
+# A bare 500/502/503/504 only as its own token: inside a video id
+# (youtu.be/x5003abcdef, vimeo.com/1500234) it is not a server error, and
+# reading it as one bought same-format retries instead of the next format.
+_BARE_5XX = re.compile(r"(?<![\w-])50[0-4](?![\w-])")
 
 
 def _has(s: str, needles: tuple[str, ...]) -> bool:
@@ -113,7 +120,7 @@ _TRANSIENT = (
     "incomplete read", "connection aborted", "connection refused",
     "timed out", "timeout", "temporary failure", "name resolution",
     "ssl", "certificate", "eof occurred", "server error",
-    "503", "502", "500", "urlopen error", "http error 5",
+    "urlopen error", "http error 5",
     "network is unreachable", "no route to host",
 )
 
@@ -185,7 +192,7 @@ def classify(error: str | BaseException, url: str | None = None) -> ErrorClass:
         return ErrorClass.HTTP_404
     if _has(s, _NO_FORMATS):
         return ErrorClass.NO_FORMATS
-    if _has(s, _TRANSIENT):
+    if _has(s, _TRANSIENT) or _BARE_5XX.search(s):
         return ErrorClass.TRANSIENT_NETWORK
     return ErrorClass.UNKNOWN
 

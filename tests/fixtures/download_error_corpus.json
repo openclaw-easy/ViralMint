@@ -40,6 +40,9 @@
     {"label": "connection_reset", "source": "tests/test_download_classifier_fixtures.py", "url": "https://www.youtube.com/watch?v=abc", "error": "ERROR: [youtube] abc: Unable to download webpage: [Errno 104] Connection reset by peer", "expect": "transient_network"},
     {"label": "http_503", "source": "yt-dlp wording", "url": "https://vimeo.com/123", "error": "ERROR: [vimeo] 123: Unable to download JSON metadata: HTTP Error 503: Service Unavailable", "expect": "transient_network"},
     {"label": "url_path_says_private", "source": "tests/test_download_classifier_fixtures.py (URL pollution)", "url": "https://www.tiktok.com/@private_video_removed/video/403429", "error": "ERROR: [TikTok] 403429: Unable to extract universal data for rehydration; https://www.tiktok.com/@private_video_removed/video/403429", "expect": "unknown"},
-    {"label": "file_missing_after_success", "source": "our own message in the attempt loop", "url": "https://www.youtube.com/watch?v=abc", "error": "Download appeared to succeed but video file not found on disk", "expect": "unknown"}
+    {"label": "file_missing_after_success", "source": "our own message in the attempt loop", "url": "https://www.youtube.com/watch?v=abc", "error": "Download appeared to succeed but video file not found on disk", "expect": "unknown"},
+    {"label": "digits_503_inside_youtube_id", "source": "a video id containing 5003", "url": "https://youtu.be/x5003abcdef", "error": "ERROR: [youtube] x5003abcdef: Something went wrong", "expect": "unknown", "changed": "The bare '503' read it as transient_network: same-format retries instead of the next format."},
+    {"label": "digits_500_inside_vimeo_id", "source": "a numeric vimeo id", "url": "https://vimeo.com/1500234", "error": "ERROR: [vimeo] 1500234: Unable to extract info", "expect": "unknown", "changed": "Same: the bare '500' matched the id."},
+    {"label": "bare_502_status", "source": "a proxy's plain status line", "url": "https://example.com/v.mp4", "error": "ERROR: unable to download video data: 502 Bad Gateway", "expect": "transient_network"}
   ]
 }
