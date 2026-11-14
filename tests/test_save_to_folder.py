@@ -103,3 +103,49 @@ def test_a_tool_save_never_reads_outside_the_tools_folder(client, tmp_path):
     dest.mkdir()
     assert client.post(f"/api/tools/save/{job}", json={"destination": str(dest)}).status_code == 403
     assert list(dest.iterdir()) == []
+
+
+# ── The name is claimed, not checked then written ───────────────────────────
+
+def test_copy_to_free_name_never_replaces_a_file(tmp_path):
+    from backend.api.videos import copy_to_free_name
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"new")
+    dest_dir = tmp_path / "out"
+    dest_dir.mkdir()
+    (dest_dir / "clip.mp4").write_bytes(b"theirs")
+    (dest_dir / "clip_1.mp4").write_bytes(b"theirs too")
+    landed = copy_to_free_name(src, dest_dir, "clip", ".mp4")
+    assert landed.name == "clip_2.mp4" and landed.read_bytes() == b"new"
+    assert (dest_dir / "clip.mp4").read_bytes() == b"theirs"
+    assert (dest_dir / "clip_1.mp4").read_bytes() == b"theirs too"
+
+
+def test_a_name_that_appears_between_check_and_copy_is_not_overwritten(tmp_path, monkeypatch):
+    """The old code checked exists() and then copied: a file landing in that
+    window was replaced. open('xb') makes the claim and the check one step."""
+    import builtins
+    from backend.api.videos import copy_to_free_name
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"new")
+    dest_dir = tmp_path / "out"
+    dest_dir.mkdir()
+    real_open = builtins.open
+
+    def racing_open(path, mode="r", *a, **kw):
+        if mode == "xb" and Path(path).name == "clip.mp4" and not Path(path).exists():
+            Path(path).write_bytes(b"someone else's")        # appears just before the claim
+        return real_open(path, mode, *a, **kw)
+    monkeypatch.setattr(builtins, "open", racing_open)
+    landed = copy_to_free_name(src, dest_dir, "clip", ".mp4")
+    assert (dest_dir / "clip.mp4").read_bytes() == b"someone else's"
+    assert landed.name == "clip_1.mp4" and landed.read_bytes() == b"new"
+
+
+def test_a_failed_copy_leaves_no_partial_file(tmp_path):
+    from backend.api.videos import copy_to_free_name
+    dest_dir = tmp_path / "out"
+    dest_dir.mkdir()
+    with pytest.raises(OSError):
+        copy_to_free_name(tmp_path / "missing.mp4", dest_dir, "clip", ".mp4")
+    assert list(dest_dir.iterdir()) == []

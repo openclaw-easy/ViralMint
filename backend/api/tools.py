@@ -239,7 +239,6 @@ async def save_tool_result(job_id: str, body: dict):
     Never overwrites (a taken name gets _1, _2, ...). The source is confined by
     safe_tools_path; the destination is what the user chose in the OS dialog."""
     import asyncio
-    import shutil
 
     destination = (body or {}).get("destination")
     if not destination or not isinstance(destination, str):
@@ -261,14 +260,10 @@ async def save_tool_result(job_id: str, body: dict):
     if not src.exists():
         raise HTTPException(404, "Output file no longer on disk (expired?)")
 
+    from backend.api.videos import copy_to_free_name
     stem = f"viralmint_{job.job_type.replace(':', '_')}"
-    dest = dest_dir / f"{stem}{src.suffix}"
-    n = 1
-    while dest.exists():
-        dest = dest_dir / f"{stem}_{n}{src.suffix}"
-        n += 1
     try:
-        await asyncio.to_thread(shutil.copy2, str(src), str(dest))
+        dest = await asyncio.to_thread(copy_to_free_name, src, dest_dir, stem, src.suffix)
     except OSError as e:
         raise HTTPException(400, f"Couldn't write to that folder: {e.strerror or e}")
     return {"ok": True, "path": str(dest)}

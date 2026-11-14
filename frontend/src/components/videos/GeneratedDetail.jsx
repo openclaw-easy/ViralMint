@@ -20,6 +20,7 @@ import MovieEditIcon from "@mui/icons-material/MovieEdit"
 import http from "../../api/http"
 import useAppStore from "../../store/appStore"
 import { STATUS_COLOR } from "./constants"
+import { errorDetailText } from "../../utils/errorDetail"
 
 const EXPORT_FORMATS = [
   { aspect: "9:16", label: "9:16 Vertical", desc: "TikTok, Reels, Shorts" },
@@ -77,7 +78,7 @@ export default function GeneratedDetail({ video, onUpload, onDelete, onClose, on
       setEditing(false)
       if (onDetailUpdate) onDetailUpdate({ ...video, ...res.data, youtube_tags: res.data.youtube_tags })
     } catch (e) {
-      showSnackbar(`Save failed: ${e.response?.data?.detail || e.message}`, "error")
+      showSnackbar(`Save failed: ${errorDetailText(e)}`, "error")
     } finally {
       setSaving(false)
     }

@@ -20,6 +20,7 @@ import ToolInputContext from "./ToolInputContext"
 import PageHero from "../PageHero"
 import { GlassPanel, glassPanelSx } from "../../utils/glassFx"
 import CancelJobButton from "./CancelJobButton"
+import { errorDetailText } from "../../utils/errorDetail"
 
 // Default result preview — used when a tool doesn't pass its own
 // `resultPreview`. Probes the cheap /download-meta endpoint for the output's
@@ -224,7 +225,7 @@ export default function ToolRunner({
       const { data } = await http.post(`/api/tools/save/${jobId}`, { destination: pick.path })
       showSnackbar(`Saved to ${data.path}`, "success")
     } catch (e) {
-      showSnackbar(`Save failed: ${e.response?.data?.detail || e.message}`, "error")
+      showSnackbar(`Save failed: ${errorDetailText(e)}`, "error")
     } finally {
       setSavingToFolder(false)
     }

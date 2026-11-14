@@ -532,6 +532,32 @@ async def pick_folder():
     return {"ok": True, "path": folder}
 
 
+def copy_to_free_name(src: Path, dest_dir: Path, stem: str, suffix: str) -> Path:
+    """Copy `src` into `dest_dir` as `<stem><suffix>`, or `<stem>_N<suffix>`
+    when that name is taken, and return where it landed. Sync: run it off the
+    event loop.
+
+    The name is claimed with open(..., "xb"), so a file that appears between
+    a check and the copy (another save, a file the person just made) is never
+    replaced: checking `exists()` first and copying after left that window
+    open. A copy that fails part-way removes its partial file.
+    """
+    import shutil
+    for n in range(0, 1000):
+        dest = dest_dir / (f"{stem}{suffix}" if n == 0 else f"{stem}_{n}{suffix}")
+        try:
+            with open(dest, "xb") as out, open(src, "rb") as inp:
+                shutil.copyfileobj(inp, out, 1024 * 1024)
+        except FileExistsError:
+            continue
+        except OSError:
+            dest.unlink(missing_ok=True)
+            raise
+        shutil.copystat(src, dest)
+        return dest
+    raise FileExistsError(str(dest_dir / f"{stem}{suffix}"))
+
+
 @router.post("/videos/save-clips")
 async def save_clips(body: dict, db: AsyncSession = Depends(get_db)):
     """
@@ -539,8 +565,6 @@ async def save_clips(body: dict, db: AsyncSession = Depends(get_db)):
     Body: { "clip_ids": ["id1", "id2"], "destination": "/path/to/folder" }
     Returns: { "ok": true, "count": N, "destination": "..." }
     """
-    import shutil
-
     clip_ids = _id_list(body, "clip_ids", BULK_EXPORT_MAX)
     destination = body.get("destination")
     if not destination:
@@ -573,12 +597,10 @@ async def save_clips(body: dict, db: AsyncSession = Depends(get_db)):
         if not src.exists():
             continue
         safe_title = _sanitize_filename(clip.title or f"clip_{clip.id[:8]}")
-        dest_file = dest_dir / f"{safe_title}{src.suffix}"
-        counter = 1
-        while dest_file.exists():
-            dest_file = dest_dir / f"{safe_title}_{counter}{src.suffix}"
-            counter += 1
-        shutil.copy2(str(src), str(dest_file))
+        try:
+            await asyncio.to_thread(copy_to_free_name, src, dest_dir, safe_title, src.suffix)
+        except OSError as e:
+            raise HTTPException(400, f"Couldn't write to that folder: {e.strerror or e}")
         copied += 1
 
     return {"ok": True, "count": copied, "destination": str(dest_dir)}

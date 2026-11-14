@@ -55,6 +55,7 @@ import { scrollOnHover } from "../utils/scrollbar"
 import usePersistentFlag from "../hooks/usePersistentFlag"
 import { storageKey } from "../utils/storage"
 import AppSkeleton from "../components/AppSkeleton"
+import { errorDetailText } from "../utils/errorDetail"
 
 const SOURCE_RAIL_WIDTH = {
   storageKey: "vm_clipper_sources_w", initial: 200, min: 170, max: 420,
@@ -569,7 +570,7 @@ export default function ClipStudio() {
       showSnackbar(`Saved ${data.count} clip${data.count !== 1 ? "s" : ""} to ${pick.path}`, "success")
       setCheckedClips(new Set())
     } catch (e) {
-      showSnackbar(`Save failed: ${e.response?.data?.detail || e.message}`, "error")
+      showSnackbar(`Save failed: ${errorDetailText(e)}`, "error")
     } finally {
       setExporting(false)
     }
@@ -641,7 +642,7 @@ export default function ClipStudio() {
       setClips(prev => prev.map(c => c.id === updated.id ? { ...c, ...updated } : c))
       setEditing(false)
     } catch (e) {
-      showSnackbar(`Save failed: ${e.response?.data?.detail || e.message}`, "error")
+      showSnackbar(`Save failed: ${errorDetailText(e)}`, "error")
     } finally {
       setSaving(false)
     }
