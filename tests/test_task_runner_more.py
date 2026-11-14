@@ -181,7 +181,7 @@ class TestAnalyzeYoutubeChannel:
                 {"id": "v2", "title": "V2", "url": "https://youtube.com/watch?v=v2"},
             ],
         }
-        with patch("backend.services.ytdlp_service.get_video_info",
+        with patch("backend.download.info.get_video_info",
                    new=AsyncMock(return_value=info)):
             out = await tr._analyze_youtube_channel("https://youtube.com/c")
         assert out["platform"] == "youtube"
@@ -194,7 +194,7 @@ class TestAnalyzeYoutubeChannel:
         assert out["videos"][1]["url"] == "https://youtube.com/watch?v=v2"
 
     async def test_returns_none_when_no_channel_info(self):
-        with patch("backend.services.ytdlp_service.get_video_info",
+        with patch("backend.download.info.get_video_info",
                    new=AsyncMock(return_value=None)):
             out = await tr._analyze_youtube_channel("https://youtube.com/c")
         assert out is None
@@ -404,7 +404,7 @@ class TestRunNewsSave:
 class TestRunDownloadUrl:
     async def test_routes_channel_url_to_channel_downloader(self, job_status_spy, ws_spy):
         ch = AsyncMock()
-        with patch("backend.services.ytdlp_service.is_channel_or_playlist_url",
+        with patch("backend.download.info.is_channel_or_playlist_url",
                    return_value=True), \
              patch.object(tr, "_download_channel", new=ch), \
              patch.object(tr, "_download_single_url", new=AsyncMock()) as single:
@@ -414,7 +414,7 @@ class TestRunDownloadUrl:
 
     async def test_routes_single_url_to_single_downloader(self, job_status_spy, ws_spy):
         single = AsyncMock()
-        with patch("backend.services.ytdlp_service.is_channel_or_playlist_url",
+        with patch("backend.download.info.is_channel_or_playlist_url",
                    return_value=False), \
              patch.object(tr, "_download_channel", new=AsyncMock()) as ch, \
              patch.object(tr, "_download_single_url", new=single):
@@ -423,7 +423,7 @@ class TestRunDownloadUrl:
         ch.assert_not_awaited()
 
     async def test_error_routes_to_failed(self, job_status_spy, ws_spy):
-        with patch("backend.services.ytdlp_service.is_channel_or_playlist_url",
+        with patch("backend.download.info.is_channel_or_playlist_url",
                    side_effect=RuntimeError("bad url")):
             await tr.run_download_url("job1", "https://youtube.com/x")
         assert "failed" in _statuses(job_status_spy)

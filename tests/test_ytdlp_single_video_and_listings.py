@@ -23,7 +23,8 @@ import yt_dlp
 
 from backend.core.exceptions import DownloadError, VideoUnavailableError
 from backend.core.executors import download_pool
-from backend.services import ytdlp_service
+from backend.download import info as ytdlp_service
+from backend.download import opts as dl_opts
 
 MIX_URL = "https://music.youtube.com/watch?v=nio23E_jyN4&list=RDAMVMnio23E_jyN4"
 
@@ -56,8 +57,8 @@ def fake(monkeypatch, tmp_path):
     _Fake.seen = []
     _Fake.out_dir = tmp_path
     monkeypatch.setattr(yt_dlp, "YoutubeDL", _Fake)
-    monkeypatch.setattr(ytdlp_service, "_apply_cookies", lambda o: None)
-    monkeypatch.setattr(ytdlp_service, "_check_cooldown", lambda: 0)
+    from types import SimpleNamespace
+    monkeypatch.setattr(ytdlp_service.cookies, "store", lambda: SimpleNamespace(jar_for_attempt=lambda: None, hint=lambda: None))
     return _Fake
 
 
@@ -68,13 +69,13 @@ PLAYLIST = {"_type": "playlist", "id": "PL", "title": "A channel",
 # ── the video, not its playlist ─────────────────────────────────────────────
 
 def test_base_opts_prefer_the_video_over_its_playlist():
-    assert ytdlp_service._yt_dlp_base_opts()["noplaylist"] is True
+    assert dl_opts.base_opts()["noplaylist"] is True
 
 
 def test_real_youtube_extractor_honours_it_for_a_mix_link():
     """Pins the semantics against the real yt-dlp (offline): with our opts the
     youtube:tab extractor declines the playlist and defers to the video."""
-    with yt_dlp.YoutubeDL(ytdlp_service._yt_dlp_base_opts()) as ydl:
+    with yt_dlp.YoutubeDL(dl_opts.base_opts()) as ydl:
         tab = ydl.get_info_extractor("YoutubeTab")
         assert tab._yes_playlist("RDAMVMnio23E_jyN4", "nio23E_jyN4") is False
 
@@ -87,53 +88,37 @@ class TestSingleVideoInfo:
 
     def test_video_passes_through(self):
         info = {"id": "v", "title": "T"}
-        assert ytdlp_service._single_video_info(info) is info
+        assert dl_opts.single_video_info(info) is info
 
     def test_none_passes_through(self):
-        assert ytdlp_service._single_video_info(None) is None
+        assert dl_opts.single_video_info(None) is None
 
     def test_playlist_unwraps_to_first_entry(self):
         info = {"_type": "playlist", "id": "RDx", "entries": [None, {"id": "v"}, {"id": "w"}]}
-        assert ytdlp_service._single_video_info(info) == {"id": "v"}
+        assert dl_opts.single_video_info(info) == {"id": "v"}
 
     def test_empty_playlist_is_unavailable_not_a_crash(self):
         with pytest.raises(VideoUnavailableError):
-            ytdlp_service._single_video_info({"_type": "playlist", "entries": []})
+            dl_opts.single_video_info({"_type": "playlist", "entries": []})
 
     def test_a_channel_tab_unwraps_to_the_video(self):
         video = {"id": "v1", "duration": 61}
-        assert ytdlp_service._single_video_info(self._nested(video, 2)) == video
+        assert dl_opts.single_video_info(self._nested(video, 2)) == video
 
     def test_an_empty_inner_tab_is_unavailable(self):
         info = {"_type": "playlist", "entries": [{"_type": "playlist", "entries": []}]}
         with pytest.raises(VideoUnavailableError):
-            ytdlp_service._single_video_info(info)
+            dl_opts.single_video_info(info)
 
     def test_nesting_is_bounded(self):
-        info = self._nested({"id": "v1"}, ytdlp_service._MAX_PLAYLIST_DEPTH + 1)
+        info = self._nested({"id": "v1"}, dl_opts._MAX_PLAYLIST_DEPTH + 1)
         with pytest.raises(VideoUnavailableError):
-            ytdlp_service._single_video_info(info)
+            dl_opts.single_video_info(info)
 
     def test_deepest_allowed_nesting_still_unwraps(self):
         video = {"id": "v1"}
-        nested = self._nested(video, ytdlp_service._MAX_PLAYLIST_DEPTH)
-        assert ytdlp_service._single_video_info(nested) == video
-
-
-def test_video_download_is_capped_to_one_item_and_unwrapped(fake, tmp_path):
-    """A bare playlist URL (no video id, so `noplaylist` can't help) fetches
-    ONE item, and the result describes that item, not the wrapper."""
-    def _result():
-        (tmp_path / "vid.mp4").write_bytes(b"\x00" * 4096)
-        return {"_type": "playlist", "id": "PLx", "title": "Some playlist",
-                "entries": [{"id": "vid", "title": "First song", "duration": 200}]}
-    fake.result = _result
-    out = asyncio.run(ytdlp_service.download_video(
-        "https://www.youtube.com/playlist?list=PLx", output_dir=tmp_path,
-        filename="vid", extract_audio=False))
-    assert fake.seen[0]["playlist_items"] == "1"
-    assert fake.seen[0]["noplaylist"] is True
-    assert out["title"] == "First song" and out["duration"] == 200
+        nested = self._nested(video, dl_opts._MAX_PLAYLIST_DEPTH)
+        assert dl_opts.single_video_info(nested) == video
 
 
 # ── URL routing ─────────────────────────────────────────────────────────────
@@ -253,7 +238,7 @@ class TestListChannelVideos:
 
 def test_channel_download_reports_the_listing_error():
     from backend.core import task_runner
-    with patch("backend.services.ytdlp_service.list_channel_videos",
+    with patch("backend.download.info.list_channel_videos",
                new=AsyncMock(side_effect=VideoUnavailableError("Video unavailable: private"))), \
          patch("backend.core.ws_manager.ws_manager.send_progress", new=AsyncMock()):
         with pytest.raises(VideoUnavailableError, match="private"):
@@ -262,7 +247,7 @@ def test_channel_download_reports_the_listing_error():
 
 def test_an_empty_listing_is_a_download_error():
     from backend.core import task_runner
-    with patch("backend.services.ytdlp_service.list_channel_videos", new=AsyncMock(return_value=[])), \
+    with patch("backend.download.info.list_channel_videos", new=AsyncMock(return_value=[])), \
          patch("backend.core.ws_manager.ws_manager.send_progress", new=AsyncMock()):
         with pytest.raises(DownloadError, match="No videos found"):
             asyncio.run(task_runner._download_channel("job", "https://www.youtube.com/@x", "local"))
@@ -316,7 +301,7 @@ def test_a_rate_limited_channel_batch_counts_every_skipped_video(monkeypatch):
     monkeypatch.setattr(hu, "jittered_delay", lambda: 0)
     monkeypatch.setattr(analyzer, "AnalyzerAgent", _NoAnalysis)
     monkeypatch.setattr(task_runner, "_download_single_video_to_db", _single)
-    monkeypatch.setattr("backend.services.ytdlp_service.list_channel_videos",
+    monkeypatch.setattr("backend.download.info.list_channel_videos",
                         AsyncMock(return_value=[{"url": f"https://y/{i}", "title": f"v{i}"} for i in range(3)]))
     with patch("backend.core.ws_manager.ws_manager.send_progress", new=AsyncMock()), \
          patch("backend.core.ws_manager.ws_manager.send", new=AsyncMock()), \

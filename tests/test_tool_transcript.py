@@ -4,7 +4,7 @@
 
 Three layers, each tested at its own seam:
 
-  * `extract_subtitles_only` (ytdlp_service): track choice, the two yt-dlp
+  * `extract_subtitles_only` (backend.download.info): track choice, the two yt-dlp
     passes on `download_pool`, the one bounded retry, and honest failures. yt-dlp
     itself is replaced by a fake `YoutubeDL`, and the pool by a pass-through, so
     nothing reaches the network.
@@ -36,7 +36,7 @@ from backend.core.exceptions import (
     NoCaptionsError,
     VideoUnavailableError,
 )
-from backend.services import ytdlp_service as ys
+from backend.download import info as ys
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -150,7 +150,8 @@ def fake_ytdlp(monkeypatch):
     _FakeYDL.raise_on = []
     monkeypatch.setattr(yt_dlp, "YoutubeDL", _FakeYDL)
     # No cookie extraction (it would touch the browser / Keychain).
-    monkeypatch.setattr(ys, "_apply_cookies", lambda opts: opts.update({"cookiefile": "/x"}))
+    from types import SimpleNamespace
+    monkeypatch.setattr(ys.cookies, "store", lambda: SimpleNamespace(jar_for_attempt=lambda: Path("/x"), hint=lambda: None))
     monkeypatch.setattr(ys.asyncio, "sleep", AsyncMock())
 
     pool_calls: list = []
@@ -226,13 +227,15 @@ class TestExtractSubtitlesOnly:
             yt_dlp.utils.DownloadError("ERROR: Connection reset by peer"),
             yt_dlp.utils.DownloadError("ERROR: Connection reset by peer"),
         ]
-        with pytest.raises(DownloadError, match="Connection reset"):
+        # The person reads the class's sentence; yt-dlp's raw text stays in the log.
+        with pytest.raises(DownloadError, match="network problem") as err:
             await ys.extract_subtitles_only("https://x.test/v", output_dir=tmp_path)
+        assert "ERROR:" not in str(err.value)
 
     async def test_a_permanent_error_is_not_retried(self, fake_ytdlp, tmp_path):
         import yt_dlp
         _FakeYDL.raise_on = [yt_dlp.utils.DownloadError("ERROR: Private video")]
-        with pytest.raises(DownloadError, match="Private video"):
+        with pytest.raises(DownloadError, match="This video is private"):
             await ys.extract_subtitles_only("https://x.test/v", output_dir=tmp_path)
         assert len(_FakeYDL.calls) == 1
 
@@ -296,7 +299,7 @@ def _extract_writing(content: str, name: str = "subs_abc.en.srt", **over):
 class TestRunner:
     async def test_txt_is_the_words_only(self, terminal_spies, dirs):
         stub, _ = _extract_writing(SRT)
-        with patch("backend.services.ytdlp_service.extract_subtitles_only", new=stub):
+        with patch("backend.download.info.extract_subtitles_only", new=stub):
             await tr.run_tool_transcript("job1", "https://x.test/v", fmt="txt")
 
         terminal_spies["fail"].assert_not_awaited()
@@ -306,14 +309,14 @@ class TestRunner:
 
     async def test_srt_keeps_timings(self, terminal_spies, dirs):
         stub, _ = _extract_writing(SRT)
-        with patch("backend.services.ytdlp_service.extract_subtitles_only", new=stub):
+        with patch("backend.download.info.extract_subtitles_only", new=stub):
             await tr.run_tool_transcript("job2", "https://x.test/v", fmt="srt")
         body = (dirs["out"] / "job2.srt").read_text(encoding="utf-8")
         assert "00:00:01,000 --> 00:00:03,000" in body
 
     async def test_vtt_from_an_srt_source(self, terminal_spies, dirs):
         stub, _ = _extract_writing(SRT)
-        with patch("backend.services.ytdlp_service.extract_subtitles_only", new=stub):
+        with patch("backend.download.info.extract_subtitles_only", new=stub):
             await tr.run_tool_transcript("job3", "https://x.test/v", fmt="vtt")
         body = (dirs["out"] / "job3.vtt").read_text(encoding="utf-8")
         assert body.startswith("WEBVTT")
@@ -324,7 +327,7 @@ class TestRunner:
                "00:00:00.500 --> 00:00:02.000 align:start position:0%\n<c>first</c> line\n\n"
                "00:00:02.000 --> 00:00:04.000\nsecond line\n")
         stub, _ = _extract_writing(vtt, name="subs_abc.en.vtt", format="vtt")
-        with patch("backend.services.ytdlp_service.extract_subtitles_only", new=stub):
+        with patch("backend.download.info.extract_subtitles_only", new=stub):
             await tr.run_tool_transcript("job3b", "https://x.test/v", fmt="txt")
         body = (dirs["out"] / "job3b.txt").read_text(encoding="utf-8")
         assert body.strip() == "first line second line"
@@ -334,7 +337,7 @@ class TestRunner:
                 "2\n00:00:02,000 --> 00:00:03,000\nsame words\n\n"
                 "3\n00:00:03,000 --> 00:00:04,000\nnext\n")
         stub, _ = _extract_writing(held)
-        with patch("backend.services.ytdlp_service.extract_subtitles_only", new=stub):
+        with patch("backend.download.info.extract_subtitles_only", new=stub):
             await tr.run_tool_transcript("job3c", "https://x.test/v", fmt="srt")
         body = (dirs["out"] / "job3c.srt").read_text(encoding="utf-8")
         assert body.count("same words") == 1
@@ -342,7 +345,7 @@ class TestRunner:
 
     async def test_reports_language_and_auto_flag(self, terminal_spies, dirs):
         stub, _ = _extract_writing(SRT, language="es", is_auto_generated=True)
-        with patch("backend.services.ytdlp_service.extract_subtitles_only", new=stub):
+        with patch("backend.download.info.extract_subtitles_only", new=stub):
             await tr.run_tool_transcript("job4", "https://x.test/v", fmt="txt")
         extra = terminal_spies["success"].call_args.kwargs["extra_output"]
         assert extra["language"] == "es"
@@ -352,7 +355,7 @@ class TestRunner:
 
     async def test_the_scratch_dir_is_removed_and_the_output_kept(self, terminal_spies, dirs):
         stub, seen = _extract_writing(SRT)
-        with patch("backend.services.ytdlp_service.extract_subtitles_only", new=stub):
+        with patch("backend.download.info.extract_subtitles_only", new=stub):
             await tr.run_tool_transcript("job5", "https://x.test/v", fmt="txt")
         assert seen["output_dir"].parent == dirs["scratch_root"]
         assert not seen["output_dir"].exists()
@@ -360,7 +363,7 @@ class TestRunner:
 
     async def test_the_scratch_dir_is_removed_on_failure_too(self, terminal_spies, dirs):
         stub, seen = _extract_writing("not a subtitle file")
-        with patch("backend.services.ytdlp_service.extract_subtitles_only", new=stub):
+        with patch("backend.download.info.extract_subtitles_only", new=stub):
             await tr.run_tool_transcript("job5b", "https://x.test/v", fmt="txt")
         terminal_spies["fail"].assert_awaited()
         assert not seen["output_dir"].exists()
@@ -368,7 +371,7 @@ class TestRunner:
     async def test_no_captions_names_the_alternative_and_never_transcribes(self, terminal_spies, dirs):
         boom = AsyncMock(side_effect=NoCaptionsError(
             "No captions available in ['en']. Source offers: none."))
-        with patch("backend.services.ytdlp_service.extract_subtitles_only", new=boom), \
+        with patch("backend.download.info.extract_subtitles_only", new=boom), \
              patch("backend.services.whisper_service.whisper_service.transcribe",
                    new=AsyncMock()) as whisper:
             await tr.run_tool_transcript("job6", "https://x.test/v", fmt="txt")
@@ -381,14 +384,14 @@ class TestRunner:
 
     async def test_an_unreadable_track_fails_instead_of_writing_an_empty_file(self, terminal_spies, dirs):
         stub, _ = _extract_writing("not a subtitle file at all")
-        with patch("backend.services.ytdlp_service.extract_subtitles_only", new=stub):
+        with patch("backend.download.info.extract_subtitles_only", new=stub):
             await tr.run_tool_transcript("job7", "https://x.test/v", fmt="txt")
         terminal_spies["success"].assert_not_awaited()
         assert "no readable cues" in str(terminal_spies["fail"].call_args.args[1])
         assert not (dirs["out"] / "job7.txt").exists()
 
     async def test_other_errors_route_through_tool_fail_unchanged(self, terminal_spies, dirs):
-        with patch("backend.services.ytdlp_service.extract_subtitles_only",
+        with patch("backend.download.info.extract_subtitles_only",
                    new=AsyncMock(side_effect=DownloadError("network gone"))):
             await tr.run_tool_transcript("job8", "https://x.test/v", fmt="txt")
         message = str(terminal_spies["fail"].call_args.args[1])
@@ -404,7 +407,7 @@ class TestLanguageWarning:
             sent.append(kwargs.get("message", ""))
 
         stub, _ = _extract_writing(SRT, language=got)
-        with patch("backend.services.ytdlp_service.extract_subtitles_only", new=stub), \
+        with patch("backend.download.info.extract_subtitles_only", new=stub), \
              patch("backend.core.ws_manager.ws_manager.send_constraint_warning",
                    new=AsyncMock(side_effect=_capture)):
             await tr.run_tool_transcript("jobw", "https://x.test/v", language=requested, fmt="txt")

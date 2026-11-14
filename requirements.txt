@@ -63,7 +63,7 @@ pytrends==4.9.2
 # 14. The old <0.15 cap was for yt-dlp <= 2026.04, whose request-handler API
 # 0.15 broke; our floor is 2026.7.4, where it is fine.
 # Optional at runtime: the service degrades to urllib's fingerprint if it's
-# missing/incompatible (see ytdlp_service._IMPERSONATE_TARGET).
+# missing/incompatible (see backend/download/opts.py, _IMPERSONATE_TARGET).
 #
 # Floor raised to 2026.10.21: YouTube's new default `tv_samsung` client and an
 # initial-data extraction fix. curl-cffi moved to the 0.16 line with it —

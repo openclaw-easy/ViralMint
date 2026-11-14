@@ -238,7 +238,7 @@ async def lifespan(app: FastAPI):
 
     # Check yt-dlp version (outdated versions get blocked by YouTube)
     try:
-        from backend.services.ytdlp_service import check_ytdlp_version
+        from backend.download.health import check_ytdlp_version
         check_ytdlp_version()
     except Exception as e:
         import logging

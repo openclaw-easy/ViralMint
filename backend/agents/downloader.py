@@ -11,13 +11,14 @@ from sqlalchemy import select
 from backend.database import AsyncSessionLocal
 from backend.models.scout_result import ScoutResult
 from backend.models.downloaded_video import DownloadedVideo
-from backend.services.ytdlp_service import download_video
+from backend.download.fetch import fetch_video
 from backend.core.ws_manager import ws_manager
 from backend.agents.job_helper import job_cancelled, update_job_status
 from backend.config import settings
 from backend.core.exceptions import (
     DownloadStalledError,
     DownloadTimeoutError,
+    JobCancelledError,
     RateLimitError,
     VideoUnavailableError,
 )
@@ -30,36 +31,6 @@ MIN_DISK_SPACE_MB = 500  # Minimum free disk space required to start downloads
 # YouTube starts throttling after ~10-15 rapid sequential downloads from one IP.
 # Jittered (randomized) to avoid fingerprint-able fixed-interval patterns.
 from backend.core.http_utils import jittered_delay
-
-
-def url_fix_worth_trying(err: Exception) -> bool:
-    """Whether an AI rewrite of the URL could plausibly rescue this failure.
-
-    The AI URL-fix retry starts a WHOLE second download, so it is only for
-    errors that say "this URL may be wrong". Not for:
-      - a classified verdict on a URL that worked: rate-limited, bot check /
-        sign-in wall, unavailable / private, cancelled;
-      - an abandonment (stall / wall clock) — a live thread still owns the
-        stem (see download_video);
-      - network-level failures, which a different URL can't fix.
-    Shared by both download paths so they cannot drift (the URL path used to
-    retry on EVERY error, re-hitting a host that had just rate-limited it).
-    """
-    from backend.core.exceptions import JobCancelledError
-    from backend.services.ytdlp_service import _is_bot_detection_error, _is_transient_error
-    if isinstance(err, (RateLimitError, VideoUnavailableError, JobCancelledError,
-                        DownloadStalledError, DownloadTimeoutError)):
-        return False
-    text = str(err).lower()
-    if _is_bot_detection_error(text) or "requires sign-in" in text or "wants you signed in" in text:
-        return False
-    if _is_transient_error(text) or "network" in text:
-        return False
-    if "http error 429" in text or "too many requests" in text or "rate-limit" in text:
-        return False
-    if "pool is wedged" in text or "pool is full" in text:
-        return False
-    return True
 
 
 def _download_stem(platform_video_id: str | None) -> str:
@@ -150,12 +121,15 @@ class DownloadAgent:
 
                 # Download
                 stem = _download_stem(sr.video_id)
-                dl_result = await download_video(
+                # The whole path (ladder, then one AI fix of a link that may
+                # be wrong) is fetch_video's; nothing here retries.
+                dl_result = await fetch_video(
                     url=sr.video_url,
                     output_dir=settings.VIDEOS_DIR,
                     filename=stem,
                     extract_audio=True,
-                    job_id=job_id,   # a cancel stops the retry ladder
+                    job_id=job_id,   # a cancel stops the ladder and a moving transfer
+                    user_id=user_id,
                 )
 
                 # Save to DB
@@ -228,97 +202,28 @@ class DownloadAgent:
 
             except (DownloadStalledError, DownloadTimeoutError) as e:
                 # An ABANDONED download: its worker thread is still running and
-                # still owns this download's `<stem>*.part` — its cleanup will delete them
-                # later. The AI URL-fix retry below writes into that same stem,
-                # so it must not run here; the error is recorded and the batch
-                # moves on.
+                # still owns this download's `<stem>*.part`; the batch moves on.
                 error_detail = f"Video {i + 1}/{total} '{sr.title[:40] if sr else sr_id[:8]}': {e}"
                 errors.append(error_detail)
                 logger.warning(f"Download abandoned {sr_id}: {e}")
 
+            except JobCancelledError:
+                # The user cancelled while this video was transferring or
+                # queued for a transfer: stop the batch.
+                cancelled = True
+                break
+
             except Exception as first_error:
                 error_detail = f"Video {i + 1}/{total} '{sr.title[:40] if sr else sr_id[:8]}': {first_error}"
-
-                # AI-assisted URL fix — only when the error says the URL itself
-                # may be wrong (see url_fix_worth_trying; network errors, bot
-                # walls and rate limits never qualify), and only for a row
-                # that loaded (no URL to fix otherwise).
-                if (sr is not None and url_fix_worth_trying(first_error)
-                        and not await job_cancelled(job_id)):
-                    try:
-                        from backend.core.ai_retry import ai_fix_url
-                        from backend.models.user_settings import UserSettings
-
-                        logger.info(f"Download failed for {sr_id}, attempting AI-assisted URL fix...")
-                        async with AsyncSessionLocal() as db:
-                            us_result = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
-                            user_settings = us_result.scalar_one_or_none()
-
-                        corrected_url = await ai_fix_url(sr.video_url, str(first_error), user_settings)
-                        if corrected_url and not await job_cancelled(job_id):
-                            logger.info(f"Retrying download with AI-corrected URL: {corrected_url}")
-                            # Same stem: the first attempt's thread has returned
-                            # (abandonments never get here), so the stem is
-                            # still this download's alone.
-                            dl_result = await download_video(
-                                url=corrected_url,
-                                output_dir=settings.VIDEOS_DIR,
-                                filename=stem or _download_stem(sr.video_id),
-                                extract_audio=True,
-                                job_id=job_id,
-                            )
-                            # Save to DB with full metadata (same as success path above)
-                            async with AsyncSessionLocal() as db:
-                                subtitles = dl_result.get("subtitles")
-                                transcript = None
-                                transcript_language = None
-                                transcript_source = None
-                                transcript_segments_json = None
-                                if subtitles and isinstance(subtitles, dict) and subtitles.get("text"):
-                                    transcript = subtitles["text"]
-                                    transcript_language = subtitles.get("language")
-                                    transcript_source = subtitles.get("source", "auto_subtitles")
-                                    if subtitles.get("segments"):
-                                        transcript_segments_json = json.dumps(subtitles["segments"])
-
-                                chapters = dl_result.get("chapters")
-                                tags = dl_result.get("tags")
-                                category = dl_result.get("category")
-
-                                dv = DownloadedVideo(
-                                    user_id=user_id,
-                                    scout_result_id=sr_id,
-                                    title=sr.title,
-                                    platform=sr.platform,
-                                    video_path=dl_result.get("video_path"),
-                                    audio_path=dl_result.get("audio_path"),
-                                    duration_seconds=dl_result.get("duration"),
-                                    file_size_mb=dl_result.get("file_size_mb"),
-                                    transcript=transcript,
-                                    transcript_language=transcript_language,
-                                    transcript_source=transcript_source,
-                                    transcript_segments_json=transcript_segments_json,
-                                    chapters_json=json.dumps(chapters) if chapters else None,
-                                    tags_json=json.dumps(tags) if tags else None,
-                                    category=category,
-                                )
-                                db.add(dv)
-                                sr_update = await db.execute(select(ScoutResult).where(ScoutResult.id == sr_id))
-                                sr_row = sr_update.scalar_one_or_none()
-                                if sr_row:
-                                    sr_row.is_downloaded = True
-                                await db.commit()
-                                await db.refresh(dv)
-                                downloaded.append(dv.id)
-                            continue  # Success on retry — skip the error recording
-                    except Exception as retry_error:
-                        logger.warning(f"AI-assisted retry also failed for {sr_id}: {retry_error}")
-
                 errors.append(error_detail)
                 logger.error(f"Failed to download {sr_id}: {first_error}")
+                from backend.download.messages import humanize_download_error
+                toast = humanize_download_error(first_error, sr.video_url if sr else None)
+                if not toast.lower().startswith("download"):
+                    toast = f"Download failed: {toast}"
                 await ws_manager.send_constraint_warning(
                     constraint="download",
-                    message=f"Download failed: {first_error}",
+                    message=toast,
                     severity="warning",
                     user_id=user_id,
                 )

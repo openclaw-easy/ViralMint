@@ -92,7 +92,7 @@ Notarization is a separate Apple service call and adds 5–30 min to the build; 
 ## What this packaging does NOT include
 
 - **System-tray launcher.** The OSS bundle is headless — backend + browser. The paid desktop installer at viralmint.net wraps this with a tray launcher, auto-update, and signed binaries.
-- **Auto-update of the bundled `yt-dlp`.** PyInstaller bundles aren't pip-managed; the in-app updater is disabled in frozen mode (see `backend/services/ytdlp_service.py`). Re-build to refresh.
+- **Auto-update of the bundled `yt-dlp`.** PyInstaller bundles aren't pip-managed; the in-app updater is disabled in frozen mode (see `backend/download/health.py`). Re-build to refresh.
 - **Whisper model bundling.** First transcription downloads the chosen model into `~/ViralMint/whisper-cache/`.
 - **Windows MSI / Linux .deb / Linux AppImage.** The script produces a `.zip` or `.tar.gz` on those platforms — runnable, but not a polished installer. Add WiX/AppImage steps if you want them.
 

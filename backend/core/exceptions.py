@@ -51,6 +51,15 @@ class VideoUnavailableError(DownloadError):
     """Video is private, deleted, or region-blocked."""
     pass
 
+class BotDetectionError(DownloadError):
+    """The site asked for a signed-in browser (a bot check or a login wall)."""
+    pass
+
+class ExtractorMissingError(DownloadError):
+    """yt-dlp has no way into this page: no extractor (the generic one also
+    failed), a bot-check page, or a 403 / 404 it couldn't get past."""
+    pass
+
 class NoCaptionsError(VideoUnavailableError):
     """The video exists but publishes no caption track that could be fetched
     (in any candidate language). Distinct from VideoUnavailableError so a
@@ -64,7 +73,7 @@ class DownloadTimeoutError(DownloadError):
     still running (Python cannot cancel it) and still owns the part-files in
     the output directory. Callers must treat it as terminal and must not
     start another attempt into the same output dir — see the note on
-    `ytdlp_service._await_with_stall_guard`.
+    `backend.download.progress.await_with_stall_guard`.
     """
     pass
 
@@ -79,7 +88,7 @@ class DownloadStalledError(DownloadError):
 
     A DownloadError subclass so the batch runner's per-URL error collection
     and the UI error mapping route it without changes — but, like
-    DownloadTimeoutError, it is TERMINAL inside `download_video`: the
+    DownloadTimeoutError, it is TERMINAL inside the download engine (`backend.download.engine`): the
     abandoned worker thread is still running and still owns the part-files,
     so a retry into the same output directory would race it.
     """

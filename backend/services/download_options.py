@@ -204,7 +204,8 @@ def ydl_overrides(options: dict | None) -> dict:
         # only), and an unconstrained YouTube merge routinely produces webm.
         # Steer merges toward containers that can hold the art. Single-stream
         # downloads (no merge) can still land on webm — the postprocessor-drop
-        # recovery in ytdlp_service catches that case.
+        # recovery in the download ladder (policy.decide's POSTPROCESSING
+        # row) catches that case.
         over["merge_output_format"] = "mp4/mkv"
 
     if post:

@@ -1933,7 +1933,8 @@ async def run_tool_transcript(
         from backend.api.tools import tool_out_path, tools_in_dir
         from backend.core.exceptions import NoCaptionsError
         from backend.core.ws_manager import ws_manager
-        from backend.services.ytdlp_service import _parse_subtitle_text, extract_subtitles_only
+        from backend.download.info import extract_subtitles_only
+        from backend.download.outputs import parse_subtitle_text as _parse_subtitle_text
 
         # Per-job scratch: the fetched track is ours alone, removed in finally.
         scratch = tools_in_dir() / f"{job_id}_subs"

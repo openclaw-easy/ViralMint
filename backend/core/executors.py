@@ -48,7 +48,7 @@ What it deliberately does NOT do
 ────────────────────────────────
 It does not make a stuck thread killable — Python offers no such thing. It
 bounds the blast radius and makes the accounting honest. Killing the work
-itself is the stall watchdog's job (see `ytdlp_service._progress_hook` and
+itself is the stall watchdog's job (see `backend.download.progress` and
 `DOWNLOAD_STALL_TIMEOUT_S`); this module is the seatbelt for when that
 watchdog cannot fire because yt-dlp never called back at all.
 

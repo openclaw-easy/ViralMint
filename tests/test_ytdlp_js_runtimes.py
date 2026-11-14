@@ -24,7 +24,7 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.services import ytdlp_service as ys
+from backend.download import opts as ys
 
 
 @pytest.fixture(autouse=True)
@@ -43,22 +43,22 @@ def _which(available: set[str]):
 class TestResolveJsRuntimes:
     def test_both_runtimes_are_offered(self):
         with patch.object(ys.shutil, "which", _which({"deno", "node"})):
-            assert ys._resolve_js_runtimes() == {"deno": {}, "node": {}}
+            assert ys.resolve_js_runtimes() == {"deno": {}, "node": {}}
 
     def test_deno_only_is_not_disabled_by_a_node_pin(self):
         """The exact regression: hardcoding node killed the deno default."""
         with patch.object(ys.shutil, "which", _which({"deno"})):
-            assert ys._resolve_js_runtimes() == {"deno": {}}
+            assert ys.resolve_js_runtimes() == {"deno": {}}
 
     def test_node_only(self):
         with patch.object(ys.shutil, "which", _which({"node"})):
-            assert ys._resolve_js_runtimes() == {"node": {}}
+            assert ys.resolve_js_runtimes() == {"node": {}}
 
     def test_nothing_installed_warns_once_and_keeps_the_default_shape(self, caplog):
         with patch.object(ys.shutil, "which", _which(set())):
             with caplog.at_level("WARNING"):
-                first = ys._resolve_js_runtimes()
-                second = ys._resolve_js_runtimes()
+                first = ys.resolve_js_runtimes()
+                second = ys.resolve_js_runtimes()
         assert first == second == {"deno": {}}
         warnings = [r for r in caplog.records if "No JavaScript runtime" in r.message]
         assert len(warnings) == 1, "the warning must not repeat every download"
@@ -66,23 +66,23 @@ class TestResolveJsRuntimes:
     def test_a_negative_result_is_not_cached(self):
         """Installing Node mid-session must take effect on the next download."""
         with patch.object(ys.shutil, "which", _which(set())):
-            ys._resolve_js_runtimes()
+            ys.resolve_js_runtimes()
         with patch.object(ys.shutil, "which", _which({"node"})):
-            assert ys._resolve_js_runtimes() == {"node": {}}
+            assert ys.resolve_js_runtimes() == {"node": {}}
 
     def test_a_positive_result_is_cached(self):
         with patch.object(ys.shutil, "which", _which({"node"})):
-            assert ys._resolve_js_runtimes() == {"node": {}}
+            assert ys.resolve_js_runtimes() == {"node": {}}
 
         def _boom(_name):
             raise AssertionError("a cached result must not re-probe the PATH")
 
         with patch.object(ys.shutil, "which", _boom):
-            assert ys._resolve_js_runtimes() == {"node": {}}
+            assert ys.resolve_js_runtimes() == {"node": {}}
 
     def test_the_opts_builder_uses_the_resolver(self):
         with patch.object(ys.shutil, "which", _which({"deno"})):
-            opts = ys._yt_dlp_js_opts()
+            opts = ys.js_opts()
         assert opts["js_runtimes"] == {"deno": {}}
         assert "remote_components" in opts       # EJS solver still wired
 
@@ -90,18 +90,18 @@ class TestResolveJsRuntimes:
 class TestDropCookiesFor403:
     def test_drops_a_cookie_file_and_reports_the_change(self):
         opts = {"cookiefile": "/tmp/c.txt", "format": "best"}
-        assert ys._drop_cookies_for_403(opts) is True
+        assert ys.drop_cookies(opts) is True
         assert "cookiefile" not in opts
         assert opts["format"] == "best"          # nothing else touched
 
     def test_drops_a_browser_jar(self):
         opts = {"cookiesfrombrowser": ("chrome",)}
-        assert ys._drop_cookies_for_403(opts) is True
+        assert ys.drop_cookies(opts) is True
         assert opts == {}
 
     def test_reports_no_change_when_there_were_no_cookies(self):
         """Nothing to escalate — the caller must fall through to its other
         rungs instead of burning an attempt on an identical request."""
         opts = {"format": "best"}
-        assert ys._drop_cookies_for_403(opts) is False
+        assert ys.drop_cookies(opts) is False
         assert opts == {"format": "best"}

@@ -3,7 +3,7 @@
 #
 # Why: imageio_ffmpeg (our bundled ffmpeg source) only ships ffmpeg, not
 # ffprobe. Several backend services (thumbnail_service, ffmpeg_service,
-# ytdlp_service, clip_extractor) shell out to "ffprobe" and fail in the
+# backend/download, clip_extractor) shell out to "ffprobe" and fail in the
 # packaged desktop build without it.
 #
 # Output: desktop/scripts/vendor/ffprobe  (or ffprobe.exe on Windows)

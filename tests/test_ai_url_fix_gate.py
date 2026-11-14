@@ -4,43 +4,55 @@
 
 It used to start a whole second download after ANY error on the URL path —
 rate limits, bot checks, private videos — and handed whatever URL the model
-wrote straight to yt-dlp, loopback and LAN addresses included.
+wrote straight to yt-dlp, loopback and LAN addresses included. The gate is
+now the error's class (`fetch._LINK_MAY_BE_WRONG`), read once by `classify`.
 """
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.agents.downloader import url_fix_worth_trying
 from backend.core.ai_retry import _is_public_web_url, ai_fix_url
-from backend.core.exceptions import (
-    DownloadError, DownloadStalledError, DownloadTimeoutError, JobCancelledError,
-    RateLimitError, VideoUnavailableError,
-)
-from backend.services.ytdlp_service import _sign_in_message
+from backend.core.exceptions import DownloadError, DownloadStalledError, DownloadTimeoutError
+from backend.download import engine, fetch
+from backend.download.classify import ErrorClass as E
+
+
+def _req():
+    return engine.Request(url="https://youtu.be/x", output_dir=None, stem="s", job_id=None)
+
+
+def _err(cls, text="Download failed: x", exc=DownloadError):
+    e = exc(text)
+    if cls is not None:
+        e.error_class = cls
+    return e
+
+
+@pytest.fixture
+def fixer(monkeypatch):
+    fix = AsyncMock(return_value="https://www.youtube.com/watch?v=x")
+    monkeypatch.setattr("backend.core.ai_retry.ai_fix_url", fix)
+    monkeypatch.setattr("backend.database.AsyncSessionLocal", _NoSettingsDb)
+    return fix
 
 
 @pytest.mark.parametrize("err", [
-    RateLimitError("429"), VideoUnavailableError("private"), JobCancelledError("x"),
-    DownloadStalledError("stalled"), DownloadTimeoutError("timed out"),
-    DownloadError(_sign_in_message("https://youtu.be/x")),
-    DownloadError(_sign_in_message("https://www.instagram.com/reel/x")),
-    DownloadError("Download failed: HTTP Error 429: Too Many Requests"),
-    DownloadError("Download failed: <urlopen error timed out>"),
-    DownloadError("Download failed: Connection reset by peer"),
-    DownloadError("download pool is wedged: all 8 workers are held"),
+    _err(E.RATE_LIMITED), _err(E.UNAVAILABLE), _err(E.SIGN_IN_REQUIRED), _err(E.AGE_GATE),
+    _err(E.TRANSIENT_NETWORK), _err(E.COOKIE_SOURCE), _err(E.HTTP_403), _err(E.ANTI_BOT_CHALLENGE),
+    _err(E.DISK_FULL),
+    _err(None, "stalled", DownloadStalledError), _err(None, "timed out", DownloadTimeoutError),
+    _err(None, "download pool is wedged: all 8 workers are held"),
 ])
-def test_never_worth_a_url_fix(err):
-    assert url_fix_worth_trying(err) is False
+def test_never_worth_a_url_fix(err, fixer):
+    assert asyncio.run(fetch._corrected_link(_req(), err)) is None
+    fixer.assert_not_called()
 
 
-@pytest.mark.parametrize("err", [
-    DownloadError("Download failed: ERROR: [generic] Unable to extract video id"),
-    DownloadError("Download failed: ERROR: Unsupported URL: https://youtub.com/x"),
-    RuntimeError("Incomplete YouTube ID abc"),
-])
-def test_url_shaped_errors_still_qualify(err):
-    assert url_fix_worth_trying(err) is True
+@pytest.mark.parametrize("cls", [E.UNSUPPORTED_URL, E.HTTP_404, E.NO_FORMATS, E.UNKNOWN])
+def test_url_shaped_errors_still_qualify(cls, fixer):
+    assert asyncio.run(fetch._corrected_link(_req(), _err(cls))) == "https://www.youtube.com/watch?v=x"
+    assert fixer.await_count == 1
 
 
 @pytest.mark.parametrize("url,ok", [
@@ -88,29 +100,16 @@ class _NoSettingsDb:
         return r
 
 
-class TestUrlPathUsesTheGate:
-    def _run(self, first_error):
+class TestUrlPath:
+    def test_the_url_path_passes_its_options_and_records_the_link_fetched(self, tmp_path):
         from backend.core import task_runner
-        dl = AsyncMock(side_effect=[first_error, {"video_path": None}])
-        fix = AsyncMock(return_value="https://www.youtube.com/watch?v=x")
-        with patch("backend.services.ytdlp_service.download_video", new=dl), \
-             patch("backend.core.ai_retry.ai_fix_url", new=fix), \
-             patch("backend.database.AsyncSessionLocal", _NoSettingsDb):
-            try:
+        fetched = {"video_path": None, "url": "https://www.youtube.com/watch?v=fixed"}
+        fv = AsyncMock(return_value=fetched)
+        with patch("backend.download.fetch.fetch_video", new=fv), \
+             patch("backend.core.task_runner._detect_platform", side_effect=RuntimeError("stop here")) as plat:
+            with pytest.raises(RuntimeError, match="stop here"):
                 asyncio.run(task_runner._download_single_video_to_db(
                     "job", "https://youtu.be/x", "", "local", options={"quality": "720p"}))
-            except Exception as e:
-                return dl, fix, e
-        return dl, fix, None
-
-    @pytest.mark.parametrize("err", [RateLimitError("429"), VideoUnavailableError("private"),
-                                     DownloadError(_sign_in_message("https://youtu.be/x"))])
-    def test_a_verdict_is_not_retried_with_ai(self, err):
-        dl, fix, raised = self._run(err)
-        assert raised is err
-        assert fix.await_count == 0 and dl.await_count == 1
-
-    def test_url_error_retry_keeps_the_options(self):
-        dl, fix, _ = self._run(DownloadError("Download failed: Incomplete YouTube ID"))
-        assert fix.await_count == 1 and dl.await_count == 2
-        assert dl.await_args_list[1].kwargs["options"] == {"quality": "720p"}
+        assert fv.await_args.kwargs["options"] == {"quality": "720p"}
+        assert fv.await_args.kwargs["job_id"] == "job"
+        assert plat.call_args.args[0] == "https://www.youtube.com/watch?v=fixed"

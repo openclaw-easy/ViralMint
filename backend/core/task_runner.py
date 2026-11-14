@@ -140,7 +140,7 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
     logger.info("TASK START batch_download | job=%s count=%d", job_id[:8], len(urls))
     from backend.agents.job_helper import update_job_status, job_cancelled
     from backend.core.ws_manager import ws_manager
-    from backend.core.exceptions import RateLimitError
+    from backend.core.exceptions import JobCancelledError, RateLimitError
 
     from backend.core.http_utils import jittered_delay
 
@@ -167,10 +167,10 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
                 continue
 
             # Cooperative cancellation, polled at the one boundary that
-            # matters: BEFORE the next transfer starts. yt-dlp runs inside
-            # asyncio.to_thread and cannot be interrupted, so the video already
-            # in flight will finish and is KEPT (deleting the user's file is the
-            # one irreversible move) — but every video after it is skipped.
+            # matters: BEFORE the next transfer starts. A transfer that is
+            # moving bytes is stopped by the download's own progress hook; one
+            # that already finished is KEPT (deleting the user's file is the
+            # one irreversible move) — and every video after it is skipped.
             # This was the one runner family that never polled at all, so a
             # cancelled 10-URL batch downloaded all 10 anyway.
             if await job_cancelled(job_id):
@@ -206,6 +206,11 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
                     severity="warning",
                     user_id=user_id,
                 )
+            except JobCancelledError:
+                # The cancel stopped this transfer (or it was still queued):
+                # nothing after it starts.
+                cancelled = True
+                break
             except Exception as e:
                 errors.append(f"Video {i + 1}/{total} '{video_title[:40]}': {e}")
                 logger.error(f"Failed to download {video_url}: {e}", exc_info=True)
@@ -294,7 +299,7 @@ async def run_download_url(job_id: str, url: str, title: str = "", user_id: str 
     Handles both single video URLs and channel/playlist URLs."""
     logger.info("TASK START download_url | job=%s url=%s", job_id[:8], url[:80])
     from backend.agents.job_helper import update_job_status
-    from backend.services.ytdlp_service import is_channel_or_playlist_url, list_channel_videos
+    from backend.download.info import is_channel_or_playlist_url
     from backend.core.ws_manager import ws_manager
 
     try:
@@ -323,9 +328,9 @@ async def run_download_url(job_id: str, url: str, title: str = "", user_id: str 
 async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int = 5):
     """Download top N videos from a channel/playlist, then analyze each."""
     from backend.agents.job_helper import update_job_status, job_cancelled
-    from backend.services.ytdlp_service import list_channel_videos
+    from backend.download.info import list_channel_videos
     from backend.core.ws_manager import ws_manager
-    from backend.core.exceptions import RateLimitError
+    from backend.core.exceptions import JobCancelledError, RateLimitError
 
     from backend.core.http_utils import jittered_delay
 
@@ -394,6 +399,9 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
                 severity="warning",
                 user_id=user_id,
             )
+        except JobCancelledError:
+            cancelled = True
+            break
         except Exception as e:
             errors.append(f"Video {i + 1}/{total} '{video_title[:40]}': {e}")
             logger.warning(f"Failed to download {video_url}: {e}")
@@ -512,7 +520,7 @@ async def _download_single_video_to_db(job_id: str, url: str, title: str, user_i
     """
     from backend.models.downloaded_video import DownloadedVideo
     from backend.models.scout_result import ScoutResult
-    from backend.services.ytdlp_service import download_video
+    from backend.download.fetch import fetch_video
     from backend.database import AsyncSessionLocal
     from backend.config import settings
     from backend.agents.scout import compute_virality_score
@@ -520,59 +528,22 @@ async def _download_single_video_to_db(job_id: str, url: str, title: str, user_i
     from datetime import datetime
     from pathlib import Path
 
-    from backend.core.exceptions import DownloadStalledError, DownloadTimeoutError
-
     video_id = str(uuid4())[:12]
 
-    try:
-        dl_result = await download_video(
-            url=url,
-            output_dir=settings.VIDEOS_DIR,
-            filename=video_id,
-            extract_audio=True,
-            # None for every pre-existing caller → byte-identical download.
-            options=options,
-            job_id=job_id,   # a cancel stops the retry ladder
-        )
-    except (DownloadStalledError, DownloadTimeoutError):
-        # ABANDONED, not failed: the worker thread is still running and still
-        # owns `<video_id>*.part`, which its own cleanup will delete later. A
-        # retry into the same stem would have its part-files deleted out from
-        # under it — so no AI URL-fix retry here.
-        raise
-    except Exception as first_error:
-        # AI-assisted retry: ask AI to fix the URL and try once more — only
-        # for errors a different URL could fix (shared gate with the scout
-        # path; it used to fire on rate limits, bot checks, private videos).
-        from backend.agents.downloader import url_fix_worth_trying
-        from backend.agents.job_helper import job_cancelled
-        if not url_fix_worth_trying(first_error) or await job_cancelled(job_id):
-            raise
-        from backend.core.ai_retry import ai_fix_url
-        from backend.models.user_settings import UserSettings
-        from sqlalchemy import select
-
-        logger.info(f"Download failed for {url}, attempting AI-assisted URL fix...")
-
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
-            user_settings = result.scalar_one_or_none()
-
-        corrected_url = await ai_fix_url(url, str(first_error), user_settings)
-        if not corrected_url or await job_cancelled(job_id):
-            raise first_error  # AI couldn't help, or the user stopped it meanwhile
-
-        logger.info(f"Retrying download with AI-corrected URL: {corrected_url}")
-        dl_result = await download_video(
-            url=corrected_url,
-            output_dir=settings.VIDEOS_DIR,
-            filename=video_id,
-            extract_audio=True,
-            options=options,
-            job_id=job_id,
-        )
-        # If this also fails, the exception propagates naturally
-        url = corrected_url  # Use corrected URL for DB records
+    # One fetch: the ladder, then (for a link that may be wrong) one AI
+    # rewrite of the link with the user's key. `url` is the link actually
+    # fetched, so the DB records the corrected one.
+    dl_result = await fetch_video(
+        url,
+        output_dir=settings.VIDEOS_DIR,
+        filename=video_id,
+        extract_audio=True,
+        # None for every pre-existing caller → the standard download.
+        options=options,
+        job_id=job_id,   # a cancel stops the ladder
+        user_id=user_id,
+    )
+    url = dl_result.get("url") or url
 
     # Detect platform from URL domain — generic, no hardcoded list
     platform = _detect_platform(url)
@@ -772,7 +743,7 @@ ANALYSIS_VIDEOS = 30
 async def run_analyze_channel(job_id: str, url: str, user_id: str = "local"):
     """Channel analysis — fetch metadata + video list + AI strategic analysis."""
     from backend.agents.job_helper import update_job_status
-    from backend.services.ytdlp_service import get_video_info
+    from backend.download.info import get_video_info
     from backend.core.ws_manager import ws_manager
 
     try:
@@ -875,7 +846,7 @@ async def _analyze_tiktok_channel(url: str) -> dict:
 
 async def _analyze_youtube_channel(url: str) -> dict:
     """Fetch YouTube channel data via yt-dlp flat extraction."""
-    from backend.services.ytdlp_service import get_video_info, normalize_youtube_channel_url
+    from backend.download.info import get_video_info, normalize_youtube_channel_url
 
     # A channel ROOT lists its tabs (Videos / Shorts / Live), not videos;
     # /videos lists the videos. Tab URLs and single videos pass unchanged.

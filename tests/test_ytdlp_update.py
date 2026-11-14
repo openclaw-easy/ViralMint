@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2025-2026 ViralMint Contributors
-"""Coverage for the yt-dlp version-management surface in ytdlp_service.
+"""Coverage for the yt-dlp version-management surface in backend.download.health.
 
 Ported from the hosted variant and adapted for the OSS build (whose
 `_try_update_ytdlp` is a straight version-bounded pip install — no
@@ -18,7 +18,7 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import patch, MagicMock
 
-import backend.services.ytdlp_service as ys
+import backend.download.health as ys
 
 
 def _reset_update_cooldown():
@@ -109,16 +109,16 @@ class TestRecordDownloadFailure:
         _reset_update_cooldown()
 
     def test_increments_counter(self):
-        ys._record_download_failure()
+        ys._count_failure()
         assert ys._consecutive_download_failures == 1
-        ys._record_download_failure()
+        ys._count_failure()
         assert ys._consecutive_download_failures == 2
 
     def test_below_threshold_does_not_trigger_update(self):
         """Until N consecutive failures pile up, no update attempt."""
         with patch.object(ys, "_try_update_ytdlp") as upd:
             for _ in range(ys._FAILURE_THRESHOLD_FOR_UPDATE - 1):
-                ys._record_download_failure()
+                ys._count_failure()
             # Threshold not yet hit.
             upd.assert_not_called()
 
@@ -128,7 +128,7 @@ class TestRecordDownloadFailure:
         with patch.object(ys, "_try_update_ytdlp", return_value=True) as upd, \
              patch.object(ys, "_get_ytdlp_age_days", return_value=10):
             for _ in range(ys._FAILURE_THRESHOLD_FOR_UPDATE):
-                ys._record_download_failure()
+                ys._count_failure()
             upd.assert_called()
 
     def test_threshold_with_fresh_ytdlp_skips_update(self):
@@ -137,7 +137,7 @@ class TestRecordDownloadFailure:
         with patch.object(ys, "_try_update_ytdlp") as upd, \
              patch.object(ys, "_get_ytdlp_age_days", return_value=1):
             for _ in range(ys._FAILURE_THRESHOLD_FOR_UPDATE):
-                ys._record_download_failure()
+                ys._count_failure()
             upd.assert_not_called()
 
 
@@ -182,7 +182,7 @@ def test_the_self_update_never_asks_for_less_than_requirements():
     import inspect
     import re
     from pathlib import Path
-    from backend.services import ytdlp_service
+    from backend.download import health as ytdlp_service
 
     def _v(s):
         return tuple(int(x) for x in s.split("."))

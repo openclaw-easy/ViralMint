@@ -20,3 +20,9 @@ import asyncio
 # (4-batch sweep instead of one-shot) but UI stays responsive. Tune up if
 # you have a big machine and don't care about UI latency during processing.
 _ffmpeg_semaphore = asyncio.Semaphore(4)
+
+
+# yt-dlp metadata-only probes (`backend.download.engine.probe`). CPU-bound
+# during YouTube's player-JS parsing, so a burst of downloads queues its
+# probes here instead of all parsing at once.
+_probe_semaphore = asyncio.Semaphore(2)

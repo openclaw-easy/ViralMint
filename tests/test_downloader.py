@@ -111,7 +111,7 @@ class TestSuccessPath:
         sr = _make_sr("a")
         with patch("backend.agents.downloader.AsyncSessionLocal",
                    side_effect=lambda: _fake_session([sr, sr])), \
-             patch("backend.agents.downloader.download_video",
+             patch("backend.agents.downloader.fetch_video",
                    new=AsyncMock(return_value={
                        "video_path": "/tmp/v.mp4",
                        "audio_path": "/tmp/v.mp3",
@@ -135,7 +135,7 @@ class TestSuccessPath:
         # Same sr returned for both the load and the save-time re-lookup.
         with patch("backend.agents.downloader.AsyncSessionLocal",
                    side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video",
+             patch("backend.agents.downloader.fetch_video",
                    new=AsyncMock(return_value={"video_path": "/tmp/v.mp4", "duration": 30})):
             _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
         assert sr.is_downloaded is True
@@ -160,7 +160,7 @@ class TestSuccessPath:
         }
         with patch("backend.agents.downloader.AsyncSessionLocal",
                    side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video",
+             patch("backend.agents.downloader.fetch_video",
                    new=AsyncMock(return_value=dl_result)):
             downloaded = _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
         assert downloaded == ["dv_saved"]
@@ -174,7 +174,7 @@ class TestDiskSpaceWarning:
         sr = _make_sr("a")
         with patch("backend.agents.downloader.AsyncSessionLocal",
                    side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video",
+             patch("backend.agents.downloader.fetch_video",
                    new=AsyncMock(return_value={"video_path": "/tmp/v.mp4", "duration": 30})):
             downloaded = _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
         assert any(
@@ -200,7 +200,7 @@ class TestPerVideoBranches:
         from backend.agents.downloader import DownloadAgent
         with patch("backend.agents.downloader.AsyncSessionLocal",
                    side_effect=lambda: _fake_session(None)), \
-             patch("backend.agents.downloader.download_video",
+             patch("backend.agents.downloader.fetch_video",
                    new=AsyncMock()) as dl:
             downloaded = _run(DownloadAgent().run("job_1", ["missing"], user_id="local"))
         # Never attempted a download for a missing scout row.
@@ -216,9 +216,9 @@ class TestPerVideoBranches:
         dl = AsyncMock(side_effect=RateLimitError("HTTP 429"))
         with patch("backend.agents.downloader.AsyncSessionLocal",
                    side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video", new=dl):
+             patch("backend.agents.downloader.fetch_video", new=dl):
             downloaded = _run(DownloadAgent().run("job_1", ["a", "b", "c"], user_id="local"))
-        # download_video only tried on the FIRST video; the other two are
+        # fetch_video only tried on the FIRST video; the other two are
         # short-circuited by the rate_limited flag.
         assert dl.await_count == 1
         assert downloaded == []
@@ -234,7 +234,7 @@ class TestPerVideoBranches:
         sr = _make_sr("a")
         with patch("backend.agents.downloader.AsyncSessionLocal",
                    side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video",
+             patch("backend.agents.downloader.fetch_video",
                    new=AsyncMock(side_effect=[
                        VideoUnavailableError("private"),
                        {"video_path": "/tmp/v.mp4", "duration": 30},
@@ -252,7 +252,7 @@ class TestAllFailedSummary:
         sr = _make_sr("a")
         with patch("backend.agents.downloader.AsyncSessionLocal",
                    side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video",
+             patch("backend.agents.downloader.fetch_video",
                    new=AsyncMock(side_effect=DownloadError("permanent fail"))), \
              patch("backend.core.ai_retry.ai_fix_url",
                    new=AsyncMock(return_value=None)):
@@ -272,7 +272,7 @@ class TestAllFailedSummary:
         sr = _make_sr("a")
         with patch("backend.agents.downloader.AsyncSessionLocal",
                    side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video",
+             patch("backend.agents.downloader.fetch_video",
                    new=AsyncMock(side_effect=RateLimitError("HTTP 429"))):
             _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
         failed = [
@@ -283,51 +283,6 @@ class TestAllFailedSummary:
         assert failed
         assert "rate-limit" in failed[0].get("error", "").lower()
 
-
-class TestAIRetryPath:
-    """Any non-RateLimit / non-VideoUnavailable failure triggers an
-    AI-assisted URL-repair retry before the video is recorded as failed."""
-
-    def test_ai_retry_succeeds_and_records_download(self, infra):
-        from backend.agents.downloader import DownloadAgent
-        from backend.core.exceptions import DownloadError
-        sr = _make_sr("a", url="https://YOUtube.com/watch?v=abc")
-
-        calls = {"n": 0}
-
-        async def fake_download(**kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise DownloadError("Unsupported URL: typo'd hostname")
-            return {"video_path": "/tmp/v.mp4", "duration": 60}
-
-        with patch("backend.agents.downloader.AsyncSessionLocal",
-                   side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video",
-                   new=AsyncMock(side_effect=fake_download)), \
-             patch("backend.core.ai_retry.ai_fix_url",
-                   new=AsyncMock(return_value="https://www.youtube.com/watch?v=abc")):
-            downloaded = _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
-
-        # download_video called twice — original + AI-corrected retry.
-        assert calls["n"] == 2
-        assert downloaded == ["dv_saved"]
-        assert "success" in _final_status_calls(infra["ujs"])
-
-    def test_ai_retry_returns_none_records_failure(self, infra):
-        from backend.agents.downloader import DownloadAgent
-        from backend.core.exceptions import DownloadError
-        sr = _make_sr("a")
-        ai_fix = AsyncMock(return_value=None)
-        with patch("backend.agents.downloader.AsyncSessionLocal",
-                   side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video",
-                   new=AsyncMock(side_effect=DownloadError("boom"))), \
-             patch("backend.core.ai_retry.ai_fix_url", new=ai_fix):
-            downloaded = _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
-        ai_fix.assert_awaited()  # the repair was attempted
-        assert downloaded == []
-        assert "failed" in _final_status_calls(infra["ujs"])
 
 
 class TestEachDownloadOwnsItsFile:
@@ -353,30 +308,18 @@ class TestEachDownloadOwnsItsFile:
         dl = AsyncMock(return_value={"video_path": "/tmp/v.mp4", "duration": 30})
         with patch("backend.agents.downloader.AsyncSessionLocal",
                    side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video", new=dl):
+             patch("backend.agents.downloader.fetch_video", new=dl):
             _run(DownloadAgent().run("job_1", ["a", "a"], user_id="local"))
         stems = [c.kwargs["filename"] for c in dl.await_args_list]
         assert len(stems) == 2 and stems[0] != stems[1]
         assert all(s.startswith(sr.video_id + "_") for s in stems)
 
-    def test_the_ai_url_fix_retry_reuses_the_attempts_stem(self, infra):
-        from backend.agents.downloader import DownloadAgent
-        from backend.core.exceptions import DownloadError
-        sr = _make_sr("a")
-        dl = AsyncMock(side_effect=[DownloadError("Unsupported URL: typo"),
-                                    {"video_path": "/tmp/v.mp4", "duration": 30}])
-        with patch("backend.agents.downloader.AsyncSessionLocal",
-                   side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video", new=dl), \
-             patch("backend.core.ai_retry.ai_fix_url",
-                   new=AsyncMock(return_value="https://www.youtube.com/watch?v=abd")):
-            _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
-        first, retry = (c.kwargs["filename"] for c in dl.await_args_list)
-        assert first == retry
 
+class TestTheScoutPathNeverRetriesItself:
+    """The ladder and the one AI link fix live in fetch_video; this path
+    records what fetch_video finally said and moves on."""
 
-class TestScoutPathUsesTheGate:
-    def test_a_network_error_is_not_sent_to_the_ai(self, infra):
+    def test_a_failure_is_fetched_once_and_recorded(self, infra):
         from backend.agents.downloader import DownloadAgent
         from backend.core.exceptions import DownloadError
         sr = _make_sr("a")
@@ -384,9 +327,10 @@ class TestScoutPathUsesTheGate:
         dl = AsyncMock(side_effect=DownloadError("Download failed: Connection reset by peer"))
         with patch("backend.agents.downloader.AsyncSessionLocal",
                    side_effect=lambda: _fake_session(sr)), \
-             patch("backend.agents.downloader.download_video", new=dl), \
+             patch("backend.agents.downloader.fetch_video", new=dl), \
              patch("backend.core.ai_retry.ai_fix_url", new=fix):
             downloaded = _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
         assert downloaded == [] and dl.await_count == 1
         fix.assert_not_awaited()
+        assert dl.await_args.kwargs["user_id"] == "local"
         assert "failed" in _final_status_calls(infra["ujs"])

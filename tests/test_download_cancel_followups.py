@@ -61,8 +61,8 @@ class _NullWs:
 # ── 2. The watchdog: queued ≠ stalled, and disk growth is progress ───────────
 
 def test_a_queued_attempt_has_no_stall_clock_until_admitted():
-    from backend.services.ytdlp_service import _DownloadProgress
-    p = _DownloadProgress()
+    from backend.download.progress import DownloadProgress
+    p = DownloadProgress()
     p.reset(queued=True)
     assert p.idle_seconds() is None, "time spent queueing for a worker was charged as a stall"
     p.mark_started()
@@ -70,8 +70,8 @@ def test_a_queued_attempt_has_no_stall_clock_until_admitted():
 
 
 def test_disk_footprint_changes_count_as_activity_but_the_baseline_does_not():
-    from backend.services.ytdlp_service import _DownloadProgress
-    p = _DownloadProgress()
+    from backend.download.progress import DownloadProgress
+    p = DownloadProgress()
     p._last_activity -= 100
     p.note_disk(1000)                      # first sample: baseline only
     assert p.idle_seconds() >= 99
@@ -82,7 +82,7 @@ def test_disk_footprint_changes_count_as_activity_but_the_baseline_does_not():
 
 
 def test_stem_footprint_covers_part_files_fragments_and_audio(tmp_path):
-    from backend.services.ytdlp_service import _stem_footprint
+    from backend.download.progress import stem_footprint as _stem_footprint
     (tmp_path / "abc.mp4.part").write_bytes(b"x" * 10)
     (tmp_path / "abc.mp4.part-Frag3").write_bytes(b"x" * 20)
     (tmp_path / "abc_audio.mp3").write_bytes(b"x" * 5)
@@ -95,9 +95,11 @@ def test_stem_footprint_covers_part_files_fragments_and_audio(tmp_path):
 @pytest.mark.asyncio
 async def test_hook_less_disk_growth_keeps_a_download_alive(tmp_path, monkeypatch):
     """FFmpegFD: no `downloading` hooks at all, but the .part file grows."""
-    import backend.services.ytdlp_service as ys
-    from backend.services.ytdlp_service import (
-        _DownloadProgress, _await_with_stall_guard, _stem_footprint,
+    import backend.download.progress as ys
+    from backend.download.progress import (
+        DownloadProgress as _DownloadProgress,
+        await_with_stall_guard as _await_with_stall_guard,
+        stem_footprint as _stem_footprint,
     )
     monkeypatch.setattr(ys, "_STALL_POLL_S", 0.05)
     monkeypatch.setattr(ys, "_DISK_POLL_S", 0.1)
@@ -119,9 +121,11 @@ async def test_hook_less_disk_growth_keeps_a_download_alive(tmp_path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_a_file_that_stops_growing_still_stalls(tmp_path, monkeypatch):
-    import backend.services.ytdlp_service as ys
-    from backend.services.ytdlp_service import (
-        _DownloadProgress, _await_with_stall_guard, _stem_footprint,
+    import backend.download.progress as ys
+    from backend.download.progress import (
+        DownloadProgress as _DownloadProgress,
+        await_with_stall_guard as _await_with_stall_guard,
+        stem_footprint as _stem_footprint,
     )
     monkeypatch.setattr(ys, "_STALL_POLL_S", 0.05)
     monkeypatch.setattr(ys, "_DISK_POLL_S", 0.1)
@@ -165,7 +169,7 @@ async def test_update_job_status_keeps_cancelled_and_records_a_late_failure():
 async def test_single_url_download_failing_after_a_cancel_is_not_a_red_failure(monkeypatch):
     from backend.core import task_runner as dl
     import backend.core.ws_manager as wsm
-    import backend.services.ytdlp_service as ys
+    import backend.download.info as ys
 
     ws = _NullWs()
     monkeypatch.setattr(wsm, "ws_manager", ws)
@@ -200,7 +204,7 @@ async def test_channel_download_reports_partial_failures(monkeypatch):
     """Per-video failures used to be logged and dropped."""
     from backend.core import task_runner as dl
     import backend.core.ws_manager as wsm
-    import backend.services.ytdlp_service as ys
+    import backend.download.info as ys
     import backend.core.http_utils as hu
 
     monkeypatch.setattr(wsm, "ws_manager", _NullWs())
@@ -229,7 +233,7 @@ async def test_channel_download_reports_partial_failures(monkeypatch):
 async def test_channel_download_where_everything_failed_says_why(monkeypatch):
     from backend.core import task_runner as dl
     import backend.core.ws_manager as wsm
-    import backend.services.ytdlp_service as ys
+    import backend.download.info as ys
     import backend.core.http_utils as hu
 
     monkeypatch.setattr(wsm, "ws_manager", _NullWs())
@@ -253,7 +257,7 @@ async def test_channel_download_where_everything_failed_says_why(monkeypatch):
 async def test_channel_download_cancelled_and_failed_keeps_the_reason(monkeypatch):
     from backend.core import task_runner as dl
     import backend.core.ws_manager as wsm
-    import backend.services.ytdlp_service as ys
+    import backend.download.info as ys
 
     monkeypatch.setattr(wsm, "ws_manager", _NullWs())
 
@@ -301,11 +305,11 @@ async def test_scout_download_cancelled_mid_batch_stops_and_says_so(monkeypatch)
 
     pulled = []
 
-    async def fake_download(url, output_dir, filename, extract_audio, job_id=None):
+    async def fake_download(url, output_dir, filename, extract_audio, job_id=None, user_id="local"):
         pulled.append(url)
         await cancel_if_live(job_id)        # the user cancels during video 1
         raise RuntimeError("HTTP Error 403: Forbidden")
-    monkeypatch.setattr(downloader, "download_video", fake_download)
+    monkeypatch.setattr(downloader, "fetch_video", fake_download)
 
     async def no_fix(*a, **kw):
         return None

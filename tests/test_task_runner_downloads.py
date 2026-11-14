@@ -2,7 +2,7 @@
 # Copyright (c) 2025-2026 ViralMint Contributors
 """Download and analyze runners — the job layer above the yt-dlp ladder.
 
-`ytdlp_service` handles "can this URL be fetched at all". These runners handle
+`backend.download` handles "can this URL be fetched at all". These runners handle
 what happens around that: persisting the result, reporting progress, and —
 mostly — deciding what a partial failure means.
 
@@ -58,7 +58,7 @@ def downloader(monkeypatch, tmp_path):
     seen_options: list = []
 
     async def fake_download(url, output_dir=None, filename=None,
-                            extract_audio=True, options=None, job_id=None):
+                            extract_audio=True, options=None, job_id=None, user_id="local"):
         calls.append(url)
         seen_options.append(options)
         out = outcomes.get(url, "ok")
@@ -66,17 +66,15 @@ def downloader(monkeypatch, tmp_path):
             raise out
         vid = tmp_path / f"{abs(hash(url)) % 10**8}.mp4"
         vid.write_bytes(b"\x00" * 4096)
-        # The real service returns STRINGS here — its docstring says Path, but
-        # `download_video` does `str(video_path)`, and the DB layer can't bind
-        # a PosixPath. Returning a Path from this stub hides that mismatch.
+        # The real fetch returns STRINGS here, and the DB layer can't bind a
+        # PosixPath. Returning a Path from this stub would hide a mismatch.
         return {"video_path": str(vid), "audio_path": None, "duration": 120,
                 "file_size_mb": 1.0, "subtitles": None, "chapters": None,
                 "tags": None, "category": None, "title": "A video",
                 "height": 1080, "requested_quality": (options or {}).get("quality"),
                 "kept_subtitle_paths": [], "option_postprocessors_dropped": False}
 
-    monkeypatch.setattr("backend.services.ytdlp_service.download_video",
-                        fake_download)
+    monkeypatch.setattr("backend.download.fetch.fetch_video", fake_download)
     return {"outcomes": outcomes, "calls": calls, "options": seen_options}
 
 

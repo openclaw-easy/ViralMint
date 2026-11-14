@@ -145,10 +145,10 @@ class TestNoFfmpegErrorIsThrownAway:
 
     This is a drift guard over the whole backend: the class was fixed one call
     site at a time for a year, which means the next occurrence waits for the next
-    audit. The ONE exemption is yt-dlp's own stderr, which carries no banner.
+    audit. The ONE exemption is pip's stderr (the yt-dlp self-update), which carries no banner.
     """
 
-    EXEMPT = {"backend/services/ytdlp_service.py"}
+    EXEMPT = {"backend/download/health.py"}   # pip's stderr, not ffmpeg's
 
     def test_no_module_truncates_ffmpeg_stderr_by_hand(self):
         import re

@@ -554,8 +554,8 @@ class ScoutAgent:
             # (ytsearch, scsearch, bilisearch, nicosearch, etc.). For sites that
             # need auth (Bilibili 412 without session cookies) the jar carries
             # them automatically.
-            from backend.services.ytdlp_service import _get_cookie_file
-            cookie_file = _get_cookie_file()
+            from backend.download import cookies
+            cookie_file = cookies.store().jar_for_attempt()
             if cookie_file:
                 base_opts["cookiefile"] = str(cookie_file)
 

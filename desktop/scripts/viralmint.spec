@@ -110,7 +110,7 @@ except Exception as exc:
 
 # ffprobe is NOT shipped by imageio_ffmpeg — desktop/scripts/fetch-ffprobe.sh
 # vendors it before this spec runs. Bundle it as a top-level binary so
-# backend services (thumbnail_service, ffmpeg_service, ytdlp_service,
+# backend services (thumbnail_service, ffmpeg_service, backend/download,
 # clip_extractor) can find it on PATH at startup.
 _ffprobe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
 _ffprobe_src = os.path.join(PROJECT_ROOT, "desktop", "scripts", "vendor", _ffprobe_name)
