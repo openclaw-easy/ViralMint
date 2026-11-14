@@ -96,11 +96,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Long free-voice (Edge) scripts are voiced in parts.** Progress shows
   "part N of M", only a part that fails is retried, a stalled voice stops
   with a reason instead of hanging, and Cancel stops it at once.
-- **Dependencies:** yt-dlp 2026.10.21 (and the self-update asks for at least
-  that), curl-cffi 0.16, a certifi security floor, ffmpeg pinned to 7.1, and
-  PyAV capped below 19 so transcription keeps working on fresh installs.
+- **Dependencies:** yt-dlp 2026.10.26 (and the self-update asks for at least
+  that) with curl-cffi 0.17, certifi 2026.10.23 and Pillow 13 (security
+  fixes), python-multipart 0.0.33, ffmpeg pinned to 7.1, and PyAV capped
+  below 19 so transcription keeps working on fresh installs.
 
 ### Fixed
+- **Save to folder never replaces a file.** Saving a clip or a tool result
+  checked that the name was free and then copied, so a file that appeared in
+  between was overwritten; the name is now claimed in one step, a copy that
+  fails part-way leaves nothing behind, and a refusal reads as words instead
+  of "[object Object]".
+- **A link whose id contains 500-504 is no longer treated as a server
+  error**, which made the download wait and retry the same format instead of
+  trying the next one.
 - **A browser whose cookies can't be read no longer stalls every download.**
   When yt-dlp couldn't read your browser's cookies (on macOS this can be the
   system's privacy protection), every attempt fell back to reading the
