@@ -388,6 +388,16 @@ async def get_health():
     from backend.core.executors import all_pool_stats
     health["thread_pools"] = all_pool_stats()
 
+    # Do downloads have the browser's cookies, and if not, why: the first
+    # thing to look at when a sign-in-walled download fails. Reads the jar
+    # file only, never the browser.
+    try:
+        from backend.download import cookies as download_cookies
+        st = download_cookies.store().status()
+        health["download_cookies"] = {"state": st.state.value, "browser": st.browser, "reason": st.reason}
+    except Exception:  # noqa: BLE001 — diagnostics must never fail the health read
+        pass
+
     return health
 
 
