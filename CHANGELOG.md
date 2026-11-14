@@ -60,6 +60,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Every render now logs one line saying where its time went.
 
 ### Changed
+- **Downloads have one retry ladder, with a budget.** Every failure is read
+  once and answered from one table: a cookie problem drops the cookies and
+  tries again at once, a sign-in wall or a 403 gets one fresh copy of your
+  browser cookies, a network blip waits 8, 20 and 45 seconds, an unexplained
+  error waits once and then tries the next format, and a private, removed or
+  rate-limited video stops at once. A whole download is held to 8 attempts
+  and two minutes of waiting, where the old ladder could wait well over ten
+  minutes on one error before saying anything. Errors reach you as one plain
+  sentence per kind of problem; yt-dlp's raw text stays in the log.
+- **A quick look before every download.** A live or upcoming stream, a
+  source over two hours long and a link to a video that is gone now end
+  before any transfer starts, and a site only yt-dlp's generic extractor can
+  read is downloaded with it. A site that answered "too many requests" is not
+  asked again until its cooldown ends; you are told when to retry instead of
+  the download silently waiting, and a rate limit on one site no longer
+  pauses downloads from another.
+- **Cancel stops a download that is moving**, within about two seconds,
+  and its partial files are removed. Downloads also report their progress in
+  megabytes while they run.
+- **The AI link fix runs only when the link itself may be wrong** (no
+  extractor, not found, nothing playable, an unexplained failure), once per
+  download, and never after a cancel or a stalled download.
 - **Smart Video editor:** the player gets more room, every clip card has one
   clear Use / In use button, using a clip no longer reshuffles the clip list,
   and switching the voice away and back keeps the takes you already recorded.
@@ -79,6 +101,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   PyAV capped below 19 so transcription keeps working on fresh installs.
 
 ### Fixed
+- **A browser whose cookies can't be read no longer stalls every download.**
+  When yt-dlp couldn't read your browser's cookies (on macOS this can be the
+  system's privacy protection), every attempt fell back to reading the
+  browser live, failed the same way, and the download sat at 0% while the
+  ladder waited between attempts on every format. Downloads now go on
+  without your cookies, you are told once and how to fix it, and the browser
+  is not asked again for 30 minutes. A cookie refresh never throws away the
+  cookies you already had, and at most one is attempted every five minutes,
+  so a site that keeps asking you to sign in no longer means a Keychain
+  prompt per download. The health check (`GET /api/settings/health`)
+  reports the cookie state.
+- **Only failures that say yt-dlp itself is broken update it.** A cookie
+  problem, a sign-in wall, a rate limit or a network error used to count
+  toward the self-update streak.
 - **A temporary download error is retried, not reported as "Video
   unavailable".** The permanent-error check matched single words, and "age" is
   inside "webpage" — so yt-dlp's common "Unable to download webpage: HTTP
