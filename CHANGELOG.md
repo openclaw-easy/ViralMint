@@ -51,6 +51,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   tools use the provider keys you set in Settings; every request needs the
   token, which the page only shows on the computer running ViralMint. No
   MCP tool uploads or publishes anything.
+- **An installer for Intel Macs.** macOS now has two downloads, Apple
+  Silicon and Intel; Intel Macs no longer have to run from source.
+- **Save clips and tool results to a folder you pick**, from Clipper and
+  every tool page, instead of only the app's own storage.
 - **Smart Video projects can hold up to 40 scenes (was 18).** Longer
   scripts are no longer squeezed into 18 scenes; a script that already fit is
   packed exactly as before.
@@ -104,6 +108,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   below 19 so transcription keeps working on fresh installs.
 
 ### Fixed
+- **Audio Enhance no longer muffles quiet voices.** Its noise reduction
+  assumed a fixed noise floor, so on a quiet recording it removed the
+  voice's own high end and the result sounded underwater. It now tracks the
+  recording's real noise floor.
 - **Save to folder never replaces a file.** Saving a clip or a tool result
   checked that the name was free and then copied, so a file that appeared in
   between was overwritten; the name is now claimed in one step, a copy that
