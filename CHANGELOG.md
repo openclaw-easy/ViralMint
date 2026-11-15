@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-11-15
+
 ### Added
 - **Smart Video is now a studio: see every scene and hear every line before
   you render.** A script becomes a project of scenes. Each one has a voice
@@ -1201,7 +1203,8 @@ Initial open-source release.
 - All third-party credentials encrypted with Fernet (AES-256) before being written to SQLite.
 - No telemetry. No analytics. No cloud backend in the middle — keys go directly from your machine to the provider.
 
-[Unreleased]: https://github.com/openclaw-easy/ViralMint/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/openclaw-easy/ViralMint/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/openclaw-easy/ViralMint/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/openclaw-easy/ViralMint/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/openclaw-easy/ViralMint/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/openclaw-easy/ViralMint/compare/v1.1.0...v1.2.0
