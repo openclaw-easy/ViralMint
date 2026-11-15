@@ -52,10 +52,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             platform: mac
             frozen_bin: dist/ViralMint.app/Contents/MacOS/ViralMint
-          # Intel Macs (issue #44). The macos-14 build above is arm64-only.
+          # Intel Macs (issue #44). The macos-15 build above is arm64-only.
           - os: macos-15-intel
             platform: mac-intel
             frozen_bin: dist/ViralMint.app/Contents/MacOS/ViralMint
