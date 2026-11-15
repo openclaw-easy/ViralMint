@@ -60,11 +60,17 @@ for pkg in ("neonize", "google.protobuf"):
 # at import time. PyInstaller doesn't bundle .dist-info METADATA by default, so
 # without copy_metadata the import dies inside the frozen app with
 # PackageNotFoundError and the MCP server silently fails to mount.
-# collect_submodules covers anything fastmcp imports lazily.
+# collect_submodules covers anything fastmcp imports lazily. mcp.cli is left
+# out: it is the `mcp` command-line tool, needs the `typer` extra we don't
+# install, and its ImportError made collect_submodules drop the WHOLE mcp list
+# (with a warning that the server would not start) on every platform.
+def _not_mcp_cli(name: str) -> bool:
+    return name != "mcp.cli" and not name.startswith("mcp.cli.")
+
 for meta_pkg in ("fastmcp", "mcp"):
     try:
         datas += copy_metadata(meta_pkg)
-        hiddenimports += collect_submodules(meta_pkg)
+        hiddenimports += collect_submodules(meta_pkg, filter=_not_mcp_cli)
     except Exception as exc:
         print(f"WARN: copy_metadata/collect_submodules({meta_pkg!r}) failed — the MCP server will not start in the packaged build: {exc}")
 

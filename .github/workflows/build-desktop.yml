@@ -144,10 +144,31 @@ jobs:
             kill -0 "$PID" 2>/dev/null || { echo "backend process exited early"; break; }
             sleep 1
           done
+          # The MCP server is mounted at /mcp; a missing hidden import shows up
+          # only here, never in /api/jobs. Unauthenticated must be refused (401),
+          # and with the token an initialize + tools/list must list the tools.
+          mcp_ok=0
+          if [[ "$ok" == "1" ]]; then
+            B=http://127.0.0.1:17999/mcp/
+            ACC='Accept: application/json, text/event-stream'
+            noauth=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B" -H 'Content-Type: application/json' -d '{}')
+            TOK=$(cat "$VIRALMINT_DATA_DIR/mcp_token" 2>/dev/null || true)
+            HDR="${RUNNER_TEMP}/mcp-headers.txt"
+            curl -s -D "$HDR" -o /dev/null -X POST "$B" -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' -H "$ACC" \
+              -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"1"}}}'
+            SID=$(grep -i '^mcp-session-id:' "$HDR" | tr -d '\r' | awk '{print $2}')
+            curl -s -o /dev/null -X POST "$B" -H "Authorization: Bearer $TOK" -H "mcp-session-id: $SID" -H 'Content-Type: application/json' -H "$ACC" \
+              -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+            tools=$(curl -s -X POST "$B" -H "Authorization: Bearer $TOK" -H "mcp-session-id: $SID" -H 'Content-Type: application/json' -H "$ACC" \
+              -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | grep -o '"name":"[a-z_]*"' | wc -l | tr -d ' ')
+            echo "MCP: unauthenticated=$noauth session=${SID:+yes} tools=$tools"
+            [[ "$noauth" == "401" && -n "$SID" && "$tools" -ge 50 ]] && mcp_ok=1
+          fi
           kill "$PID" 2>/dev/null || true
           echo "----- backend log -----"; tail -30 "${RUNNER_TEMP}/backend.log" || true
           [[ "$ok" == "1" ]] || { echo "FROZEN --run-backend did not serve /api/jobs"; exit 1; }
-          echo "OK: frozen --run-backend booted and served the API"
+          [[ "$mcp_ok" == "1" ]] || { echo "FROZEN backend's MCP server did not answer at /mcp"; exit 1; }
+          echo "OK: frozen --run-backend booted and served the API and MCP"
 
       - name: List artifacts
         shell: bash
