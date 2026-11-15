@@ -31,7 +31,9 @@ def http_headers(url: str | None = None) -> dict:
     host = (urlparse(url).netloc or "").lower().split(":", 1)[0] if url else ""
 
     referer = "https://www.google.com/"
-    if host.endswith("twitter.com") or host.endswith("x.com") or host.endswith("twimg.com"):
+    # The domain itself or a subdomain of it: a bare `endswith("x.com")` also
+    # matched box.com and dropbox.com and sent them an x.com Referer.
+    if any(host == d or host.endswith("." + d) for d in ("twitter.com", "x.com", "twimg.com")):
         referer = "https://x.com/"
 
     return {

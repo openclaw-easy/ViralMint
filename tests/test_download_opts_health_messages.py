@@ -2,6 +2,8 @@
 # Copyright (c) 2025-2026 ViralMint Contributors
 """The small modules of backend/download: options, the downloader's health
 memory, and the words shown to people."""
+import re
+
 import pytest
 
 from backend.core.exceptions import VideoUnavailableError
@@ -36,6 +38,10 @@ def test_drop_cookies_reports_whether_anything_was_set(tmp_path):
 def test_x_links_get_the_referer_their_cdn_checks():
     assert opts.http_headers("https://x.com/a/status/1")["Referer"] == "https://x.com/"
     assert opts.http_headers(URL)["Referer"] == "https://www.google.com/"
+    assert opts.http_headers("https://video.twimg.com/v.mp4")["Referer"] == "https://x.com/"
+    # A host that merely ENDS in "x.com" is not X.
+    for other in ("https://www.dropbox.com/s/a.mp4", "https://box.com/f/1"):
+        assert opts.http_headers(other)["Referer"] == "https://www.google.com/"
 
 
 
@@ -122,9 +128,9 @@ def test_unavailable_says_why_when_the_site_said_why(text, kind, sentence):
 
 
 def test_sign_in_message_names_the_site_that_asked():
-    assert "youtube.com" in messages.sign_in_message(URL)
+    assert re.search(r"\byoutube\.com\b", messages.sign_in_message(URL))
     msg = messages.sign_in_message("https://www.instagram.com/reel/abc/")
-    assert "instagram.com" in msg and "YouTube" not in msg
+    assert re.search(r"\binstagram\.com\b", msg) and "YouTube" not in msg
 
 
 def test_sign_in_message_does_not_say_sign_in_when_the_browser_cannot_be_read():

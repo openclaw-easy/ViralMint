@@ -11,6 +11,8 @@ one short line, no paths, no cookies, no tokens, never past the length cap.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from backend.download.messages import humanize_download_error
@@ -69,7 +71,7 @@ class TestHumanizeDownloadErrorPatterns:
         out = humanize_download_error(
             "ERROR: Unsupported URL: https://example.com/video", "https://example.com/video")
         assert "extractor" in out
-        assert "example.com" in out
+        assert re.search(r"\bexample\.com\b", out)
 
     def test_raw_text_without_its_url_does_not_blame_youtube(self):
         out = humanize_download_error("ERROR: Unsupported URL: https://some-site.example/watch/9")

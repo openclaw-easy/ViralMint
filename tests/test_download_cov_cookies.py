@@ -18,6 +18,11 @@ from backend.download import cookie_jar, cookies, engine
 from tests import download_fakes
 from tests.download_fakes import jar_text
 
+
+def _domains(path: Path) -> list[str]:
+    """The domain column of every cookie row (comments included as written)."""
+    return [ln.split("\t", 1)[0] for ln in path.read_text().splitlines() if "\t" in ln]
+
 ytdlp = download_fakes.ytdlp        # the scripted yt-dlp fixture, re-exported for this module
 
 
@@ -68,7 +73,7 @@ class TestSanitizeCookiesFile:
         dropped = cookie_jar.sanitize(f)
         assert dropped == 0
         # Comments + valid rows preserved.
-        assert ".example.com" in f.read_text()
+        assert ".example.com" in _domains(f)
 
     def test_converts_chrome_microseconds(self, tmp_path):
         f = tmp_path / "cookies.txt"
@@ -90,8 +95,8 @@ class TestSanitizeCookiesFile:
         dropped = cookie_jar.sanitize(f)
         assert dropped == 1
         # The good row survives; the bad one is gone.
-        assert ".good.com" in f.read_text()
-        assert ".example.com" not in f.read_text()
+        assert ".good.com" in _domains(f)
+        assert ".example.com" not in _domains(f)
 
     def test_preserves_comments_and_httponly_prefix(self, tmp_path):
         f = tmp_path / "cookies.txt"

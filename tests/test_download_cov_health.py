@@ -59,7 +59,7 @@ class TestRateLimitStateMachine:
 
     def test_record_rate_limit_creates_bucket(self):
         health.record_rate_limit("https://www.tiktok.com/v/1")
-        assert "www.tiktok.com" in health._rate_limit_by_host
+        assert health._rate_limit_by_host.get("www.tiktok.com") is not None
 
     def test_cooldown_grows_exponentially(self):
         url = "https://www.tiktok.com/v/1"
