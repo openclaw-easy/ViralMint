@@ -7,7 +7,7 @@ import logging
 import math
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse
@@ -20,6 +20,9 @@ from backend.models.downloaded_video import DownloadedVideo
 from backend.models.scout_result import ScoutResult
 from backend.core.exceptions import safe_json_loads as _safe_json
 from backend.core.prompt_rules import extract_json_text
+
+if TYPE_CHECKING:
+    from backend.services.clip_options import ExtractOptions
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
