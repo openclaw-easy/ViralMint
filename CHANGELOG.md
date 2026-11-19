@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- **A narrator voice that keeps going silent no longer costs you the line.**
+  The default English voice and its plain twin sometimes answer "No audio was
+  received" several times in a row while every other voice works. After three
+  such answers the line now goes to the same speaker's other voice
+  (multilingual or plain), and the rest of the script stays on the one that
+  worked. A text that isn't plain English stays on the multilingual voice.
+- **Download errors name the site you were downloading from.** A rate limit
+  used to say "YouTube is rate-limiting downloads" for every site, and the
+  sign-in advice told everyone to "open Chrome". Messages now name the real
+  site (or say "the site" when it isn't known) and the browser ViralMint
+  reads your sign-in from, or list the ones it can read.
+- **A trend check that fails says so.** When Google Trends refused a lookup,
+  or a keyword had too little search volume, the trend check reported
+  "steady", so a broken lookup looked like a quiet week. It now reports
+  "unknown" with the reason, and checking all your niches returns a reading
+  for each of the five you scouted most recently, newest first.
+
 ## [1.4.0] — 2026-11-15
 
 ### Added
