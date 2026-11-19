@@ -312,21 +312,38 @@ def _parse_segments(raw: str | None, video_id: str) -> list[dict] | None:
 
 # Max distance (seconds) we'll slide a clip's start/end to land on a natural
 # sentence boundary. ±2s is wide enough to catch the "cut mid-word" failure
-# mode the AI commonly produces, narrow enough that clip duration stays
-# within the user's requested min/max even after snapping both ends.
+# mode the AI commonly produces. Both ends can move, so a snap can change a
+# clip's length by up to twice this: _snap_to_sentence_boundaries checks the
+# user's pinned min/max itself rather than trusting the slide to be small.
 _MAX_BOUNDARY_SLIDE_SEC = 2.0
 
 
 def _snap_to_sentence_boundaries(
     windows: list[dict], segments: list[dict],
+    max_duration: int | None = None,
+    min_duration: int | None = None,
 ) -> list[dict]:
     """Nudge each clip's start/end onto the nearest Whisper segment edge if
     one is within ±_MAX_BOUNDARY_SLIDE_SEC.
 
     Whisper produces segments at sentence-like boundaries (utterance pauses,
     punctuation), so snapping to a segment edge is equivalent to snapping
-    to a natural sentence boundary. We never extend past the slide budget,
-    so clips can't grow beyond the user's max_duration after snap.
+    to a natural sentence boundary.
+
+    `max_duration` is the user's pinned ceiling, when they set one. Each end
+    may slide up to ±_MAX_BOUNDARY_SLIDE_SEC, so a two-sided snap can add up
+    to 2× that — enough to push a clip that was exactly at the ceiling over
+    it (a 20s window became 22s). When the two-sided snap would break the
+    ceiling we fall back through end-only (the end matters most — snapping
+    it is what stops a cut landing before the punchline), then start-only,
+    then the original window. A candidate is also accepted if it's no longer
+    than the input, so a window that ALREADY exceeded the ceiling can still
+    be tidied.
+
+    `min_duration` is the same rule for the floor: snapping both ends inward
+    can shorten a clip by up to 2× the slide (a 20s window became 16s under
+    a pinned 20s minimum), so a candidate shorter than the floor is skipped
+    unless the input was already that short.
 
     Returns a NEW list — the input windows are not mutated.
     """
@@ -334,7 +351,7 @@ def _snap_to_sentence_boundaries(
         return windows
 
     # Pre-extract sorted boundary timestamps (start of each segment + end of
-    # the last one) so the snap is a search over a small fixed set.
+    # the last one) so the snap is a binary search over a small fixed set.
     starts = sorted({float(s.get("start", 0)) for s in segments if s.get("start") is not None})
     ends = sorted({float(s.get("end", 0)) for s in segments if s.get("end") is not None})
 
@@ -358,18 +375,40 @@ def _snap_to_sentence_boundaries(
         new_start = _nearest(orig_start, starts)
         new_end = _nearest(orig_end, ends)
 
-        # Only commit the snap if the result still has positive duration.
-        # (Pathological inputs where start == end after snap are rare but
-        # cheap to defend against.)
-        nw = dict(w)
-        if new_start is not None:
-            nw["start"] = round(new_start, 1)
-        if new_end is not None:
-            nw["end"] = round(new_end, 1)
-        if nw["end"] - nw["start"] < 1.0:
-            # Snap would collapse the clip — keep the original.
+        orig_len = orig_end - orig_start
+        # Candidates in preference order: both ends, end-only, start-only.
+        # The original is the implicit last resort below.
+        candidates = [
+            (new_start if new_start is not None else orig_start,
+             new_end if new_end is not None else orig_end),
+            (orig_start, new_end if new_end is not None else orig_end),
+            (new_start if new_start is not None else orig_start, orig_end),
+        ]
+
+        chosen = None
+        for cand_start, cand_end in candidates:
+            cand_len = cand_end - cand_start
+            # Never collapse a clip. (Pathological inputs where start == end
+            # after snap are rare but cheap to defend against.)
+            if cand_len < 1.0:
+                continue
+            # Respect a pinned ceiling, unless the input already broke it —
+            # then "no worse than we started" is the bar.
+            if max_duration and cand_len > max_duration and cand_len > orig_len:
+                continue
+            # The same for a pinned floor.
+            if min_duration and cand_len < min_duration and cand_len < orig_len:
+                continue
+            chosen = (cand_start, cand_end)
+            break
+
+        if chosen is None:
             snapped.append(w)
             continue
+
+        nw = dict(w)
+        nw["start"] = round(chosen[0], 1)
+        nw["end"] = round(chosen[1], 1)
         snapped.append(nw)
 
     return snapped

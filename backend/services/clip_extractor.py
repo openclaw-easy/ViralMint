@@ -491,7 +491,26 @@ async def extract_viral_clips(
                 # 2. Silent-region backfill. Add un-spoken stretches of the
                 #    source up to the user's original `max_clips` cap so the
                 #    output covers more of the video. Additive only.
-                clip_windows = _snap_to_sentence_boundaries(clip_windows, segments)
+                clip_windows = _snap_to_sentence_boundaries(
+                    clip_windows, segments,
+                    max_duration=max_duration, min_duration=min_duration,
+                )
+                # 3. Drop time-overlapping windows. The chunked path already
+                #    did this on its merged set, but the single-call path
+                #    never did: the prompt ASKS for non-overlapping picks and
+                #    we simply trusted it, so two near-identical windows
+                #    (10-40s and 12-42s) were cut as two clips. Snapping can
+                #    also pull two adjacent windows onto the same boundary,
+                #    so running it here — after snap — covers both causes for
+                #    both paths. Input is sorted by virality desc, which is
+                #    what the filter assumes.
+                before = len(clip_windows)
+                clip_windows = _remove_overlapping_clips(clip_windows)
+                if len(clip_windows) < before:
+                    logger.info(
+                        f"Dropped {before - len(clip_windows)} time-overlapping "
+                        f"clip window(s) after sentence-snap"
+                    )
                 if len(clip_windows) < max_clips:
                     silent_windows = _find_silent_gaps(
                         segments=segments,

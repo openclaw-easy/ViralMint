@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Fixed
+- **AI clips stay inside the length you set.** After the AI picks a clip,
+  each end is nudged up to 2 seconds onto the nearest sentence boundary, and
+  moving both ends could push a clip past your maximum (a 20-second pick came
+  out at 23 seconds) or below your minimum. The nudge now gives way when it
+  would break either limit, keeping the end that matters most when it can.
+- **The AI no longer cuts the same moment twice.** On shorter videos two AI
+  picks covering the same seconds (say 10–40 s and 12–42 s) were both cut as
+  separate clips; only long videos dropped the overlap. Every AI run now
+  keeps the stronger of two overlapping picks.
 - **A narrator voice that keeps going silent no longer costs you the line.**
   The default English voice and its plain twin sometimes answer "No audio was
   received" several times in a row while every other voice works. After three
