@@ -9,7 +9,7 @@ export default function ToolRemoveSilence() {
   return (
     <ToolRunner
       title="Silence Remover"
-      description="Auto-cut pauses, fillers, and dead air"
+      description="Auto-cut pauses and dead air"
       icon={<FastRewindOutlinedIcon fontSize="large" />}
       endpoint="/api/tools/remove-silence"
       acceptExts={MEDIA_ACCEPT}

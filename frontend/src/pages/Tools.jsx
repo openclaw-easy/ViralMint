@@ -148,7 +148,7 @@ const TOOLS = [
   {
     id: "remove-silence",
     title: "Silence Remover",
-    description: "Auto-cut pauses, fillers, and dead air.",
+    description: "Auto-cut pauses and dead air.",
     icon: <FastRewindOutlinedIcon />,
     category: "audio",
   },
