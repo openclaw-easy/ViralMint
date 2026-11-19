@@ -73,7 +73,10 @@ def test_the_min_length_floor_matches_the_extractor():
     int(min_duration))`. If the backend's floor moves and the dialog's
     doesn't, the quote stops being an upper bound on what the run can cut.
     """
-    backend = Path("backend/services/clip_extractor.py").read_text()
+    # Read the rule's own source, wherever the module split puts it.
+    import inspect
+    from backend.services.clip_extractor import _estimate_realistic_clip_count
+    backend = inspect.getsource(_estimate_realistic_clip_count)
     m = re.search(r"min_clip_floor = max\((\d+), int\(min_duration\)\)", backend)
     assert m, "clip_extractor's min_clip_floor rule changed — update autoClipCount.js too"
     js = JS.read_text()

@@ -23,11 +23,61 @@ from uuid import uuid4
 
 from backend.config import settings
 from backend.core.concurrency import _ffmpeg_semaphore
-from backend.core.prompt_rules import OUTPUT_LANGUAGE_RULE
 from backend.core.ws_manager import ws_manager
 from backend.services.clip_options import ExtractOptions
 
 logger = logging.getLogger(__name__)
+
+# Pure helpers live in three modules; the orchestration, transcription, AI calls and ffmpeg work stay
+# here, and so does every name a test patches, so a patch on this module still reaches every caller.
+# tests/test_clip_extractor_split.py pins it.
+from backend.services.clip_prompts import (  # noqa: F401 — re-exported: callers and tests import these from here
+    CLIP_SELECTION_PROMPT,
+    CLIP_METADATA_PROMPT,
+    CLIP_METADATA_BATCH_PROMPT,
+    _PLATFORM_BIAS,
+    _PLATFORM_ALIASES,
+    _build_platform_bias_block,
+    _GENRE_BIAS,
+    _GENRE_ALIASES,
+    _build_genre_bias_block,
+    _build_segments_text,
+    _METADATA_KEYS,
+    _metadata_only,
+    _default_metadata,
+    _salvage_truncated_array,
+)
+from backend.services.clip_windows import (  # noqa: F401 — re-exported: callers and tests import these from here
+    _parse_timestamp,
+    _build_manual_clip_windows,
+    _has_cjk,
+    _count_speech_units,
+    _estimate_realistic_clip_count,
+    _find_silent_gaps,
+    _parse_segments,
+    _MAX_BOUNDARY_SLIDE_SEC,
+    _snap_to_sentence_boundaries,
+    _remove_overlapping_clips,
+    _TOPIC_STOPWORDS,
+    TOPIC_DEDUP_THRESHOLD,
+    _SCORE_BREAKDOWN_KEYS,
+    _normalize_score_breakdown,
+    _topic_keywords,
+    _dedupe_clips_by_topic,
+)
+from backend.services.clip_caption_timing import (  # noqa: F401 — re-exported: callers and tests import these from here
+    _trim_wordless_cue,
+    _filter_and_offset_segments,
+    SILENCE_GAP_THRESHOLD,
+    MIN_KEEP_DURATION,
+    KEEP_PAD_SECONDS,
+    SILENCE_TIMEOUT_FLOOR_S,
+    SILENCE_TIMEOUT_CEILING_S,
+    SILENCE_TIMEOUT_REALTIME_FACTOR,
+    DRASTIC_TRIM_KEEP_RATIO,
+    _silence_removal_timeout,
+    _retime_segments_after_removal,
+)
 
 
 # Closed set of hook categorizations the picker prompt asks for. Kept in sync
@@ -162,488 +212,6 @@ def purge_orphan_clip_files(max_age_hours: float = 24.0) -> int:
     if deleted:
         logger.info("Orphan clip purge removed %d unreferenced clip file(s)", deleted)
     return deleted
-
-
-# ── AI Prompts ────────────────────────────────────────────────────────────────
-
-CLIP_SELECTION_PROMPT = """You are an expert viral short-form video editor who has produced thousands of clips with millions of views.
-
-Your job: identify the best non-overlapping segments ({min_clip}–{max_clip} seconds each) from this transcript. Find up to {max_clips} quality clips. Only include segments that genuinely meet the criteria below — never pad with weak content.
-{user_query_block}{platform_bias_block}{genre_bias_block}
-SELECTION CRITERIA (in priority order):
-1. HOOK STRENGTH: The first 2-3 seconds of the segment must grab attention immediately. Look for: surprising statements, bold claims, questions, emotional peaks, "did you know" moments.
-2. STANDALONE VALUE: Each segment must make complete sense without the rest of the video. No dangling references, no "as I mentioned earlier".
-3. INFORMATION DENSITY: Every 10 seconds should advance the narrative. Cut segments that meander or repeat.
-4. CLEAN BOUNDARIES: Start at natural sentence beginnings (not mid-word). End at natural conclusions (not cliffhangers that need the next sentence). Prefer segment timestamps from the transcript over arbitrary times — the system will snap your start/end to the nearest sentence boundary, but the closer you start, the better.
-5. EMOTIONAL ARC: Prefer segments with a clear setup → payoff structure. "Aha moments", revelations, or actionable advice.
-6. QUOTABILITY: Would someone share this clip? Would it spark comments or debates?
-
-WHAT TO AVOID:
-- Intros ("hey guys, welcome to my channel")
-- Outros ("don't forget to subscribe")
-- Slow, repetitive sections with low information density
-- Segments that reference visuals not captured in audio ("as you can see on screen")
-- Incomplete thoughts or arguments that require context
-
-Video title: {title}
-Video duration: {duration}s
-Video niche/topic: {niche}
-
-Transcript with timestamps:
-{segments_text}
-
-Return ONLY valid JSON array, no markdown fences:
-[
-  {{
-    "start": 45.2,
-    "end": 102.8,
-    "title": "Short punchy title for this clip (5-8 words)",
-    "hook": "The exact first sentence that grabs attention",
-    "hook_score": 9,
-    "hook_type": "curiosity_gap",
-    "reason": "Why this segment works as a viral clip (be specific, 1-2 sentences)",
-    "virality_score": 8.5,
-    "score_breakdown": {{
-      "flow": 8,
-      "value": 9,
-      "trend": 7,
-      "shareability": 8
-    }}
-  }}
-]
-
-IMPORTANT:
-- virality_score must be 1-10 (10 = guaranteed viral, 1 = boring) — it's your overall judgment; the sub-scores are the rubric behind it.
-- hook_score must be 1-10 (10 = irresistible hook, stops the scroll; 1 = weak/boring opening). Score ONLY the first 2-3 seconds of the segment.
-- hook_type must be ONE of: curiosity_gap | contrarian | emotional_peak | question | number_promise | story_loop | actionable_tip | shocking_claim | general
-- score_breakdown sub-scores each 1-10:
-    flow         — narrative arc + satisfying close (no dangling thoughts, no cliffhanger that needs context)
-    value        — emotional / practical resonance ("did you know" payoff, actionable takeaway, gut reaction)
-    trend        — alignment with what audiences are clicking on right now in this niche
-    shareability — would a viewer quote, screenshot, or send this to a friend
-- Each segment MUST be between {min_clip} and {max_clip} seconds
-- Segments must NOT overlap
-- Order by virality_score descending (best clip first)
-- You MUST return at least 1 clip if there is any usable content"""
-CLIP_SELECTION_PROMPT += "\n\n" + OUTPUT_LANGUAGE_RULE  # state the language — Claude does not infer it (prompt_rules)
-
-CLIP_METADATA_PROMPT = """Generate platform metadata for this viral short clip.
-
-Clip title: {title}
-Clip transcript:
-{transcript_text}
-
-Return ONLY valid JSON, no markdown fences:
-{{
-  "youtube_title": "Catchy YouTube Shorts title (under 70 chars, front-load keywords, use power words)",
-  "youtube_description": "2-3 sentence description with relevant keywords for SEO",
-  "youtube_tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
-  "tiktok_title": "TikTok caption with hashtags (under 150 chars, hook-first)"
-}}"""
-CLIP_METADATA_PROMPT += "\n\n" + OUTPUT_LANGUAGE_RULE  # state the language — Claude does not infer it (prompt_rules)
-
-
-CLIP_METADATA_BATCH_PROMPT = """Generate platform metadata for {count} viral short clips. Each clip is independent — write metadata tailored to that clip's specific transcript and title.
-
-Clips:
-{clips_block}
-
-Return ONLY a valid JSON array with one object per clip (same order as input). Each object MUST include the `index` field matching the clip's number (0-based). No markdown fences.
-
-[
-  {{
-    "index": 0,
-    "youtube_title": "Catchy YouTube Shorts title (under 70 chars, front-load keywords, use power words)",
-    "youtube_description": "2-3 sentence description with relevant keywords for SEO",
-    "youtube_tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
-    "tiktok_title": "TikTok caption with hashtags (under 150 chars, hook-first)"
-  }},
-  ...
-]
-
-IMPORTANT:
-- Return exactly {count} objects, one per input clip
-- The `index` field MUST match the input clip number — do not reorder or skip
-- Each object MUST have ALL five fields (index + 4 metadata fields)
-- If a clip's transcript is empty, base the metadata on the title alone"""
-CLIP_METADATA_BATCH_PROMPT += "\n\n" + OUTPUT_LANGUAGE_RULE  # state the language — Claude does not infer it (prompt_rules)
-
-
-# ── Platform-bias prompt block ───────────────────────────────────────────────
-# Each platform's algorithm rewards different hook types — TikTok loves
-# shock + emotion, LinkedIn wants actionable expertise, YouTube Shorts
-# splits the difference. When `target_platform` is set on extraction,
-# we inject a 1-2 sentence bias into the AI selection prompt so the
-# ranker can prefer hooks that fit. User's `min_duration` / `max_duration`
-# always win — this only affects hook-type ranking, not clip length.
-#
-# Lowercase keys; unknown / None platforms get no bias (vanilla virality
-# ranking). Adding a platform = one entry in this dict; the helper +
-# threading handle the rest.
-_PLATFORM_BIAS: dict[str, str] = {
-    "tiktok": (
-        "TARGET PLATFORM: TikTok. Bias selection toward shocking_claim, "
-        "emotional_peak, and contrarian hook types. The first 1-2 seconds "
-        "MUST stop the scroll — punchy, declarative, high-energy openings. "
-        "Prefer the shorter end of the allowed clip range."
-    ),
-    "youtube_shorts": (
-        "TARGET PLATFORM: YouTube Shorts. Bias toward curiosity_gap, "
-        "number_promise, and story_loop hook types. Slightly more "
-        "informational/educational tone than TikTok — viewers expect a "
-        "payoff for the click."
-    ),
-    "reels": (
-        "TARGET PLATFORM: Instagram Reels. Bias toward emotional_peak, "
-        "story_loop, and curiosity_gap hook types. Lifestyle / visual "
-        "storytelling tone — moments that feel cinematic or aspirational."
-    ),
-    "linkedin": (
-        "TARGET PLATFORM: LinkedIn. Bias toward actionable_tip, "
-        "number_promise, and contrarian (business-framed) hook types. "
-        "Professional tone — avoid clickbait/shock. When credentials or "
-        "data are present, foreground them. Prefer the longer end of "
-        "the allowed clip range; LinkedIn viewers watch longer."
-    ),
-    "twitter": (
-        "TARGET PLATFORM: Twitter / X. Bias toward shocking_claim, "
-        "contrarian, and question hook types. Punchy, debate-starting "
-        "takes — the best clips are the ones that make people want to "
-        "quote-tweet them."
-    ),
-}
-
-# Accept common aliases so callers don't have to remember the canonical key.
-_PLATFORM_ALIASES: dict[str, str] = {
-    "youtube": "youtube_shorts",
-    "shorts": "youtube_shorts",
-    "instagram_reels": "reels",
-    "instagram": "reels",
-    "x": "twitter",
-}
-
-
-def _build_platform_bias_block(target_platform: str | None) -> str:
-    """Return the platform-bias text to inject into CLIP_SELECTION_PROMPT.
-
-    Returns "" when:
-      - target_platform is None / empty / whitespace
-      - target_platform doesn't match a known key or alias
-
-    The empty-string fallback keeps the prompt format-string happy
-    (`{platform_bias_block}` resolves to nothing) and means callers can
-    always pass a target_platform value through without first checking
-    whether it's known — unknown ones quietly degrade to vanilla
-    virality ranking rather than raising.
-    """
-    if not target_platform:
-        return ""
-    key = target_platform.strip().lower()
-    if not key:
-        return ""
-    # Resolve aliases first ("youtube" → "youtube_shorts").
-    key = _PLATFORM_ALIASES.get(key, key)
-    bias = _PLATFORM_BIAS.get(key)
-    if not bias:
-        return ""
-    # Leading newline so it stays clearly separated from user_query_block
-    # when both are present.
-    return f"\n{bias}\n"
-
-
-# ── Genre-bias prompt block ─────────────────────────────────────────────────
-# Different content types reward different clip-picking heuristics. A podcast
-# clip is good when the guest lands a one-line insight; a tutorial clip is
-# good when it stands alone as a how-to step; a Q&A clip works when the
-# question and answer fit in a single beat. Same idea, free for us to inject
-# as a 1-2 sentence guidance block.
-#
-# Lowercase keys; unknown / None genres get no bias (the platform-bias and
-# default selection criteria do the work alone). Pairs cleanly with
-# target_platform: a "podcast" video tagged "tiktok" will get both blocks.
-
-_GENRE_BIAS: dict[str, str] = {
-    "podcast": (
-        "GENRE: Podcast. Bias selection toward moments where the guest "
-        "(not the host) lands a memorable one-liner, an unexpected take, "
-        "or a vulnerable confession. Avoid generic intros, sponsor reads, "
-        "and pleasantries. Prefer segments that work standalone without "
-        "host context."
-    ),
-    "interview": (
-        "GENRE: Interview. Bias toward the interviewee's most quotable "
-        "answers, especially ones that reveal new information or contradict "
-        "expectations. The interviewer's question can be included if it sets "
-        "up the answer, but the punch should be the answer itself."
-    ),
-    "qa": (
-        "GENRE: Q&A. Each clip should pair a single question with its "
-        "answer in one beat. Skip standalone questions (no payoff) and "
-        "standalone answers (no setup). Look for question-answer pairs "
-        "that resolve in 20-60 seconds."
-    ),
-    "vlog": (
-        "GENRE: Vlog. Bias toward moments of genuine reaction, surprise, "
-        "or storytelling beats with a clear setup → payoff. Skip travel "
-        "B-roll narration and filler ('so anyway', 'and then we…'). "
-        "Prefer the creator's most expressive, on-camera moments."
-    ),
-    "tutorial": (
-        "GENRE: Tutorial / how-to. Bias toward single complete tips that "
-        "work standalone: a problem statement plus the fix in one segment. "
-        "Skip preambles ('today I'll show you'), tool intros, and "
-        "summaries. The viewer should be able to apply the tip immediately."
-    ),
-    "gaming": (
-        "GENRE: Gaming. Bias toward big moments: clutch plays, fails, "
-        "reactions, hype peaks, surprising mechanics. Look for "
-        "before-after structure (setup → payoff). Commentary that reacts "
-        "to the on-screen action beats explanatory commentary."
-    ),
-    "reaction": (
-        "GENRE: Reaction. Bias toward the strongest emotional peaks — "
-        "laughter, shock, disbelief, vindication. Skip the setup of what "
-        "they're reacting to (audience will infer); foreground the "
-        "reaction itself. Short and punchy beats long and explanatory."
-    ),
-    "lecture": (
-        "GENRE: Lecture / educational. Bias toward standalone insights "
-        "that don't require the prior 20 minutes of context — a definition, "
-        "a counterintuitive fact, a one-paragraph explanation of a concept. "
-        "Prefer the longer end of the clip range; educational viewers tolerate "
-        "more depth."
-    ),
-}
-
-# Aliases mirror the alias-resolution pattern in _PLATFORM_ALIASES so callers
-# can pass common synonyms without us shipping them into every endpoint doc.
-_GENRE_ALIASES: dict[str, str] = {
-    "q&a": "qa",
-    "qanda": "qa",
-    "ama": "qa",
-    "how_to": "tutorial",
-    "howto": "tutorial",
-    "education": "lecture",
-    "educational": "lecture",
-    "talk": "lecture",
-    "react": "reaction",
-    "gameplay": "gaming",
-    "let's_play": "gaming",
-    "lets_play": "gaming",
-}
-
-
-def _build_genre_bias_block(genre: str | None) -> str:
-    """Return the genre-bias text to inject into CLIP_SELECTION_PROMPT.
-
-    Same fallback semantics as `_build_platform_bias_block`: unknown /
-    None values return "" so callers don't need to validate first.
-    """
-    if not genre:
-        return ""
-    key = genre.strip().lower()
-    if not key:
-        return ""
-    key = _GENRE_ALIASES.get(key, key)
-    bias = _GENRE_BIAS.get(key)
-    if not bias:
-        return ""
-    return f"\n{bias}\n"
-
-
-# ── Manual-mode helpers ──────────────────────────────────────────────────────
-
-def _parse_timestamp(value) -> float:
-    """Parse a flexible timestamp string into seconds.
-
-    Accepts:
-      - numeric input          (45, 45.5 → 45.0, 45.5)
-      - "SS" / "SS.fff"        ("18" → 18.0, "18.5" → 18.5)
-      - "MM:SS" / "MM:SS.fff"  ("10:38" → 638.0)
-      - "HH:MM:SS"             ("1:02:15" → 3735.0)
-
-    Raises ValueError with a user-readable message on bad input. The
-    API layer catches and surfaces as a 400 with the original message
-    so the user knows which range failed.
-    """
-    if value is None:
-        raise ValueError("empty timestamp")
-    if isinstance(value, (int, float)):
-        out = float(value)
-        # NaN slips through every later comparison (end<=start, beyond-EOF
-        # are all False against NaN) and reaches ffmpeg as `-ss nan`, turning
-        # a bad range into an opaque "No clips were extracted" job failure
-        # instead of this 400. json.loads accepts bare NaN/Infinity.
-        if out < 0:
-            raise ValueError(f"negative timestamp: {value}")
-        if not math.isfinite(out):
-            raise ValueError(f"non-finite timestamp: {value}")
-        return out
-    s = str(value).strip()
-    if not s:
-        raise ValueError("empty timestamp")
-    parts = s.split(":")
-    if len(parts) > 3:
-        raise ValueError(
-            f"too many ':' in timestamp '{s}' "
-            f"(expected SS, MM:SS, or HH:MM:SS)"
-        )
-    try:
-        nums = [float(p) for p in parts]
-    except ValueError:
-        raise ValueError(
-            f"non-numeric component in timestamp '{s}' "
-            f"(expected digits and optional '.fff')"
-        )
-    if any(n < 0 for n in nums):
-        raise ValueError(f"negative component in timestamp '{s}'")
-    # MM and SS must be < 60 in the multi-part forms; reject "70:00" rather
-    # than silently converting to 70 minutes (which is what a naive
-    # implementation would do but is almost always a user typo).
-    if len(nums) >= 2 and nums[-1] >= 60:
-        raise ValueError(f"seconds field ≥ 60 in '{s}'")
-    if len(nums) == 3 and nums[1] >= 60:
-        raise ValueError(f"minutes field ≥ 60 in '{s}'")
-    if len(nums) == 1:
-        return nums[0]
-    if len(nums) == 2:
-        return nums[0] * 60 + nums[1]
-    return nums[0] * 3600 + nums[1] * 60 + nums[2]
-
-
-def _build_manual_clip_windows(
-    time_ranges: list[dict],
-    duration: float,
-    title: str = "Untitled",
-) -> list[dict]:
-    """Convert validated time ranges into clip_windows for _process_clips_parallel.
-
-    `time_ranges` is `[{"start": float, "end": float}, ...]` — already
-    parsed + validated by the API layer (so we don't re-validate here;
-    just defensively clamp `end` to source duration in case the row's
-    cached duration drifted from the actual file).
-
-    Skips virality / hook fields — manual mode has no AI judgment to
-    inject. Each window gets a generic title; task_runner's
-    `_clip_title` overrides this with the AI-batch's `youtube_title`
-    when batched metadata generation succeeds, otherwise falls back to
-    "{source} — clip N" via its existing fallback chain. The
-    `clip_virality_score` / `clip_hook_score` / `clip_hook_type`
-    columns persist as NULL for manual clips.
-    """
-    windows = []
-    for i, r in enumerate(time_ranges):
-        start = float(r["start"])
-        end = float(r["end"])
-        if duration and end > duration:
-            end = duration
-        windows.append({
-            "start": round(start, 1),
-            "end": round(end, 1),
-            "title": f"{title} — clip {i + 1}",
-            # Tagged at the source. Without this the downstream default ("ai")
-            # would report every bench cut and every explicit time range as an
-            # AI pick — to the caller least likely to believe it.
-            "selection": "manual",
-            "hook": "",
-            "reason": "",  # explicitly empty so task_runner's _clip_title
-                          # falls through to the "clip N" branch when batched
-                          # AI metadata fails.
-            # virality_score / hook_score deliberately omitted — they default
-            # to None downstream, which the persistence layer stores as NULL.
-        })
-    return windows
-
-
-# ── Clip count estimation ──────────────────────────────────────────────────────
-
-def _has_cjk(text: str) -> bool:
-    """Check if text contains CJK characters (Chinese, Japanese, Korean)."""
-    import unicodedata
-    for ch in text[:500]:  # sample first 500 chars
-        try:
-            name = unicodedata.name(ch, "")
-            if "CJK" in name or "HANGUL" in name or "HIRAGANA" in name or "KATAKANA" in name:
-                return True
-        except ValueError:
-            continue
-    return False
-
-
-def _count_speech_units(text: str) -> int:
-    """
-    Count speech units in a language-aware way.
-    For CJK languages (Chinese, Japanese, Korean), count characters instead of
-    space-separated words since these languages don't use spaces.
-    For alphabetic languages, count words normally.
-    """
-    if not text:
-        return 0
-    if _has_cjk(text):
-        # CJK: count characters (excluding spaces and common punctuation)
-        import re
-        chars = re.sub(r'[\s.,!?;:\-\"\'\(\)\[\]，。！？；：、""''（）《》【】…～·]', '', text)
-        return len(chars)
-    return len(text.split())
-
-
-def _estimate_realistic_clip_count(
-    segments: list[dict],
-    duration: int,
-    requested_max: int,
-    min_duration: int | None = None,
-) -> int:
-    """
-    Estimate how many clips can realistically be extracted, based on transcript
-    content density and video length.
-
-    Language-aware: handles CJK (Chinese/Japanese/Korean) where text has no
-    spaces by counting characters instead of words.
-
-    `min_duration` MUST match the user's requested minimum clip length (the
-    same value passed to the AI prompt as `min_clip`). Without it the
-    estimator silently assumed every clip would be ~40s long, which capped
-    a 1-minute source asking for 3×15s clips down to 1 — bug observed
-    2026-04-30 with a 63-second video. The fix divides by the actual
-    minimum, not an internal average.
-    """
-    if not segments or duration <= 0:
-        return min(requested_max, 3)
-
-    # Same default the AI prompt uses (see `_select_clip_windows*` callers).
-    # Anything shorter than 10s makes for unwatchable shorts; floor it.
-    min_clip_floor = max(10, int(min_duration)) if min_duration else 15
-
-    # Calculate speech density
-    total_text = " ".join(s.get("text", "") for s in segments)
-    is_cjk = _has_cjk(total_text)
-    speech_units = _count_speech_units(total_text)
-
-    # Speech coverage: what fraction of video has speech
-    speech_duration = sum(s.get("end", 0) - s.get("start", 0) for s in segments)
-    speech_coverage = speech_duration / max(duration, 1)
-
-    # Content density floor — how many minimum-length clips' worth of speech
-    # we have. CJK speech rate ~4.5 chars/sec; English ~2.5 words/sec.
-    units_per_sec = 4.5 if is_cjk else 2.5
-    units_per_min_clip = max(1, int(min_clip_floor * units_per_sec))
-    content_based_max = max(1, speech_units // units_per_min_clip)
-
-    # Duration floor — how many minimum-length non-overlapping clips fit.
-    duration_based_max = max(1, duration // min_clip_floor)
-
-    # Use the more restrictive estimate.
-    realistic = min(content_based_max, duration_based_max, requested_max)
-
-    lang_label = "CJK chars" if is_cjk else "words"
-    logger.info(
-        f"Clip count estimation: {speech_units} {lang_label}, "
-        f"{speech_coverage:.0%} speech coverage, min_clip_floor={min_clip_floor}s → "
-        f"content_max={content_based_max}, duration_max={duration_based_max}, "
-        f"requested={requested_max}, final={realistic}"
-    )
-
-    return max(1, realistic)
 
 
 # ── Main pipeline ──────────────────────────────────────────────────────────────
@@ -1069,97 +637,6 @@ def _generate_duration_based_clips(
     return clips
 
 
-def _find_silent_gaps(
-    segments: list[dict],
-    clip_windows: list[dict],
-    duration: float,
-    min_gap_duration: float = 10.0,
-    max_clip_duration: float = 60.0,
-    budget: int | None = None,
-) -> list[dict]:
-    """
-    Return clip-window dicts covering stretches of the source video that have
-    no speech AND don't overlap any AI-selected clip.
-
-    Short silent pauses (< min_gap_duration) are left to be absorbed into
-    neighbouring speech clips. Long silent stretches are split into chunks of
-    at most max_clip_duration so individual clips stay playable. When budget
-    is given, emission stops once that many windows have been produced.
-    """
-    if duration <= 0:
-        return []
-    # An explicit budget of zero means "no room for backfill". The cap was
-    # applied as a slice AFTER the first candidate was built, so budget=0
-    # still returned one window — a clip the caller didn't ask for. Not
-    # reachable from today's only caller (it invokes this when
-    # `len(clip_windows) < max_clips`, so the budget is at least 1), but it
-    # would be the moment a second caller appears.
-    if budget is not None and budget <= 0:
-        return []
-
-    covered: list[tuple[float, float]] = []
-    for s in segments:
-        start = float(s.get("start", 0))
-        end = float(s.get("end", 0))
-        if end > start:
-            covered.append((start, end))
-    for w in clip_windows:
-        start = float(w.get("start", 0))
-        end = float(w.get("end", 0))
-        if end > start:
-            covered.append((start, end))
-
-    # Fully silent videos are handled upstream by _generate_duration_based_clips.
-    if not covered:
-        return []
-
-    covered.sort()
-    merged: list[list[float]] = [list(covered[0])]
-    for s, e in covered[1:]:
-        if s <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], e)
-        else:
-            merged.append([s, e])
-
-    gaps: list[tuple[float, float]] = []
-    prev_end = 0.0
-    for s, e in merged:
-        if s - prev_end >= min_gap_duration:
-            gaps.append((prev_end, s))
-        prev_end = e
-    if duration - prev_end >= min_gap_duration:
-        gaps.append((prev_end, duration))
-
-    if not gaps:
-        return []
-
-    result: list[dict] = []
-    for g_start, g_end in gaps:
-        gap_len = g_end - g_start
-        if gap_len <= max_clip_duration:
-            ranges = [(g_start, g_end)]
-        else:
-            n = math.ceil(gap_len / max_clip_duration)
-            chunk = gap_len / n
-            ranges = [(g_start + i * chunk, g_start + (i + 1) * chunk) for i in range(n)]
-        for r_start, r_end in ranges:
-            if r_end - r_start < min_gap_duration:
-                continue
-            result.append({
-                "start": round(r_start, 1),
-                "end": round(r_end, 1),
-                "title": f"Silent section {int(r_start)}s–{int(r_end)}s",
-                "hook": "",
-                "reason": "No-speech section of the source video",
-                "virality_score": 3.0,
-                "hook_score": 3.0,
-            })
-            if budget is not None and len(result) >= budget:
-                return result
-
-    return result
-
-
 # One in-flight transcription per source. `video` is a row that was read
 # BEFORE the job started, so its `transcript_segments_json` is a snapshot: two
 # jobs launched on the same source seconds apart both see NULL and both
@@ -1174,18 +651,6 @@ def _find_silent_gaps(
 # rather than narrowing it. No deadlock risk against the whisper gate: nobody
 # holds that gate while waiting for one of these.
 _TRANSCRIBE_LOCKS: dict[str, asyncio.Lock] = {}
-
-
-def _parse_segments(raw: str | None, video_id: str) -> list[dict] | None:
-    """Cached segments, or None when there are none worth using."""
-    if not raw:
-        return None
-    try:
-        segments = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        logger.warning(f"Corrupt transcript_segments_json for {video_id[:8]}, re-transcribing")
-        return None
-    return segments or None
 
 
 async def _cached_segments_from_db(video_id: str) -> list[dict] | None:
@@ -1525,233 +990,6 @@ async def _chunked_clip_selection(
     return result
 
 
-# Max distance (seconds) we'll slide a clip's start/end to land on a natural
-# sentence boundary. ±2s is wide enough to catch the "cut mid-word" failure
-# mode the AI commonly produces, narrow enough that clip duration stays
-# within the user's requested min/max even after snapping both ends.
-_MAX_BOUNDARY_SLIDE_SEC = 2.0
-
-
-def _snap_to_sentence_boundaries(
-    windows: list[dict], segments: list[dict],
-) -> list[dict]:
-    """Nudge each clip's start/end onto the nearest Whisper segment edge if
-    one is within ±_MAX_BOUNDARY_SLIDE_SEC.
-
-    Whisper produces segments at sentence-like boundaries (utterance pauses,
-    punctuation), so snapping to a segment edge is equivalent to snapping
-    to a natural sentence boundary. We never extend past the slide budget,
-    so clips can't grow beyond the user's max_duration after snap.
-
-    Returns a NEW list — the input windows are not mutated.
-    """
-    if not segments or not windows:
-        return windows
-
-    # Pre-extract sorted boundary timestamps (start of each segment + end of
-    # the last one) so the snap is a search over a small fixed set.
-    starts = sorted({float(s.get("start", 0)) for s in segments if s.get("start") is not None})
-    ends = sorted({float(s.get("end", 0)) for s in segments if s.get("end") is not None})
-
-    def _nearest(target: float, candidates: list[float]) -> float | None:
-        if not candidates:
-            return None
-        # Linear is fine — segments are small (typically <500). Avoids a
-        # bisect import for a 30-line helper.
-        best = min(candidates, key=lambda c: abs(c - target))
-        return best if abs(best - target) <= _MAX_BOUNDARY_SLIDE_SEC else None
-
-    snapped = []
-    for w in windows:
-        try:
-            orig_start = float(w["start"])
-            orig_end = float(w["end"])
-        except (KeyError, TypeError, ValueError):
-            snapped.append(w)
-            continue
-
-        new_start = _nearest(orig_start, starts)
-        new_end = _nearest(orig_end, ends)
-
-        # Only commit the snap if the result still has positive duration.
-        # (Pathological inputs where start == end after snap are rare but
-        # cheap to defend against.)
-        nw = dict(w)
-        if new_start is not None:
-            nw["start"] = round(new_start, 1)
-        if new_end is not None:
-            nw["end"] = round(new_end, 1)
-        if nw["end"] - nw["start"] < 1.0:
-            # Snap would collapse the clip — keep the original.
-            snapped.append(w)
-            continue
-        snapped.append(nw)
-
-    return snapped
-
-
-def _remove_overlapping_clips(windows: list[dict]) -> list[dict]:
-    """Remove overlapping clips, keeping higher-scored ones (assumed pre-sorted by score desc).
-
-    Bounds are compared numerically, and every window here came from an LLM.
-    `_select_clip_windows` does coerce them before returning, so today no
-    caller can hand this a null — but that is a property of one function
-    upstream, not of this one, and a missing bound would raise a TypeError
-    that fails the ENTIRE search rather than dropping one bad pick. Skip what
-    cannot be compared; a window with no start is not a clip.
-    """
-    kept = []
-    for w in windows:
-        try:
-            ws, we = float(w["start"]), float(w["end"])
-        except (KeyError, TypeError, ValueError):
-            logger.info("Dropping a clip window with unusable bounds: %r",
-                        {k: w.get(k) for k in ("start", "end")} if isinstance(w, dict) else w)
-            continue
-        overlaps = False
-        for k in kept:
-            # Check if they overlap (with 2s tolerance)
-            if ws < k["end"] - 2 and we > k["start"] + 2:
-                overlaps = True
-                break
-        if not overlaps:
-            kept.append(w)
-    return kept
-
-
-# ── Topic dedup (cross-time-window near-duplicate detection) ────────────────
-#
-# The AI sometimes picks two clips that don't overlap in TIME but cover the
-# same TOPIC — a guest who re-tells a story at minute 5 and minute 25, or a
-# host who restates a punchline. _remove_overlapping_clips catches time
-# overlap; this catches topic overlap so the user gets distinct beats.
-#
-# Tactics:
-#   - Tokenize each clip's (title + hook + reason) — already-AI-written text
-#     that summarizes the clip in ~30 words. Compact and topic-rich.
-#   - Strip a small English stopword set. Tokens under 4 chars are also
-#     dropped. Non-English videos still get useful signal because content
-#     words are 4+ chars in most languages.
-#   - Jaccard similarity per pair; if >= TOPIC_DEDUP_THRESHOLD, drop the
-#     lower-virality clip from the pair.
-
-_TOPIC_STOPWORDS = frozenset({
-    "about", "after", "again", "against", "their", "there", "these", "those",
-    "which", "while", "would", "could", "should", "where", "every", "before",
-    "being", "doing", "down", "from", "have", "having", "into", "more", "most",
-    "much", "other", "over", "same", "such", "than", "that", "this", "very",
-    "well", "what", "when", "with", "your", "yours", "they", "them", "were",
-    "will", "just", "even", "also", "make", "made", "like", "many", "some",
-    "only", "first", "thing", "things", "really", "still", "back", "good",
-    "great", "right", "want", "need", "know", "going", "didnt", "doesnt",
-    "isnt", "wasnt", "didn", "weren", "video", "clip", "viral", "moment",
-    "segment", "audience", "viewer", "viewers",
-})
-
-TOPIC_DEDUP_THRESHOLD = 0.55
-
-
-# ── Score breakdown normalization ────────────────────────────────────────────
-# The AI returns a 4-key dict for `score_breakdown` (flow / value / trend /
-# shareability), but rarely it omits keys or returns wrong types. Normalizing
-# in a small pure helper means the validation is testable without faking the
-# whole AI call.
-
-_SCORE_BREAKDOWN_KEYS = ("flow", "value", "trend", "shareability")
-
-
-def _normalize_score_breakdown(raw, default_score: float) -> dict[str, float]:
-    """Coerce the AI's score_breakdown payload into a 4-key float dict.
-
-    `default_score` is the clip's overall virality_score — used when the AI
-    omits a sub-score so the UI bars don't collapse to zero on partial AI
-    responses. Each value is clamped to [1.0, 10.0]; non-numeric values
-    fall back to the default. A non-dict input returns {} (the UI hides
-    the panel for that clip).
-    """
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, float] = {}
-    for key in _SCORE_BREAKDOWN_KEYS:
-        try:
-            v = float(raw.get(key, default_score))
-        except (TypeError, ValueError):
-            v = default_score
-        out[key] = max(1.0, min(10.0, v))
-    return out
-
-
-def _topic_keywords(text: str) -> set[str]:
-    """Return the set of content tokens in *text* for Jaccard comparison.
-
-    Lowercased, alphabetic-only tokens of length ≥ 4 minus a small English
-    stopword set. Non-content words ("video", "clip", "moment") are filtered
-    too — they're high-frequency across the AI's reasoning text and would
-    inflate similarity between unrelated clips.
-    """
-    if not text:
-        return set()
-    tokens = re.findall(r"[a-z]{4,}", text.lower())
-    return {t for t in tokens if t not in _TOPIC_STOPWORDS}
-
-
-def _dedupe_clips_by_topic(
-    windows: list[dict],
-    threshold: float = TOPIC_DEDUP_THRESHOLD,
-) -> list[dict]:
-    """Drop near-duplicate clips by Jaccard similarity on AI-summarized text.
-
-    Input is assumed already sorted by virality_score desc — the function
-    walks top-down and drops anything that closely matches an already-kept
-    clip. Preserves the input order in the return value (the surviving
-    high-virality clips stay at the top).
-
-    Pure function; doesn't touch the network or the filesystem.
-    """
-    if len(windows) <= 1:
-        return list(windows)
-
-    # Pre-compute keyword sets once.
-    keywords = [
-        _topic_keywords(" ".join([
-            str(w.get("title") or ""),
-            str(w.get("hook") or ""),
-            str(w.get("reason") or ""),
-        ]))
-        for w in windows
-    ]
-
-    kept_indices: list[int] = []
-    for i, w in enumerate(windows):
-        kw_i = keywords[i]
-        if not kw_i:
-            # No usable keywords — keep it (can't compare). Rare; happens
-            # when title/hook/reason are all empty (legacy or malformed AI).
-            kept_indices.append(i)
-            continue
-        is_dup = False
-        for j in kept_indices:
-            kw_j = keywords[j]
-            if not kw_j:
-                continue
-            inter = len(kw_i & kw_j)
-            union = len(kw_i | kw_j)
-            sim = inter / union if union else 0.0
-            if sim >= threshold:
-                logger.info(
-                    f"Topic dedup: dropping clip {w.get('start',0):.0f}-{w.get('end',0):.0f}s "
-                    f"(virality {w.get('virality_score','?')}) — {sim:.0%} keyword overlap "
-                    f"with kept clip {windows[j].get('start',0):.0f}-{windows[j].get('end',0):.0f}s "
-                    f"(virality {windows[j].get('virality_score','?')})"
-                )
-                is_dup = True
-                break
-        if not is_dup:
-            kept_indices.append(i)
-
-    return [windows[i] for i in kept_indices]
-
-
 async def _select_clip_windows(
     segments: list[dict],
     title: str,
@@ -1972,78 +1210,6 @@ async def _select_clip_windows(
     # Sort by virality score descending
     valid.sort(key=lambda w: w.get("virality_score", 0), reverse=True)
     return valid[:max_clips]
-
-
-def _build_segments_text(segments: list[dict], duration: int, max_chars: int = 12000) -> str:
-    """Build transcript text for AI, with intelligent handling of long videos."""
-    if not segments:
-        return ""
-
-    # For very long videos (>30 min), sample from beginning, middle, and end.
-    total_text_len = sum(len(f"[{s['start']:.1f}s] {s.get('text', '')}") for s in segments)
-    if total_text_len > max_chars * 2 and duration > 1800:
-        # Each window gets its OWN third of the budget.
-        #
-        # This used to concatenate the three slices and then truncate the
-        # whole thing at max_chars, which could never work: the branch only
-        # runs when the transcript is more than TWICE the budget, so the three
-        # quarters (75% of the segments) cannot possibly fit in it. The output
-        # always ran out of room inside the FIRST quarter, which made the
-        # sampling identical to plain truncation — measured on a 3-hour
-        # podcast, the model was handed the first ~860s of 10800s and clip
-        # selection only ever considered the opening ~14 minutes. The
-        # second "omitted" marker was unreachable by construction, so the END
-        # of a long video was never shown at all.
-        #
-        # Budgeting per window is what makes "beginning, middle, end" true.
-        # The two markers come out of the budget so the caller's max_chars is
-        # still an upper bound on what it gets back.
-        _OMITTED = "... (segments omitted) ..."
-        per_window = max((max_chars - 2 * (len(_OMITTED) + 1)) // 3, 1)
-        quarter = max(len(segments) // 4, 1)
-        mid_start = max(0, len(segments) // 2 - quarter // 2)
-        windows = [
-            segments[:quarter],
-            segments[mid_start:mid_start + quarter],
-            segments[-quarter:],
-        ]
-
-        lines: list[str] = []
-        for i, window in enumerate(windows):
-            # The CLOSING window fills backwards, so what the model sees is
-            # the video's actual ending — the payoff, the CTA, the last beat.
-            # Filling it forwards would show the start of the final quarter
-            # and stop, which is just a fourth truncation point.
-            from_end = (i == len(windows) - 1)
-            ordered = reversed(window) if from_end else window
-            rendered: list[str] = []
-            used = 0
-            for s in ordered:
-                line = f"[{s['start']:.1f}s - {s['end']:.1f}s] {s.get('text', '')}"
-                # +1 for the newline "\n".join adds — without it the joined
-                # result overshoots the caller's max_chars.
-                if used + len(line) + 1 > per_window:
-                    break
-                rendered.insert(0, line) if from_end else rendered.append(line)
-                used += len(line) + 1
-            if not rendered:
-                continue
-            if lines:
-                lines.append(_OMITTED)
-            lines.extend(rendered)
-        return "\n".join(lines)
-
-    # Normal case: include all segments up to limit
-    lines = []
-    char_count = 0
-    for s in segments:
-        line = f"[{s['start']:.1f}s - {s['end']:.1f}s] {s.get('text', '')}"
-        if char_count + len(line) > max_chars:
-            lines.append(f"... (truncated at {s['start']:.0f}s of {duration}s total)")
-            break
-        lines.append(line)
-        char_count += len(line)
-    return "\n".join(lines)
 
 
 async def _process_clips_parallel(
@@ -2347,110 +1513,12 @@ async def _process_clips_parallel(
     return final_results
 
 
-def _trim_wordless_cue(text: str, seg_start: float, seg_end: float,
-                       clip_start: float, clip_end: float) -> str:
-    """Drop the parts of a WORDLESS cue that fall outside the clip.
-
-    A cue WITH word timings needs none of this — the word filter below drops
-    out-of-range words exactly. A cue WITHOUT them (an imported SRT/VTT, and
-    every YouTube subtitle track, because the inline `<00:00:05.120><c>` word
-    timestamps are stripped when the track is parsed) carries only a start/end
-    and a blob of text, and `caption_service._extract_word_timestamps` spreads
-    that text EVENLY across the cue.
-
-    So when a cut lands mid-cue, clamping the cue's start to 0 while keeping all
-    of its text renders words spoken BEFORE the cut from the clip's very first
-    frame — burned captions running ahead of the audio by up to a full cue
-    length, 3-8s for YouTube's rolling cues. It is worst on manual and bench
-    cuts, which start mid-cue by construction.
-
-    The fix applies the SAME uniform-distribution assumption the even-spread
-    builder already makes: if N words are going to be spread evenly over the
-    cue, the fraction of the cue preceding the cut holds that fraction of the
-    words. An approximation, but the one already in force downstream, so it is
-    consistent rather than newly clever. Returns "" when nothing survives, and
-    the caller then skips the cue.
-    """
-    dur = seg_end - seg_start
-    toks = (text or "").split()
-    if dur <= 0 or not toks:
-        return text or ""
-    lead = max(0.0, (clip_start - seg_start) / dur)
-    tail = max(0.0, (seg_end - clip_end) / dur)
-    if lead <= 0 and tail <= 0:
-        return text
-    first = int(round(lead * len(toks)))
-    last = len(toks) - int(round(tail * len(toks)))
-    if last <= first:
-        return ""
-    return " ".join(toks[first:last])
-
-
-def _filter_and_offset_segments(segments: list[dict], clip_start: float, clip_end: float) -> list[dict]:
-    """Filter segments to clip range and offset timestamps to start at 0."""
-    filtered = []
-    for s in segments:
-        seg_start = s.get("start", 0)
-        seg_end = s.get("end", 0)
-        # Include if segment overlaps with clip range
-        if seg_end > clip_start and seg_start < clip_end:
-            adjusted = dict(s)
-            # A wordless cue straddling either cut point: drop the text that
-            # belongs outside the clip BEFORE the start gets clamped to 0.
-            if not s.get("words") and (seg_start < clip_start or seg_end > clip_end):
-                kept = _trim_wordless_cue(
-                    s.get("text", ""), seg_start, seg_end, clip_start, clip_end)
-                if not kept.strip():
-                    continue
-                adjusted["text"] = kept
-            adjusted["start"] = max(seg_start - clip_start, 0)
-            adjusted["end"] = min(seg_end - clip_start, clip_end - clip_start)
-            # Also adjust word timestamps if present
-            if "words" in adjusted:
-                adjusted["words"] = [
-                    {**w, "start": max(w["start"] - clip_start, 0), "end": min(w["end"] - clip_start, clip_end - clip_start)}
-                    for w in adjusted["words"]
-                    if w.get("end", 0) > clip_start and w.get("start", 0) < clip_end
-                ]
-            filtered.append(adjusted)
-    return filtered
-
-
 FILLER_WORDS = {
     "um", "uh", "uhm", "umm", "uhh", "hmm", "hm",
     "like", "so", "basically", "actually", "literally",
     "right", "okay", "ok", "yeah", "yep", "yea",
     "i mean", "you know", "you see", "kind of", "sort of",
 }
-
-# Max gap between words (seconds) before it's considered silence worth removing
-SILENCE_GAP_THRESHOLD = 0.4
-# Minimum keep-segment duration to avoid micro-fragments
-MIN_KEEP_DURATION = 0.15
-# Padding around kept segments to avoid harsh cuts
-KEEP_PAD_SECONDS = 0.03
-
-# The select/aselect pass re-encodes the WHOLE timeline, so its runtime scales
-# with the source, not with how much gets cut. A flat 120 s cap was fine while
-# this only ever saw 30-60 s clipper clips; the Silence Remover TOOL feeds it
-# whole videos and podcasts, where the cap fired as a raw TimeoutExpired
-# carrying the entire ffmpeg argv into the UI. Budget ~6x realtime —
-# comfortably slower than any machine we support — with a floor for short clips
-# and a 30 min ceiling so a pathological input can't pin a worker forever.
-SILENCE_TIMEOUT_FLOOR_S = 300
-SILENCE_TIMEOUT_CEILING_S = 1800
-SILENCE_TIMEOUT_REALTIME_FACTOR = 6
-
-# Below this share of the clip surviving, the trim has changed the artifact
-# enough that the user needs to hear about it. 0.5 is a judgement call, not a
-# measurement — tune it freely; nothing branches on it but the warning.
-DRASTIC_TRIM_KEEP_RATIO = 0.5
-
-
-def _silence_removal_timeout(duration_s: float) -> int:
-    """ffmpeg wall-clock budget for a select/aselect pass over `duration_s`."""
-    budget = float(duration_s or 0) * SILENCE_TIMEOUT_REALTIME_FACTOR
-    return int(min(max(budget, SILENCE_TIMEOUT_FLOOR_S), SILENCE_TIMEOUT_CEILING_S))
 
 
 def _has_video_stream(path: Path) -> bool:
@@ -2661,52 +1729,6 @@ async def _remove_silence_and_fillers(
     return output_path, adjusted_segments
 
 
-def _retime_segments_after_removal(segments: list[dict], keep_ranges: list[tuple[float, float]]) -> list[dict]:
-    """
-    Re-calculate segment timestamps after silence removal.
-    Maps original timestamps to their new positions in the shortened video.
-    """
-    def map_time(t: float) -> float | None:
-        """Map an original timestamp to its position in the cleaned video."""
-        elapsed = 0.0
-        for rs, re_ in keep_ranges:
-            if t < rs:
-                # Before this range — clamp to start of range
-                return elapsed
-            if t <= re_:
-                # Inside this range
-                return elapsed + (t - rs)
-            elapsed += re_ - rs
-        # After all ranges
-        return elapsed
-
-    adjusted = []
-    for seg in segments:
-        new_start = map_time(seg["start"])
-        new_end = map_time(seg["end"])
-        if new_start is None or new_end is None or new_end <= new_start:
-            continue
-
-        new_seg = dict(seg)
-        new_seg["start"] = new_start
-        new_seg["end"] = new_end
-
-        if "words" in new_seg:
-            new_words = []
-            for w in new_seg["words"]:
-                ws = map_time(w["start"])
-                we = map_time(w["end"])
-                if ws is not None and we is not None and we > ws:
-                    new_words.append({**w, "start": ws, "end": we})
-            new_seg["words"] = new_words
-            if not new_words:
-                continue
-
-        adjusted.append(new_seg)
-
-    return adjusted
-
-
 async def _burn_clip_captions(
     clip_path: Path,
     segments: list[dict],
@@ -2794,37 +1816,6 @@ async def _burn_clip_captions(
     except Exception as e:
         logger.warning(f"Caption burning failed for clip {clip_path.name}: {e}")
         return clip_path, "failed"
-
-
-# The only keys the metadata prompts ask for, and the only ones any consumer
-# reads (see run_extract_clips' GeneratedVideo(...) construction).
-_METADATA_KEYS = ("youtube_title", "youtube_description", "youtube_tags", "tiktok_title")
-
-
-def _metadata_only(metadata) -> dict:
-    """Keep just the four metadata fields; drop anything else the model added.
-
-    The clip result dict is assembled with the metadata spread LAST, so an
-    unfiltered merge let a hallucinated key silently overwrite a
-    pipeline-owned field — `video_path` (what we persist and serve),
-    `start`/`end`/`duration_seconds`, or `caption_status`. Filtering at the
-    point where model output joins our own dict is the one choke point that
-    covers every metadata path (batched, per-clip fallback, and
-    `_default_metadata`).
-    """
-    if not isinstance(metadata, dict):
-        return {}
-    return {k: metadata[k] for k in _METADATA_KEYS if k in metadata}
-
-
-def _default_metadata(title: str, transcript_text: str) -> dict:
-    """Default metadata when AI generation fails."""
-    return {
-        "youtube_title": title,
-        "youtube_description": transcript_text[:200] if transcript_text else "",
-        "youtube_tags": [],
-        "tiktok_title": title,
-    }
 
 
 async def _generate_clip_metadata(title: str, transcript_text: str, user_settings) -> dict:
@@ -3001,19 +1992,3 @@ def _parse_json_response(text: str) -> any:
     return _salvage_truncated_array(text)
 
 
-def _salvage_truncated_array(text: str):
-    """The complete objects of a JSON array that was cut off mid-element (an
-    output-token ceiling hit on a long clip list) — `[{..}, {..}, {..` →
-    the first two. None when there is no array or nothing complete in it."""
-    start = text.find("[")
-    if start < 0:
-        return None
-    body = text[start:]
-    end = body.rfind("}")
-    while end > 0:
-        try:
-            out = json.loads(body[: end + 1] + "]")
-            return out if isinstance(out, list) and out else None
-        except json.JSONDecodeError:
-            end = body.rfind("}", 0, end)
-    return None
