@@ -230,6 +230,32 @@ class TestBatchDownload:
         assert ran == [True]
 
 
+class TestRateLimitNamesTheSite:
+    """A rate limit used to read "YouTube is rate-limiting" for every site. The
+    warning and the job's error name the site of the link that hit the limit."""
+
+    def test_batch(self, downloader, no_analyzer, monkeypatch):
+        from backend.core.exceptions import RateLimitError
+        from backend.core.ws_manager import ws_manager
+        warnings = []
+
+        async def warn(*a, **k):
+            warnings.append(k)
+        monkeypatch.setattr(ws_manager, "send_constraint_warning", warn)
+        downloader["outcomes"]["https://vimeo.com/1"] = RateLimitError("HTTP Error 429: Too Many Requests")
+
+        async def go():
+            jid = await _job()
+            await TR.run_batch_download_urls(jid, [{"url": "https://vimeo.com/1", "title": "one"}], user_id="local")
+            return await _job_row(jid)
+        row = asyncio.run(go())
+        assert row.status == "failed"
+        msgs = [w["message"] for w in warnings if w.get("constraint") == "rate_limit"]
+        assert msgs and msgs[0].startswith("vimeo.com is rate-limiting downloads.")
+        assert "vimeo.com is rate-limiting downloads from this network" in (row.error_message or "")
+        assert "YouTube" not in (row.error_message or "")
+
+
 class TestSingleDownloadToDb:
     def test_it_persists_a_downloaded_row(self, downloader, no_analyzer):
         async def go():

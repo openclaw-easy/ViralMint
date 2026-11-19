@@ -12,6 +12,7 @@ from backend.database import AsyncSessionLocal
 from backend.models.scout_result import ScoutResult
 from backend.models.downloaded_video import DownloadedVideo
 from backend.download.fetch import fetch_video
+from backend.download.messages import download_failure_message, site_label
 from backend.core.ws_manager import ws_manager
 from backend.agents.job_helper import job_cancelled, update_job_status
 from backend.config import settings
@@ -78,6 +79,7 @@ class DownloadAgent:
         downloaded = []
         errors = []  # Collect actual error details per video
         rate_limited = False
+        abort_url: str | None = None
         cancelled = False
 
         for i, sr_id in enumerate(scout_result_ids):
@@ -185,12 +187,13 @@ class DownloadAgent:
 
             except RateLimitError as e:
                 rate_limited = True
+                abort_url = sr.video_url if sr else None      # the link the batch stopped on: names the site
                 error_detail = f"Video {i + 1}/{total} '{sr.title[:40] if sr else sr_id[:8]}': {e}"
                 errors.append(error_detail)
                 logger.warning(f"Rate limited on video {i + 1}/{total}, skipping remaining: {e}")
                 await ws_manager.send_constraint_warning(
                     constraint="rate_limit",
-                    message=f"YouTube is rate-limiting downloads. {len(downloaded)}/{total} downloaded so far. Try again later for the rest.",
+                    message=f"{site_label(sr.video_url if sr else None)} is rate-limiting downloads. {len(downloaded)}/{total} downloaded so far. Try again later for the rest.",
                     severity="warning",
                     user_id=user_id,
                 )
@@ -251,7 +254,7 @@ class DownloadAgent:
 
         if len(downloaded) == 0 and total > 0:
             user_msg = (
-                f"YouTube is rate-limiting downloads from this IP. Try again in 10-15 minutes."
+                download_failure_message([], total, "rate-limited", url=abort_url)
                 if rate_limited else
                 f"All {total} download(s) failed. They may be unavailable or region-blocked."
             )

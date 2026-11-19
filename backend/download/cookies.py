@@ -94,6 +94,11 @@ class CookieStatus:
     cookies: int = 0
 
 
+def browser_label(browser: str | None) -> str | None:
+    """"chrome" -> "Chrome"; None for anything else."""
+    return _BROWSER_NAMES.get(browser or "")
+
+
 def detect_browser() -> str | None:
     """The first installed browser we can take cookies from."""
     if platform.system() == "Darwin":

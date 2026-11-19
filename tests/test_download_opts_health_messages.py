@@ -139,6 +139,15 @@ def test_sign_in_message_does_not_say_sign_in_when_the_browser_cannot_be_read():
     assert hint in msg and "open Chrome" not in msg
 
 
+def test_sign_in_advice_names_the_browser_we_read_never_chrome_for_everyone():
+    """It said "open Chrome" to every YouTube user until 2026-11-18, Firefox and Edge users included."""
+    assert "open Firefox →" in messages.sign_in_message(URL, browser="Firefox")
+    unknown = messages.sign_in_message(URL)
+    assert "Chrome, Brave, Edge or Firefox" in unknown and "Safari" in unknown
+    other = messages.sign_in_message("https://vimeo.com/1", browser="Edge")
+    assert "vimeo.com" in other and "in Edge" in other
+
+
 def test_humanize_passes_our_own_sentences_through_and_translates_raw_text():
     ours = "Download stalled: no data for 10 minutes (0.0 MB received)."
     assert messages.humanize_download_error(ours) == ours
@@ -156,7 +165,74 @@ def test_headline_drops_later_lines_paths_and_long_blobs():
 
 def test_batch_failure_message():
     f = messages.download_failure_message
-    assert "rate-limiting" in f([], 3, abort_reason="rate-limited")
+    assert f([], 3, abort_reason="rate-limited").startswith("The site is rate-limiting")     # unknown: never a guess
+    assert f([], 3, abort_reason="rate-limited", url="https://www.tiktok.com/@a/video/1").startswith("tiktok.com is rate-limiting")
+    assert f([], 3, abort_reason="rate-limited", url=URL).startswith("YouTube is rate-limiting")
+    bot = f([], 3, abort_reason="bot-detection", url="https://www.instagram.com/reel/x/")
+    assert bot.startswith("instagram.com blocked") and "YouTube" not in bot
     assert f(["ERROR: [youtube] a: Private video"], 1) == "This video is private."
     assert f(["ERROR: [youtube] a: Private video", "x"], 2) == "All 2 downloads failed: This video is private."
     assert f([], 2).startswith("All downloads failed")
+
+
+# ── The site and the browser by name (2026-11-18; coverage sweep 2026-11-19) ──
+
+def test_site_label_opens_a_sentence_with_the_real_site_or_the_site():
+    assert messages.site_label(URL) == "YouTube"
+    assert messages.site_label("https://vimeo.com/1") == "vimeo.com"
+    assert messages.site_label(None) == "The site"
+    assert messages.site_label("") == "The site"
+
+
+def test_a_bot_check_on_an_unknown_site_says_it_not_a_guess():
+    msg = messages.download_failure_message([], 3, abort_reason="bot-detection")
+    assert msg.startswith("The site blocked the download") and "Open it in your browser" in msg
+    assert "YouTube" not in msg
+
+
+def test_browser_label_is_a_closed_name():
+    from backend.download.cookies import browser_label
+    assert [browser_label(b) for b in ("chrome", "brave", "edge", "firefox")] == ["Chrome", "Brave", "Edge", "Firefox"]
+    assert browser_label("safari") is None and browser_label(None) is None and browser_label("") is None
+
+
+def _fake_store(monkeypatch, *, browser=None, status_error=None, hint=None):
+    from types import SimpleNamespace
+    from backend.download import cookies
+
+    class Store:
+        def hint(self):
+            return hint
+
+        def status(self):
+            if status_error:
+                raise status_error
+            return SimpleNamespace(browser=browser)
+    monkeypatch.setattr(cookies, "store", lambda: Store())
+
+
+def test_the_engine_names_the_browser_it_reads_in_the_sign_in_sentence(monkeypatch):
+    from backend.core.exceptions import BotDetectionError
+    from backend.download import engine
+    from backend.download.policy import Outcome, Step, StepKind
+    _fake_store(monkeypatch, browser="firefox")
+    exc = engine._exception_for(Step(StepKind.STOP, outcome=Outcome.SIGN_IN), E.SIGN_IN_REQUIRED, "Sign in", URL)
+    assert isinstance(exc, BotDetectionError)
+    assert "open Firefox →" in str(exc) and exc.error_class is E.SIGN_IN_REQUIRED
+
+
+def test_a_cookie_status_that_cant_be_read_still_gives_the_sentence(monkeypatch):
+    from backend.download import engine
+    from backend.download.policy import Outcome, Step, StepKind
+    _fake_store(monkeypatch, status_error=RuntimeError("profile locked"))
+    exc = engine._exception_for(Step(StepKind.STOP, outcome=Outcome.SIGN_IN), E.SIGN_IN_REQUIRED, "Sign in", URL)
+    assert "Chrome, Brave, Edge or Firefox" in str(exc)       # the list, never one browser for everyone
+
+
+def test_an_unreadable_browser_hint_replaces_the_sign_in_advice_in_the_engine(monkeypatch):
+    from backend.download import engine
+    from backend.download.policy import Outcome, Step, StepKind
+    hint = "macOS is blocking ViralMint from reading Chrome's cookies."
+    _fake_store(monkeypatch, browser="chrome", hint=hint)
+    exc = engine._exception_for(Step(StepKind.STOP, outcome=Outcome.SIGN_IN), E.SIGN_IN_REQUIRED, "Sign in", URL)
+    assert hint in str(exc) and "open Chrome" not in str(exc)

@@ -41,27 +41,40 @@ def _cap(sentence: str) -> str:
     """Capitalise "the site …" at the start of a sentence; a host name stays as it is written."""
     return "The site" + sentence[8:] if sentence.startswith("the site") else sentence
 
+def site_label(url: str | None) -> str:
+    """The site's name to open a sentence with: "YouTube", "vimeo.com", or "The site"."""
+    return _cap(site_name(url))
 
-def sign_in_message(url: str | None, cookie_hint: str | None = None) -> str:
+
+
+# The browsers CookieStore can read (cookies.BROWSERS), as a person would name them, for advice when none is found.
+_READABLE_BROWSERS = "Chrome, Brave, Edge or Firefox (ViralMint can't read Safari's sign-in)"
+
+
+def sign_in_message(url: str | None, cookie_hint: str | None = None, browser: str | None = None) -> str:
     """The sign-in wall, worded for the site that asked. `cookie_hint` is
     CookieStore.hint(): when we can't read the browser, "sign in in your
-    browser" can't help, so the hint replaces that advice."""
+    browser" can't help, so the hint replaces that advice. `browser` is the
+    browser CookieStore reads ("Firefox"); unknown, the advice names the ones it
+    can read, never one browser for everyone (it said "open Chrome" to Firefox
+    users until 2026-11-18)."""
     site = site_name(url)
     if cookie_hint:
         return _cap(f"{site} wants you signed in for this video. {cookie_hint}")
+    where = browser or _READABLE_BROWSERS
     if site == "YouTube":
         return (
             "YouTube requires browser sign-in to verify you're not a bot. "
-            "To fix: open Chrome → go to youtube.com → sign in → watch any video → then retry the download."
+            f"To fix: open {where} → go to youtube.com → sign in → watch any video → then retry the download."
         )
     return _cap(
         f"{site} wants you signed in before it serves this video. "
-        f"To fix: sign in to {site} in your browser, open the video once, then retry the download."
+        f"To fix: sign in to {site} in {browser or 'your browser'}, open the video once, then retry the download."
     )
 
 
 def for_class(error_class: E, error: object = "", url: str | None = None,
-              cookie_hint: str | None = None) -> str:
+              cookie_hint: str | None = None, browser: str | None = None) -> str:
     """The sentence for one failed download."""
     site = site_name(url)
     if error_class is E.COOKIE_SOURCE:
@@ -69,7 +82,7 @@ def for_class(error_class: E, error: object = "", url: str | None = None,
     if error_class is E.DISK_FULL:
         return "The download stopped because the disk is full. Free some space and try again."
     if error_class in (E.SIGN_IN_REQUIRED,):
-        return sign_in_message(url, cookie_hint)
+        return sign_in_message(url, cookie_hint, browser)
     if error_class in (E.AGE_GATE, E.UNAVAILABLE):
         kind = unavailable_kind(error, url) or ("age" if error_class is E.AGE_GATE else "")
         return _UNAVAILABLE[kind]
@@ -110,14 +123,18 @@ def humanize_download_error(raw: object, url: str | None = None, max_len: int = 
     return headline(text, max_len)
 
 
-def download_failure_message(raw_errors: list[str], total: int, abort_reason: str | None = None) -> str:
-    """One sentence for a batch in which every download failed."""
+def download_failure_message(raw_errors: list[str], total: int, abort_reason: str | None = None,
+                             url: str | None = None) -> str:
+    """One sentence for a batch in which every download failed. `url` is the link the batch stopped on (or the
+    channel's): it names the site. Unknown, it is "The site", never a guess (it said "YouTube" for every site
+    until 2026-11-18)."""
+    site = site_name(url)
     if abort_reason == "rate-limited":
-        return "YouTube is rate-limiting downloads from this IP. Try again in 10–15 minutes."
+        return _cap(f"{site} is rate-limiting downloads from this network. Try again in 10–15 minutes.")
     if abort_reason == "bot-detection":
-        return (
-            "YouTube blocked the download with a bot-detection check. "
-            "Open YouTube in your browser, sign in, watch any video, then retry."
+        return _cap(
+            f"{site} blocked the download with a bot-detection check. "
+            f"Open {'it' if site == 'the site' else site} in your browser, sign in, open any video, then retry."
         )
     if total == 1 and raw_errors:
         return humanize_download_error(raw_errors[0])

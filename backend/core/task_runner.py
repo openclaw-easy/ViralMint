@@ -10,6 +10,7 @@ import json
 import logging
 
 from backend.services.clip_options import ExtractOptions
+from backend.download.messages import download_failure_message, site_label
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,7 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
         video_summaries = []
         errors = []
         rate_limited = False
+        rate_limited_url = None
         cancelled = False
 
         for i, item in enumerate(urls):
@@ -198,11 +200,12 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
                     video_summaries.append(dl)
             except RateLimitError as e:
                 rate_limited = True
+                rate_limited_url = video_url
                 errors.append(f"Video {i + 1}/{total} '{video_title[:40]}': {e}")
                 logger.warning(f"Rate limited on video {i + 1}/{total}, skipping remaining: {e}")
                 await ws_manager.send_constraint_warning(
                     constraint="rate_limit",
-                    message=f"YouTube is rate-limiting downloads. {len(downloaded_ids)}/{total} downloaded so far. Try again later.",
+                    message=f"{site_label(video_url)} is rate-limiting downloads. {len(downloaded_ids)}/{total} downloaded so far. Try again later.",
                     severity="warning",
                     user_id=user_id,
                 )
@@ -248,7 +251,7 @@ async def run_batch_download_urls(job_id: str, urls: list[dict], user_id: str = 
 
         if not downloaded_ids:
             user_msg = (
-                "YouTube is rate-limiting downloads from this IP. Try again in 10-15 minutes."
+                download_failure_message([], total, "rate-limited", url=rate_limited_url)
                 if rate_limited else
                 error_summary or "All video downloads failed. They may be unavailable or region-blocked."
             )
@@ -395,7 +398,7 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
             logger.warning(f"Rate limited on channel video {i + 1}/{total}, skipping remaining: {e}")
             await ws_manager.send_constraint_warning(
                 constraint="rate_limit",
-                message=f"YouTube is rate-limiting downloads. {len(downloaded_ids)}/{total} downloaded. Try again later.",
+                message=f"{site_label(url)} is rate-limiting downloads. {len(downloaded_ids)}/{total} downloaded. Try again later.",
                 severity="warning",
                 user_id=user_id,
             )
@@ -431,7 +434,7 @@ async def _download_channel(job_id: str, url: str, user_id: str, max_videos: int
 
     if not downloaded_ids:
         raise Exception(
-            "YouTube is rate-limiting downloads from this IP. Try again in 10-15 minutes."
+            download_failure_message([], total, "rate-limited", url=url)
             if rate_limited else
             (error_summary or "All video downloads failed")
         )

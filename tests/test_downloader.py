@@ -334,3 +334,38 @@ class TestTheScoutPathNeverRetriesItself:
         fix.assert_not_awaited()
         assert dl.await_args.kwargs["user_id"] == "local"
         assert "failed" in _final_status_calls(infra["ujs"])
+
+
+class TestTheSummaryNamesTheRealSite:
+    """A rate limit used to read "YouTube is rate-limiting" for every site. The
+    agent now names the site of the link the batch stopped on, in the live
+    warning AND the job_failed line."""
+
+    def test_a_rate_limit_names_the_site(self, infra):
+        from backend.agents.downloader import DownloadAgent
+        from backend.core.exceptions import RateLimitError
+        sr = _make_sr("a", url="https://vimeo.com/123", platform="vimeo")
+        with patch("backend.agents.downloader.AsyncSessionLocal",
+                   side_effect=lambda: _fake_session(sr)), \
+             patch("backend.agents.downloader.fetch_video",
+                   new=AsyncMock(side_effect=RateLimitError("HTTP 429"))):
+            _run(DownloadAgent().run("job_1", ["a", "b"], user_id="local"))
+        warn = [c.kwargs["message"] for c in infra["warn"].await_args_list
+                if c.kwargs.get("constraint") == "rate_limit"]
+        assert warn and warn[0].startswith("vimeo.com is rate-limiting") and "YouTube" not in warn[0]
+        failed = [c.args[0]["error"] for c in infra["send"].await_args_list
+                  if c.args and isinstance(c.args[0], dict) and c.args[0].get("type") == "job_failed"]
+        assert failed == ["vimeo.com is rate-limiting downloads from this network. Try again in 10–15 minutes."]
+
+    def test_a_youtube_rate_limit_still_says_youtube(self, infra):
+        from backend.agents.downloader import DownloadAgent
+        from backend.core.exceptions import RateLimitError
+        sr = _make_sr("a")
+        with patch("backend.agents.downloader.AsyncSessionLocal",
+                   side_effect=lambda: _fake_session(sr)), \
+             patch("backend.agents.downloader.fetch_video",
+                   new=AsyncMock(side_effect=RateLimitError("HTTP 429"))):
+            _run(DownloadAgent().run("job_1", ["a"], user_id="local"))
+        failed = [c.args[0]["error"] for c in infra["send"].await_args_list
+                  if c.args and isinstance(c.args[0], dict) and c.args[0].get("type") == "job_failed"]
+        assert failed and failed[0].startswith("YouTube is rate-limiting")

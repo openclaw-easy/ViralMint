@@ -114,8 +114,13 @@ def _ytdlp_version() -> str:
 
 def _exception_for(step: Step, error_class: ErrorClass, raw: object, url: str) -> Exception:
     """The exception a finished ladder raises, with its sentence for the person."""
-    hint = cookies.store().hint()
-    sentence = messages.for_class(error_class, raw, url, cookie_hint=hint)
+    store = cookies.store()
+    hint = store.hint()
+    try:
+        browser = cookies.browser_label(store.status().browser)
+    except Exception:  # noqa: BLE001 — naming the browser is advice; a read problem must not change the error
+        browser = None
+    sentence = messages.for_class(error_class, raw, url, cookie_hint=hint, browser=browser)
     if step.kind is StepKind.ESCALATE:
         return _tag(ExtractorMissingError(sentence), error_class, raw)
     exc_type = {
