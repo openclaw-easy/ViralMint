@@ -213,12 +213,15 @@ class TestSilenceRemovalPhase:
 
         # Signature must match the real one — the pipeline's soft fallback
         # swallows a TypeError, so a stale stub reads as "never called".
-        async def fake_desilence(clip_path, segs, warn_user_id=None):
-            seen.append(Path(clip_path))
+        async def fake_desilence(clip_path, segs, warn_user_id=None, user_settings=None):
+            seen.append((Path(clip_path), user_settings))
             return Path(clip_path), segs
         monkeypatch.setattr(CE, "_remove_silence_and_fillers", fake_desilence)
-        _process(video, remove_silence=True)
+        marker = object()
+        _process(video, remove_silence=True, user_settings=marker)
         assert len(seen) == 2
+        # The filler check runs on the user's own AI settings, not just an env key.
+        assert all(us is marker for _, us in seen)
 
     def test_it_is_skipped_when_disabled(self, video, ffmpeg, monkeypatch):
         async def boom(*a, **k):

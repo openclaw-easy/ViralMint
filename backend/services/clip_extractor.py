@@ -1265,7 +1265,7 @@ async def _process_clips_parallel(
             clip_segs = _filter_and_offset_segments(segments, window["start"], window["end"])
             try:
                 cleaned_path, cleaned_segs = await _remove_silence_and_fillers(
-                    clip_path, clip_segs, warn_user_id=user_id)
+                    clip_path, clip_segs, warn_user_id=user_id, user_settings=user_settings)
                 cleaned_paths.append(cleaned_path)
                 cleaned_segments_list.append(cleaned_segs)
             except Exception as e:
@@ -1513,14 +1513,6 @@ async def _process_clips_parallel(
     return final_results
 
 
-FILLER_WORDS = {
-    "um", "uh", "uhm", "umm", "uhh", "hmm", "hm",
-    "like", "so", "basically", "actually", "literally",
-    "right", "okay", "ok", "yeah", "yep", "yea",
-    "i mean", "you know", "you see", "kind of", "sort of",
-}
-
-
 def _has_video_stream(path: Path) -> bool:
     """True when the file carries a video stream (False for a bare mp3/wav).
 
@@ -1543,6 +1535,7 @@ def _has_video_stream(path: Path) -> bool:
 
 async def _remove_silence_and_fillers(
     clip_path: Path, segments: list[dict], warn_user_id: str | None = None,
+    user_settings=None,
 ) -> tuple[Path, list[dict]]:
     """
     Remove silent gaps and filler words from a clip using FFmpeg select/aselect filters.
@@ -1552,8 +1545,9 @@ async def _remove_silence_and_fillers(
     podcasts): audio-only inputs skip the video half of the filtergraph and
     come back as mp3.
 
-    Self-contained: shells out to ffmpeg directly (argv list, never shell=True),
-    no external service dependency.
+    Shells out to ffmpeg directly (argv list, never shell=True). Filler words
+    are judged by the AI model `user_settings` configures, in any language
+    (filler_words.py); without one, only the silences are cut.
     """
     import subprocess
 
@@ -1573,24 +1567,37 @@ async def _remove_silence_and_fillers(
                 "text": seg.get("text", "").strip(),
                 "start": seg["start"],
                 "end": seg["end"],
+                "cue": True,
             })
 
     if not words:
         return clip_path, segments
 
-    # Step 2: Mark filler words
-    keep_words = []
-    for w in words:
-        text_lower = w["text"].lower().strip(" .,!?")
-        if text_lower in FILLER_WORDS:
-            continue
-        # Check two-word fillers by combining with previous
-        if keep_words:
-            combined = f"{keep_words[-1]['text'].lower().strip(' .,!?')} {text_lower}"
-            if combined in FILLER_WORDS:
-                keep_words.pop()
-                continue
-        keep_words.append(w)
+    # Step 2: Mark filler words — in ANY language, by the configured AI model
+    # reading this clip's own words in context (filler_words.py). A cue with
+    # no word timings (imported subtitles, YouTube subtitle tracks) stands in
+    # the list as one "word": it is shown to the model as context but never
+    # cut as a filler, because it is a whole sentence. With no word timings
+    # at all there is nothing to ask about.
+    fillers: set[int] = set()
+    if any(not w.get("cue") for w in words):
+        from backend.services.filler_words import find_fillers
+        found = await find_fillers(words, user_settings)
+        if found is None:
+            # No AI key configured, a provider error, or the deadline: the
+            # silences are still cut, and the Clipper says the fillers
+            # weren't checked rather than implying there were none.
+            logger.info("Filler detection unavailable for %s: removing silences only", clip_path.name)
+            if warn_user_id:
+                await ws_manager.send_constraint_warning(
+                    constraint="filler_check_unavailable",
+                    message="Couldn't check this clip for filler words, so only the silences were removed.",
+                    severity="info",
+                    user_id=warn_user_id,
+                )
+        else:
+            fillers = {i for i in found if not words[i].get("cue")}
+    keep_words = [w for i, w in enumerate(words) if i not in fillers]
 
     if not keep_words:
         return clip_path, segments

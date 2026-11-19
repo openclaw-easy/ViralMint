@@ -23,6 +23,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   "steady", so a broken lookup looked like a quiet week. It now reports
   "unknown" with the reason, and checking all your niches returns a reading
   for each of the five you scouted most recently, newest first.
+- **"Remove silence & fillers" in the Clipper finds filler words in any
+  language.** It matched an English word list, so a Chinese, Spanish or
+  Japanese clip never lost an "嗯", "eh" or "えーと", and English clips
+  lost real words like "so", "like" and "right" with no regard for the
+  sentence. Your configured AI model now reads each clip's own words and
+  marks only hesitation sounds, stutter repeats and filler phrases; when in
+  doubt it keeps the word, and a subtitle cue without word timings is never
+  cut. With no AI key set (or if the check fails or takes longer than 40
+  seconds) the silences are still removed and the Clipper tells you the
+  fillers weren't checked.
 
 ## [1.4.0] — 2026-11-15
 
