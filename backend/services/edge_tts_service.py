@@ -238,9 +238,49 @@ async def _stream_part(text: str, voice_id: str, path: Path, *, clock: dict, sho
             await asyncio.gather(task, return_exceptions=True)
 
 
+# A voice that answers "No audio was received" while the endpoint is fine.
+# Measured on the real service over about three hours: the two Andrew voices
+# took turns failing in bursts. en-US-AndrewMultilingualNeural (the default
+# voice) failed 5 of 6 requests, then 0 of 24; en-US-AndrewNeural answered 6 of
+# 6, then failed 6 of 8 on one sentence; Aria, Ava, Brian and Emma never failed
+# (60 requests). A refused handshake is the endpoint and every voice shares it;
+# "no audio" belongs to the voice that was asked. So after _SIBLING_AFTER of
+# them in a row the text goes to the same speaker's other voice, and back again
+# if that one fails as often: 12 of 12 real scripts were made this way, 3 of
+# them only because of the change. The voice a script ends a part on starts its
+# next part. A text given to a multilingual voice changes only when it is plain
+# English: the plain voice speaks nothing else.
+# The four pairs Microsoft's voice list had in November 2026.
+_PLAIN_SIBLING = {
+    "en-US-AndrewMultilingualNeural": "en-US-AndrewNeural",
+    "en-US-AvaMultilingualNeural": "en-US-AvaNeural",
+    "en-US-BrianMultilingualNeural": "en-US-BrianNeural",
+    "en-US-EmmaMultilingualNeural": "en-US-EmmaNeural",
+}
+_MULTILINGUAL_SIBLING = {plain: chosen for chosen, plain in _PLAIN_SIBLING.items()}
+_SIBLING_AFTER = 3
+
+
+def _other_voice(current: str, chosen: str, text: str) -> str | None:
+    """The same speaker's other voice. A text given to a multilingual voice
+    only goes to the plain one when it is plain English; the multilingual
+    voice reads whatever a plain voice was given."""
+    other = _PLAIN_SIBLING.get(current) or _MULTILINGUAL_SIBLING.get(current)
+    if other is None:
+        return None
+    if other in _MULTILINGUAL_SIBLING and chosen in _PLAIN_SIBLING:
+        letters = [c for c in text if c.isalpha()]
+        if not letters or not all(c.isascii() for c in letters):
+            return None
+    return other
+
+
 async def _make_part(text: str, voice_id: str, path: Path, *, clock: dict, should_stop, on_audio) -> None:
     """A part, with its own attempts. Waiting only happens on a refusal or a stall."""
     stalls = 0
+    no_audio = 0
+    chosen = voice_id
+    voice_id = clock.get("voice") or voice_id      # an earlier part of this script already changed voice
     async with _slots():
         # The ceiling's clock starts at the first slot, never while queued behind other lines.
         clock["deadline"] = clock["deadline"] or time.monotonic() + clock["ceiling"]
@@ -261,6 +301,14 @@ async def _make_part(text: str, voice_id: str, path: Path, *, clock: dict, shoul
                 if not _is_transient(e) or attempt == _MAX_ATTEMPTS - 1:
                     raise
                 err = str(e)[:80]
+                if type(e).__name__ == "NoAudioReceived":
+                    no_audio += 1
+                    other = _other_voice(voice_id, chosen, text)
+                    if other and no_audio >= _SIBLING_AFTER:
+                        logger.warning("Edge TTS: %s sent no audio %d times in a row; trying %s",
+                                       voice_id, no_audio, other)
+                        voice_id = clock["voice"] = other
+                        no_audio = 0
             delay = _RETRY_DELAYS_S[min(attempt, len(_RETRY_DELAYS_S) - 1)]
             logger.info("Edge TTS attempt %d/%d failed (%s) — retrying in %.1fs",
                         attempt + 1, _MAX_ATTEMPTS, err, delay)
@@ -334,7 +382,7 @@ async def generate_voice(
         if not output_path.exists() or output_path.stat().st_size == 0:
             raise VoiceGenerationError("Edge TTS returned empty audio")
 
-        logger.info(f"Edge TTS generated: {output_path} ({output_path.stat().st_size / 1024:.0f}KB, voice={voice_id}, parts={len(parts)})")
+        logger.info(f"Edge TTS generated: {output_path} ({output_path.stat().st_size / 1024:.0f}KB, voice={clock.get('voice') or voice_id}, parts={len(parts)})")
         return output_path
 
     except (VoiceGenerationError, JobCancelledError):

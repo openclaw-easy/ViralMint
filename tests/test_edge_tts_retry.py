@@ -31,8 +31,10 @@ class _FakeCommunicate:
     plan: list = []
     calls = 0
 
+    voices: list = []
+
     def __init__(self, *a, **k):
-        pass
+        type(self).voices.append(a[1] if len(a) > 1 else k.get("voice"))
 
     async def stream(self):
         type(self).calls += 1
@@ -44,7 +46,7 @@ class _FakeCommunicate:
 @pytest.fixture
 def fake_edge(monkeypatch):
     import edge_tts
-    _FakeCommunicate.plan, _FakeCommunicate.calls = [], 0
+    _FakeCommunicate.plan, _FakeCommunicate.calls, _FakeCommunicate.voices = [], 0, []
     monkeypatch.setattr(edge_tts, "Communicate", _FakeCommunicate)
     monkeypatch.setattr(ets, "_RETRY_DELAYS_S", (0,) * 7)
     return _FakeCommunicate
@@ -117,3 +119,75 @@ def test_cap_survives_a_second_event_loop(fake_edge, tmp_path, monkeypatch):
 
     asyncio.run(burst("a"))
     asyncio.run(burst("b"))   # contended again, on a different loop
+
+
+# 2026-11-16: the two Andrew voices took turns answering "No audio was
+# received" in bursts (the default, en-US-AndrewMultilingualNeural, 5 of 6;
+# later en-US-AndrewNeural 6 of 8) while four other voices never failed, and
+# the Studio harness lost a take after all 8 attempts on one voice. A refused
+# handshake is the endpoint; "no audio" is the voice that was asked. After
+# three in a row an English text goes to the same speaker's other voice.
+def _no_audio():
+    from edge_tts.exceptions import NoAudioReceived
+    return NoAudioReceived("No audio was received. Please verify that your parameters are correct.")
+
+
+ANDREW_ML, ANDREW = "en-US-AndrewMultilingualNeural", "en-US-AndrewNeural"
+
+
+def test_a_voice_that_sends_no_audio_falls_back_to_its_plain_sibling(fake_edge, tmp_path):
+    fake_edge.plan = [_no_audio(), _no_audio(), _no_audio()]
+    out = asyncio.run(ets.generate_voice("Hello there.", voice_id=ANDREW_ML, output_path=tmp_path / "s.mp3"))
+    assert out.stat().st_size > 0
+    assert fake_edge.voices == [ANDREW_ML, ANDREW_ML, ANDREW_ML, ANDREW]
+
+
+def test_the_sibling_is_kept_for_the_rest_of_the_script(fake_edge, tmp_path, monkeypatch):
+    monkeypatch.setattr(ets, "split_into_parts", lambda text: ["Part one.", "Part two.", "Part three."])
+    fake_edge.plan = [_no_audio(), _no_audio(), _no_audio()]
+    asyncio.run(ets.generate_voice("Part one. Part two. Part three.", voice_id=ANDREW_ML, output_path=tmp_path / "k.mp3"))
+    assert fake_edge.voices == [ANDREW_ML] * 3 + [ANDREW] * 3     # the next parts start on the voice that worked
+
+
+def test_a_sibling_that_fails_as_often_hands_back(fake_edge, tmp_path):
+    fake_edge.plan = [_no_audio()] * 6
+    asyncio.run(ets.generate_voice("Hello there.", voice_id=ANDREW_ML, output_path=tmp_path / "b.mp3"))
+    assert fake_edge.voices == [ANDREW_ML] * 3 + [ANDREW] * 3 + [ANDREW_ML]
+
+
+def test_a_plain_voice_that_sends_no_audio_goes_to_its_multilingual_twin(fake_edge, tmp_path):
+    # Measured the same day: en-US-AndrewNeural failed 6 of 8 while the multilingual one answered 24 of 24.
+    fake_edge.plan = [_no_audio()] * 3
+    asyncio.run(ets.generate_voice("Hello there.", voice_id=ANDREW, output_path=tmp_path / "p.mp3"))
+    assert fake_edge.voices == [ANDREW] * 3 + [ANDREW_ML]
+
+
+def test_two_no_audio_answers_stay_on_the_chosen_voice(fake_edge, tmp_path):
+    fake_edge.plan = [_no_audio(), _no_audio()]
+    asyncio.run(ets.generate_voice("Hello there.", voice_id=ANDREW_ML, output_path=tmp_path / "t.mp3"))
+    assert fake_edge.voices == [ANDREW_ML] * 3
+
+
+def test_refused_handshakes_never_change_the_voice(fake_edge, tmp_path):
+    fake_edge.plan = [_handshake(403)] * 6
+    asyncio.run(ets.generate_voice("Hello there.", voice_id=ANDREW_ML, output_path=tmp_path / "h.mp3"))
+    assert set(fake_edge.voices) == {ANDREW_ML}
+
+
+@pytest.mark.parametrize("text", ["今天我们聊三件最重要的事情。", "Hola, ¿cómo estás?", "Schöne Grüße aus Berlin."])
+def test_a_text_that_is_not_plain_english_keeps_the_multilingual_voice(fake_edge, tmp_path, text):
+    # The plain voice is English only: it would read this with the wrong accent, or not at all.
+    fake_edge.plan = [_no_audio()] * 5
+    asyncio.run(ets.generate_voice(text, voice_id=ANDREW_ML, output_path=tmp_path / "m.mp3"))
+    assert set(fake_edge.voices) == {ANDREW_ML}
+
+
+def test_a_voice_with_no_sibling_keeps_trying_itself(fake_edge, tmp_path):
+    fake_edge.plan = [_no_audio()] * 5
+    asyncio.run(ets.generate_voice("Hello there.", voice_id="en-US-AriaNeural", output_path=tmp_path / "n.mp3"))
+    assert set(fake_edge.voices) == {"en-US-AriaNeural"}
+
+
+def test_every_sibling_is_the_same_speaker_without_multilingual():
+    for chosen, plain in ets._PLAIN_SIBLING.items():
+        assert "Multilingual" in chosen and plain == chosen.replace("Multilingual", "")
