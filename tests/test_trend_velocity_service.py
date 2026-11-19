@@ -62,24 +62,38 @@ class TestCheckKeywordVelocity:
             a = await tv.check_keyword_velocity("kw")
         assert a.alert_level == "declining"
 
-    async def test_empty_frame_steady(self):
+    async def test_empty_frame_is_unknown_never_steady(self):
         _set_df(pd.DataFrame())
         with patch("pytrends.request.TrendReq", FakeTrendReq):
             a = await tv.check_keyword_velocity("kw")
-        assert a.alert_level == "steady"
+        assert (a.alert_level, a.note) == ("unknown", "no_data")
         assert a.current_interest == 0
 
-    async def test_single_point_steady(self):
+    async def test_single_point_is_unknown(self):
         _set_df(pd.DataFrame({"kw": [42]}))
         with patch("pytrends.request.TrendReq", FakeTrendReq):
             a = await tv.check_keyword_velocity("kw")
-        assert a.alert_level == "steady"
+        assert (a.alert_level, a.note) == ("unknown", "no_data")
         assert a.current_interest == 42
 
-    async def test_error_steady(self):
-        with patch("pytrends.request.TrendReq", side_effect=RuntimeError("boom")):
+    async def test_missing_column_is_unknown(self):
+        _set_df(pd.DataFrame({"something else": [1, 2, 3, 4]}))
+        with patch("pytrends.request.TrendReq", FakeTrendReq):
             a = await tv.check_keyword_velocity("kw")
-        assert a.alert_level == "steady"
+        assert (a.alert_level, a.note) == ("unknown", "no_data")
+
+    async def test_a_real_reading_has_no_note(self):
+        _set_df(pd.DataFrame({"kw": [10] * 6 + [40] * 2}))
+        with patch("pytrends.request.TrendReq", FakeTrendReq):
+            a = await tv.check_keyword_velocity("kw")
+        assert a.note == ""
+
+    async def test_a_failed_lookup_is_unknown_never_steady(self):
+        """A failed lookup used to come back as "steady", so a broken Google
+        Trends call looked like a quiet week."""
+        with patch("pytrends.request.TrendReq", side_effect=RuntimeError("429 Too Many Requests")):
+            a = await tv.check_keyword_velocity("kw")
+        assert (a.alert_level, a.note) == ("unknown", "lookup_failed")
         assert a.velocity_multiplier == 1.0
 
 
@@ -232,21 +246,9 @@ class TestCheckUserKeywordsVelocity:
             out = await tv.check_user_keywords_velocity("local")
         assert out == []
 
-    async def test_spike_sends_ws_alert(self):
-        events = [SimpleNamespace(data_json=json.dumps({"niche": "finance"}))]
-        alert = tv.TrendAlert("finance", 80, 20, 4.0, "spike")
-        send = AsyncMock()
-        with patch.object(tv, "AsyncSessionLocal", lambda: _FakeSession(events)), \
-             patch.object(tv, "check_keyword_velocity", AsyncMock(return_value=alert)), \
-             patch.object(tv.asyncio, "sleep", AsyncMock()), \
-             patch("backend.core.ws_manager.ws_manager.send", send):
-            out = await tv.check_user_keywords_velocity("local")
-        assert len(out) == 1 and out[0].keyword == "finance"
-        assert send.await_count == 1
-        payload = send.await_args.args[0]
-        assert payload["type"] == "trend_alert" and payload["alert_level"] == "spike"
-
-    async def test_steady_niche_no_alert(self):
+    async def test_every_niche_gets_a_reading_and_nothing_is_pushed(self):
+        """The old sweep returned only rising niches (five failed lookups read
+        as "no alerts") and pushed them to a WS type no screen handles."""
         events = [SimpleNamespace(data_json=json.dumps({"niche": "finance"}))]
         alert = tv.TrendAlert("finance", 10, 10, 1.0, "steady")
         send = AsyncMock()
@@ -255,5 +257,24 @@ class TestCheckUserKeywordsVelocity:
              patch.object(tv.asyncio, "sleep", AsyncMock()), \
              patch("backend.core.ws_manager.ws_manager.send", send):
             out = await tv.check_user_keywords_velocity("local")
-        assert out == []
+        assert [a.keyword for a in out] == ["finance"]
         assert send.await_count == 0
+
+    async def test_niches_newest_first_once_each_five_at_most(self):
+        """A set lost the order and picked five niches at random."""
+        names = ["newest", "d", "c", "d", "b", "a", "old"]          # rows come newest first
+        events = [SimpleNamespace(data_json=json.dumps({"niche": n})) for n in names]
+        events += [SimpleNamespace(data_json="{corrupt"), SimpleNamespace(data_json=json.dumps(["a list"])),
+                   SimpleNamespace(data_json=None)]
+        asked = []
+
+        async def look(kw):
+            asked.append(kw)
+            return tv.TrendAlert(kw, 0, 0, 1.0, "unknown", note="lookup_failed") if kw == "a" \
+                else tv.TrendAlert(kw, 1, 1, 1.0, "steady")
+        with patch.object(tv, "AsyncSessionLocal", lambda: _FakeSession(events)), \
+             patch.object(tv, "check_keyword_velocity", look), \
+             patch.object(tv.asyncio, "sleep", AsyncMock()):
+            out = await tv.check_user_keywords_velocity("local")
+        assert asked == ["newest", "d", "c", "b", "a"]
+        assert (out[-1].alert_level, out[-1].note) == ("unknown", "lookup_failed")

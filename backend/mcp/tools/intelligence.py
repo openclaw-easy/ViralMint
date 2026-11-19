@@ -71,8 +71,14 @@ def register(mcp: FastMCP) -> None:
         Returns:
             With keyword: {"keyword": str, "current_interest": float,
              "baseline_interest": float, "velocity": float (current ÷
-             baseline), "alert_level": str}.
-            Without: {"alerts": [<same shape>, ...]}.
+             baseline), "alert_level": str, "note": str}.
+            Without: {"readings": [<same shape>, ...], "alerts": [...]} for
+             the five most recently scouted niches; "alerts" keeps only the
+             rising ones. alert_level is "spike" | "rising" | "steady" |
+             "declining" | "unknown"; "unknown" means no reading, and note
+             says why: "lookup_failed" (Google Trends refused or errored) or
+             "no_data" (too little search volume). Never read "unknown" as a
+             quiet trend.
         """
         params = {"keyword": keyword.strip()} if (keyword or "").strip() else {}
         return await client.get("/api/scout/trend-velocity", params=params)

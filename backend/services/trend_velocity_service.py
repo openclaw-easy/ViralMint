@@ -26,7 +26,10 @@ class TrendAlert:
     current_interest: float      # today's relative interest (0-100)
     baseline_interest: float     # 7-day average interest
     velocity_multiplier: float   # e.g. 3.5x = 350% above baseline
-    alert_level: str             # "spike" | "rising" | "steady" | "declining"
+    alert_level: str             # "spike" | "rising" | "steady" | "declining" | "unknown"
+    # Why a reading is "unknown": "lookup_failed" (Google Trends errored or refused) or "no_data" (too little search
+    # volume). Before this both came back as a fake "steady", so a broken lookup looked like a quiet week.
+    note: str = ""
 
 
 async def check_keyword_velocity(keyword: str) -> TrendAlert:
@@ -47,7 +50,8 @@ async def check_keyword_velocity(keyword: str) -> TrendAlert:
                     current_interest=0,
                     baseline_interest=0,
                     velocity_multiplier=1.0,
-                    alert_level="steady",
+                    alert_level="unknown",
+                    note="no_data",
                 )
 
             values = df[keyword].tolist()
@@ -57,7 +61,8 @@ async def check_keyword_velocity(keyword: str) -> TrendAlert:
                     current_interest=values[0] if values else 0,
                     baseline_interest=values[0] if values else 0,
                     velocity_multiplier=1.0,
-                    alert_level="steady",
+                    alert_level="unknown",
+                    note="no_data",
                 )
 
             # Split into baseline (first 75%) and current (last 25%)
@@ -90,21 +95,20 @@ async def check_keyword_velocity(keyword: str) -> TrendAlert:
                 current_interest=0,
                 baseline_interest=0,
                 velocity_multiplier=1.0,
-                alert_level="steady",
+                alert_level="unknown",
+                note="lookup_failed",
             )
 
     return await asyncio.to_thread(_fetch)
 
 
-async def check_user_keywords_velocity(user_id: str = "local"):
-    """
-    Check velocity for all keywords the user has scouted recently.
-    Sends WebSocket alerts for any spikes or rising trends.
+async def check_user_keywords_velocity(user_id: str = "local") -> list[TrendAlert]:
+    """A reading for each of the user's five most recently scouted niches (last 30 days), every one with its
+    alert_level and note: a lookup that failed says so instead of vanishing from an "alerts only" list. Nothing is
+    pushed anywhere (the old WS `trend_alert` reached no screen); callers show the readings.
     """
     from backend.models.user_behavior import UserBehavior
-    from backend.core.ws_manager import ws_manager
 
-    # Get unique niches from recent scout events
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(UserBehavior)
@@ -120,44 +124,21 @@ async def check_user_keywords_velocity(user_id: str = "local"):
         )
         events = result.scalars().all()
 
-    # Extract unique niches
-    niches = set()
+    # Newest first, each niche once (a set lost the order and picked five at random).
+    niches: dict[str, None] = {}
     for e in events:
         try:
             data = json.loads(e.data_json or "{}")
-            if data.get("niche"):
-                niches.add(data["niche"])
         except (json.JSONDecodeError, TypeError):
-            pass
+            continue
+        if isinstance(data, dict) and data.get("niche"):
+            niches.setdefault(str(data["niche"]), None)
 
-    if not niches:
-        return []
-
-    # Check velocity for each niche (limit to 5 to avoid rate limiting)
-    alerts = []
-    for keyword in list(niches)[:5]:
-        alert = await check_keyword_velocity(keyword)
-        if alert.alert_level in ("spike", "rising"):
-            alerts.append(alert)
-            # Send proactive WS notification
-            await ws_manager.send({
-                "type": "trend_alert",
-                "keyword": alert.keyword,
-                "alert_level": alert.alert_level,
-                "velocity": alert.velocity_multiplier,
-                "current_interest": alert.current_interest,
-                "baseline_interest": alert.baseline_interest,
-                "message": (
-                    f"'{alert.keyword}' is {alert.alert_level.upper()}! "
-                    f"{alert.velocity_multiplier}x above baseline. "
-                    f"Consider scouting this niche now for early-mover advantage."
-                ),
-            }, user_id)
-
-        # Small delay between API calls to avoid rate limits
+    readings = []
+    for keyword in list(niches)[:5]:          # five, to stay under Google Trends' rate limit
+        readings.append(await check_keyword_velocity(keyword))
         await asyncio.sleep(1)
-
-    return alerts
+    return readings
 
 
 async def get_trending_keywords(keywords: list[str]) -> list[dict]:
@@ -173,6 +154,7 @@ async def get_trending_keywords(keywords: list[str]) -> list[dict]:
             "baseline_interest": alert.baseline_interest,
             "velocity": alert.velocity_multiplier,
             "alert_level": alert.alert_level,
+            "note": alert.note,
         })
         await asyncio.sleep(0.5)
 
@@ -240,6 +222,7 @@ async def cross_platform_correlation(keyword: str) -> dict:
         "google_trends": {
             "velocity": google_alert.velocity_multiplier,
             "alert_level": google_alert.alert_level,
+            "note": google_alert.note,
             "current_interest": google_alert.current_interest,
         },
         "youtube": youtube_signal,

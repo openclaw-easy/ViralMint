@@ -189,22 +189,23 @@ async def check_trend_velocity(keyword: str = None):
             "baseline_interest": alert.baseline_interest,
             "velocity": alert.velocity_multiplier,
             "alert_level": alert.alert_level,
+            "note": alert.note,
         }
     else:
         from backend.services.trend_velocity_service import check_user_keywords_velocity
-        alerts = await check_user_keywords_velocity()
-        return {
-            "alerts": [
-                {
-                    "keyword": a.keyword,
-                    "current_interest": a.current_interest,
-                    "baseline_interest": a.baseline_interest,
-                    "velocity": a.velocity_multiplier,
-                    "alert_level": a.alert_level,
-                }
-                for a in alerts
-            ]
-        }
+        readings = [
+            {
+                "keyword": a.keyword,
+                "current_interest": a.current_interest,
+                "baseline_interest": a.baseline_interest,
+                "velocity": a.velocity_multiplier,
+                "alert_level": a.alert_level,
+                "note": a.note,
+            }
+            for a in await check_user_keywords_velocity()
+        ]
+        # `readings`: every niche checked, a failed one says `unknown` + its note. `alerts`: the rising ones, as before.
+        return {"readings": readings, "alerts": [r for r in readings if r["alert_level"] in ("spike", "rising")]}
 
 
 @router.delete("/scout/results/{result_id}")
