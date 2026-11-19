@@ -172,7 +172,11 @@ hiddenimports += collect_submodules("yt_dlp.extractor")
 # imports. Without them article extraction fails on every packaged build and
 # silently falls back to raw <p> tags. desktop/scripts/check_frozen_data.py
 # fails the build if one of them goes missing again.
+# tld only while it is installed: courlan dropped it in 1.5 (check_frozen_data.py).
+import importlib.util
 for p in ("trafilatura", "justext", "tld"):
+    if p == "tld" and importlib.util.find_spec("tld") is None:
+        continue
     datas += collect_data_files(p)
 # yt-dlp's built-in JS solver for YouTube's signature challenges.
 datas += collect_data_files("yt_dlp", includes=["extractor/youtube/jsc/_builtin/vendor/*.js"])

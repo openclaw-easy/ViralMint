@@ -113,6 +113,7 @@ def test_imported_packages_are_declared(package):
 def test_the_spec_collects_the_data_the_app_reads_at_run_time():
     src = (SCRIPTS / "viralmint.spec").read_text()
     assert 'for p in ("trafilatura", "justext", "tld"):' in src and "datas += collect_data_files(p)" in src
+    assert 'importlib.util.find_spec("tld") is None' in src      # tld is skipped, not an error, once courlan drops it
     assert 'collect_data_files("yt_dlp", includes=["extractor/youtube/jsc/_builtin/vendor/*.js"])' in src
 
 
@@ -124,10 +125,23 @@ def test_the_data_gate_names_what_is_missing_or_empty(tmp_path, capsys):
         path.write_text("x")
     assert gate.main(["x", str(tmp_path)]) == 0
     (tmp_path / "trafilatura" / "settings.cfg").unlink()
-    (tmp_path / "tld" / "res" / "effective_tld_names.dat.txt").write_text("")
+    (tmp_path / "justext" / "stoplists" / "English.txt").write_text("")
     assert gate.main(["x", str(tmp_path)]) == 1
     err = capsys.readouterr().err
-    assert "trafilatura/settings.cfg" in err and "tld/res/effective_tld_names.dat.txt" in err
+    assert "trafilatura/settings.cfg" in err and "justext/stoplists/English.txt" in err
+
+
+def test_tld_is_required_only_while_it_is_installed(monkeypatch):
+    """courlan 1.5 dropped its tld dependency: a fresh install has no tld, the spec
+    collects nothing for it, and demanding its suffix list failed every build."""
+    real = importlib.util.find_spec
+
+    def without_tld(name, *a, **k):
+        return None if name == "tld" else real(name, *a, **k)
+    monkeypatch.setattr(importlib.util, "find_spec", without_tld)
+    assert "tld/res/effective_tld_names.dat.txt" not in _load("check_frozen_data").REQUIRED
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a, **k: object() if name == "tld" else real(name, *a, **k))
+    assert "tld/res/effective_tld_names.dat.txt" in _load("check_frozen_data").REQUIRED
 
 
 def test_every_backend_file_the_data_gate_asks_for_exists_in_the_repo():

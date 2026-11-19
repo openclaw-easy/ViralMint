@@ -16,16 +16,24 @@ Usage: python desktop/scripts/check_frozen_data.py dist/ViralMint/_internal
 """
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
-REQUIRED = (
+# tld's suffix list is needed only while tld is installed: courlan (trafilatura's
+# URL helper) used it up to 1.4 and dropped the dependency in 1.5, so a fresh
+# install no longer has the package, the spec collects nothing for it and the
+# app never reads the file. Demanding it then fails every build for a file no
+# code asks for.
+_TLD_SUFFIXES = "tld/res/effective_tld_names.dat.txt"
+
+REQUIRED = tuple(rel for rel in (
     "trafilatura/settings.cfg",
     "justext/stoplists/English.txt",
-    "tld/res/effective_tld_names.dat.txt",
+    _TLD_SUFFIXES,
     "yt_dlp/extractor/youtube/jsc/_builtin/vendor/yt.solver.core.js",
     "backend/services/caption_fonts/NotoEmoji-Bold.ttf",
-)
+) if rel != _TLD_SUFFIXES or importlib.util.find_spec("tld") is not None)
 
 
 def missing(internal: Path) -> list[str]:
