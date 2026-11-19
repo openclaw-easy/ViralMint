@@ -1043,6 +1043,64 @@ class ExtractClipsRequest(BaseModel):
     allow_duration_fallback: bool = True
 
 
+_EMOJI_STYLES = {"none", "minimal", "moderate", "heavy"}
+
+
+async def build_extract_options(req: "ExtractClipsRequest") -> "ExtractOptions":
+    """Validate + normalise a clip request into ExtractOptions: the ONE copy
+    every clip door uses (extract-clips, suggest-clips). `max_clips` and
+    `time_ranges` need the loaded video, so they come back unset (0 / None)
+    and the caller fills them with dataclasses.replace."""
+    from backend.services.caption_service import style_id_known, unknown_style_message
+    from backend.services.clip_options import ExtractOptions
+
+    # Mode is the discriminator. Default "ai" preserves the legacy behaviour
+    # for callers that don't know about manual mode (older MCP configs,
+    # scripts written before it existed).
+    mode = (req.mode or "ai").strip().lower()
+    if mode not in ("ai", "manual"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown mode '{mode}' (expected 'ai' or 'manual')",
+        )
+    caption_style = req.caption_style or "viral"
+    if not await style_id_known(caption_style, allow_off=True):
+        raise HTTPException(status_code=400, detail=unknown_style_message(caption_style))
+    min_duration = req.min_duration
+    max_duration = req.max_duration
+    # Custom duration range (AI mode only: manual mode uses its own ranges).
+    if mode == "ai":
+        if min_duration is not None:
+            min_duration = max(10, int(min_duration))
+        if max_duration is not None:
+            max_duration = max(15, int(max_duration))
+        if min_duration and max_duration and min_duration >= max_duration:
+            raise HTTPException(status_code=400, detail="min_duration must be less than max_duration")
+    # AutoEmoji density: unknown values fall back to "moderate" rather than
+    # raising, so the caller doesn't have to know the exact vocabulary.
+    emoji_raw = (req.emoji_style or "moderate").strip().lower()
+    return ExtractOptions(
+        mode=mode,
+        max_clips=0,
+        caption_style=caption_style,
+        whisper_quality=req.whisper_quality or "balanced",
+        force_retranscribe=bool(req.force_retranscribe),
+        min_duration=min_duration,
+        max_duration=max_duration,
+        remove_silence=bool(req.remove_silence),
+        force_vertical=bool(req.force_vertical),
+        user_query=(req.user_query or "").strip() or None,
+        # Platform hint biases the AI hook-type ranker; unknown values degrade
+        # to vanilla virality ranking (_build_platform_bias_block).
+        target_platform=(req.target_platform or "").strip().lower() or None,
+        emoji_style=emoji_raw if emoji_raw in _EMOJI_STYLES else "moderate",
+        # Genre hint biases clip selection; validated by _build_genre_bias_block.
+        genre=(req.genre or "").strip().lower() or None,
+        time_ranges=None,
+        allow_duration_fallback=req.allow_duration_fallback,
+    )
+
+
 @router.post("/downloaded/{video_id}/extract-clips")
 async def extract_clips(video_id: str, body: ExtractClipsRequest | None = None):
     """Extract clips from a downloaded long-form video.
@@ -1076,51 +1134,11 @@ async def extract_clips(video_id: str, body: ExtractClipsRequest | None = None):
         force_vertical: bool (default false)
     """
     req = body or ExtractClipsRequest()
-    # Mode is the discriminator — branches API-side validation. Default "ai"
-    # preserves the legacy behaviour for callers that don't know about manual
-    # mode (older MCP configs, scripts written before today).
-    mode = (req.mode or "ai").strip().lower()
-    if mode not in ("ai", "manual"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown mode '{mode}' (expected 'ai' or 'manual')",
-        )
-
-    caption_style = req.caption_style or "viral"
-    from backend.services.caption_service import style_id_known, unknown_style_message
-    if not await style_id_known(caption_style, allow_off=True):
-        raise HTTPException(status_code=400, detail=unknown_style_message(caption_style))
-    whisper_quality = req.whisper_quality or "balanced"
-    force_retranscribe = bool(req.force_retranscribe)
-    min_duration = req.min_duration
-    max_duration = req.max_duration
-    remove_silence = bool(req.remove_silence)
-    force_vertical = bool(req.force_vertical)
-    user_query = (req.user_query or "").strip() or None
-    # Platform hint biases the AI hook-type ranker. Unknown values quietly
-    # degrade to vanilla virality ranking — _build_platform_bias_block handles
-    # the unknown-key case.
-    target_platform = (req.target_platform or "").strip().lower() or None
-    # AutoEmoji density. Unknown values fall back to "moderate" rather than
-    # raising — caller doesn't have to know the exact vocabulary.
-    _EMOJI_STYLES = {"none", "minimal", "moderate", "heavy"}
-    emoji_style_raw = (req.emoji_style or "moderate").strip().lower()
-    emoji_style = emoji_style_raw if emoji_style_raw in _EMOJI_STYLES else "moderate"
-    # Genre hint biases the AI's clip-selection criteria. Unknown values
-    # quietly degrade to no genre bias.
-    genre = (req.genre or "").strip().lower() or None
+    # Validation + normalisation is shared with every other clip door.
+    base_opts = await build_extract_options(req)
+    mode = base_opts.mode
     max_clips_input = req.max_clips
     max_clips = None  # will be computed after loading video
-
-    # Validate custom duration range (AI mode only — manual mode uses
-    # user-supplied ranges directly).
-    if mode == "ai":
-        if min_duration is not None:
-            min_duration = max(10, int(min_duration))
-        if max_duration is not None:
-            max_duration = max(15, int(max_duration))
-        if min_duration and max_duration and min_duration >= max_duration:
-            raise HTTPException(status_code=400, detail="min_duration must be less than max_duration")
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -1158,7 +1176,7 @@ async def extract_clips(video_id: str, body: ExtractClipsRequest | None = None):
     from backend.agents.job_helper import create_job
     from backend.core.task_runner import run_extract_clips, dispatch
     from backend.core.ws_manager import ws_manager
-    from backend.services.clip_options import ExtractOptions
+    import dataclasses
 
     job = await create_job("generate", "local", {
         "downloaded_video_id": video_id,
@@ -1166,23 +1184,7 @@ async def extract_clips(video_id: str, body: ExtractClipsRequest | None = None):
         "mode": mode,
         "max_clips": max_clips,
     })
-    opts = ExtractOptions(
-        mode=mode,
-        max_clips=max_clips,
-        caption_style=caption_style,
-        whisper_quality=whisper_quality,
-        force_retranscribe=force_retranscribe,
-        min_duration=min_duration,
-        max_duration=max_duration,
-        remove_silence=remove_silence,
-        force_vertical=force_vertical,
-        user_query=user_query,
-        target_platform=target_platform,
-        emoji_style=emoji_style,
-        genre=genre,
-        time_ranges=time_ranges,
-        allow_duration_fallback=req.allow_duration_fallback,
-    )
+    opts = dataclasses.replace(base_opts, max_clips=max_clips, time_ranges=time_ranges)
     dispatch(run_extract_clips(
         job_id=job.id,
         downloaded_video_id=video_id,
@@ -1252,6 +1254,21 @@ async def suggest_clips(video_id: str, body: SuggestClipsRequest | None = None):
             {start, end, title, score, hook_score, hook_type, reason}, ...]}
     """
     req = body or SuggestClipsRequest()
+    _WHISPER_QUALITIES = {"fast", "balanced", "accurate", "best"}
+    wq = (req.whisper_quality or "balanced").strip().lower()
+    # Same normalisation as extract-clips (duration clamps, platform / genre /
+    # query vocabulary). Nothing gets cut here, so the caption / emoji /
+    # silence / aspect fields stay at their defaults.
+    base_opts = await build_extract_options(ExtractClipsRequest(
+        mode="ai",
+        min_duration=req.min_duration,
+        max_duration=req.max_duration,
+        user_query=req.user_query,
+        target_platform=req.target_platform,
+        genre=req.genre,
+        whisper_quality=wq if wq in _WHISPER_QUALITIES else "balanced",
+        force_retranscribe=bool(req.force_retranscribe),
+    ))
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -1264,15 +1281,6 @@ async def suggest_clips(video_id: str, body: SuggestClipsRequest | None = None):
         raise source_file_missing(400)
 
     duration = video.duration_seconds or 0
-    min_duration = req.min_duration
-    max_duration = req.max_duration
-    if min_duration is not None:
-        min_duration = max(10, int(min_duration))
-    if max_duration is not None:
-        max_duration = max(15, int(max_duration))
-    if min_duration and max_duration and min_duration >= max_duration:
-        raise HTTPException(status_code=400,
-                            detail="min_duration must be less than max_duration")
 
     # Capped at the manual-mode ceiling on purpose: a proposal the bench
     # cannot submit is worse than one it never made. Users who want more clips
@@ -1282,32 +1290,17 @@ async def suggest_clips(video_id: str, body: SuggestClipsRequest | None = None):
     else:
         max_clips = int(min(auto_clip_count(duration), _MANUAL_MAX_RANGES))
 
-    _WHISPER_QUALITIES = {"fast", "balanced", "accurate", "best"}
-    wq = (req.whisper_quality or "balanced").strip().lower()
-    if wq not in _WHISPER_QUALITIES:
-        wq = "balanced"
-
     from backend.agents.job_helper import create_job
     from backend.core.task_runner import run_suggest_clips, dispatch
     from backend.core.ws_manager import ws_manager
-    from backend.services.clip_options import ExtractOptions
+    import dataclasses
 
     job = await create_job("generate", "local", {
         "downloaded_video_id": video_id,
         "type": "clip_suggestion",
         "max_clips": max_clips,
     })
-    opts = ExtractOptions(
-        mode="ai",
-        max_clips=max_clips,
-        min_duration=min_duration,
-        max_duration=max_duration,
-        whisper_quality=wq,
-        force_retranscribe=bool(req.force_retranscribe),
-        user_query=(req.user_query or "").strip() or None,
-        target_platform=(req.target_platform or "").strip().lower() or None,
-        genre=(req.genre or "").strip().lower() or None,
-    )
+    opts = dataclasses.replace(base_opts, max_clips=max_clips)
     dispatch(run_suggest_clips(
         job_id=job.id,
         downloaded_video_id=video_id,

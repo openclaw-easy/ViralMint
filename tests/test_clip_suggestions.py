@@ -426,3 +426,35 @@ def test_suggest_rejects_an_inverted_duration_range(client, tmp_path):
     r = client.post(f"/api/downloaded/{vid}/suggest-clips",
                     json={"min_duration": 90, "max_duration": 30})
     assert r.status_code == 400
+
+
+def test_suggest_normalises_through_the_shared_builder(client, tmp_path, monkeypatch):
+    """suggest-clips reads the AI-targeting knobs exactly like extract-clips:
+    same clamps, same vocabulary, through one builder (test_clip_options_builder)."""
+    src = tmp_path / "long.mp4"
+    src.write_bytes(b"x")
+    vid = asyncio.run(_seed(src, 600))
+
+    asked = {}
+    from backend.core import task_runner as tr
+    monkeypatch.setattr(tr, "dispatch", lambda coro: None)
+    monkeypatch.setattr(tr, "run_suggest_clips", lambda **kw: asked.setdefault("opts", kw["opts"]))
+
+    r = client.post(f"/api/downloaded/{vid}/suggest-clips", json={
+        "min_duration": 5, "max_duration": 8, "target_platform": " TikTok ",
+        "genre": " Podcast ", "user_query": "  pricing  ", "whisper_quality": "ULTRA",
+    })
+    assert r.status_code == 200, r.text
+    o = asked["opts"]
+    assert (o.mode, o.min_duration, o.max_duration) == ("ai", 10, 15)
+    assert (o.target_platform, o.genre, o.user_query) == ("tiktok", "podcast", "pricing")
+    assert o.whisper_quality == "balanced"        # unknown quality -> balanced
+    assert o.max_clips >= 1 and o.time_ranges is None
+
+
+def test_suggest_400s_on_inverted_bounds(client, tmp_path):
+    src = tmp_path / "long.mp4"
+    src.write_bytes(b"x")
+    vid = asyncio.run(_seed(src, 600))
+    r = client.post(f"/api/downloaded/{vid}/suggest-clips", json={"min_duration": 40, "max_duration": 20})
+    assert r.status_code == 400
