@@ -14,7 +14,7 @@ vi.mock("./studioApi", () => ({
 }))
 
 import SequencePlayer from "./SequencePlayer"
-import { HOOK_SECONDS, autoTitle, clipTitle, hookTitle } from "./studioModel"
+import { HOOK_SECONDS, autoTitle, clipTitle, hookTitle, splitSentences } from "./studioModel"
 
 const timeline = {
   total: 6,
@@ -61,6 +61,17 @@ describe("hookTitle — mirrors studio_doc.hook_title", () => {
       ["你是不是也在浪费钱，每个月都存不下来？", "你是不是也在浪费钱，每个月都存不下来？"],
     ]
     for (const [line, title] of cases) expect(autoTitle(line)).toBe(title)
+  })
+  it("never cuts the title at a comma or point inside a number (studio_doc._clause_end)", () => {
+    expect(autoTitle("Honeybees live in colonies of up to 60,000 workers.")).toBe("Honeybees live in colonies of up to 60,000…")
+    expect(autoTitle("It costs 3.5 dollars a day to keep a hive alive, and here is why.")).toBe("It costs 3.5 dollars a day to keep a hive alive")
+  })
+  it("splits sentences only before whitespace, so numbers and links stay whole (studio_doc.split_sentences)", () => {
+    expect(splitSentences("It costs 3.5 dollars a day. The hive holds 60,000 bees."))
+      .toEqual(["It costs 3.5 dollars a day.", "The hive holds 60,000 bees."])
+    expect(splitSentences("Wait... what? I paid $9.99, not $10. Go to example.com now!"))
+      .toEqual(["Wait...", "what?", "I paid $9.99, not $10.", "Go to example.com now!"])
+    expect(splitSentences("你好。世界！好吗？ OK.")).toEqual(["你好。", "世界！", "好吗？", "OK."])
   })
 
   it("cuts a long line at a word, exactly like studio_doc.clip_title", () => {

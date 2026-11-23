@@ -131,9 +131,20 @@ export function autoTitle(line) {
   let text = squash(line)
   const first = splitSentences(text)[0] || text
   if (first.length <= HOOK_AUTO_MAX) return first.length > 1 && /[.。]$/.test(first) ? first.slice(0, -1) : first
-  const m = /[,;:!?.。！？，；：—]/.exec(text)
-  if (m && m.index >= 12) text = "!?！？".includes(text[m.index]) ? text.slice(0, m.index + 1) : text.slice(0, m.index)
+  const i = clauseEnd(text)
+  if (i !== null && i >= 12) text = "!?！？".includes(text[i]) ? text.slice(0, i + 1) : text.slice(0, i)
   return clipTitle(text, HOOK_AUTO_MAX)
+}
+// studio_doc._clause_end: a "," or "." between two digits is part of a number (60,000 · 3.5), not a
+// clause end. No regex lookbehind here: an older Safari can't parse one, and this module loads everywhere.
+function clauseEnd(text) {
+  const re = /[,;:!?.。！？，；：—]/g
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const i = m.index
+    if ((text[i] === "," || text[i] === ".") && i > 0 && i < text.length - 1 && /\d/.test(text[i - 1]) && /\d/.test(text[i + 1])) continue
+    return i
+  }
+  return null
 }
 // studio_doc.hook_is_auto: the title is the first line's own words, so the
 // captions under it wait until it has gone (no text said twice on screen).
@@ -272,7 +283,9 @@ export const SCENE_MAX = 40   // studio_doc.SCENE_MAX
 const normalise = (x) => String(x || "").replace(/\s+/g, " ").trim()
 
 export function splitSentences(script) {
-  return normalise(script).split(/(?<=[.!?。！？])\s*/).map((s) => s.trim()).filter(Boolean)
+  // studio_doc._SENTENCE_SPLIT: "." ends a sentence only before whitespace ($9.99, 3.5, example.com and
+  // "..." stay whole); ! ? and the CJK full stops end one with or without it.
+  return normalise(script).split(/(?<=[.!?])\s+|(?<=[!?。！？])(?![.!?。！？])\s*/).map((s) => s.trim()).filter(Boolean)
 }
 
 function splitLong(sentence) {

@@ -66,7 +66,11 @@ VISUAL_STYLES = ("cinematic", "vlog", "card", "educational", "documentary", "noi
 
 _UID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _TAKE_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?。！？])\s*")
+# A "." ends a sentence only when WHITESPACE follows it; ! ? and the CJK full stops end one with or without,
+# but always after the LAST mark of a run ("?!", "!!!", "...").
+# Splitting at every "." cut "$9.99" into "$9." / "99", "3.5" into "3." / "5", "example.com" into two
+# and "..." into three, and each part was voiced as its own scene. Mirrored by splitSentences in studioModel.js.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|(?<=[!?。！？])(?![.!?。！？])\s*")
 
 
 # ── small, total helpers ────────────────────────────────────────────────────
@@ -255,10 +259,22 @@ def auto_title(line: str) -> str:
     first = split_sentences(line)[0] if line else line
     if len(first) <= HOOK_AUTO_MAX:
         return first[:-1] if first[-1:] in ".。" and len(first) > 1 else first
-    m = _CLAUSE_END.search(line)
-    if m and m.start() >= 12:
-        line = line[:m.start()] if line[m.start()] not in "!?！？" else line[:m.start() + 1]
+    m = _clause_end(line)
+    if m is not None and m >= 12:
+        line = line[:m] if line[m] not in "!?！？" else line[:m + 1]
     return clip_title(line, HOOK_AUTO_MAX)
+
+
+def _clause_end(line: str) -> int | None:
+    """Where the opening clause ends. A "," or "." with a digit on both sides is part of a number
+    (60,000 · 3.5), never a clause end: the title used to read "…colonies of up to 60".
+    Mirrored by studioModel.js `clauseEnd`, which can't use a lookbehind (older Safari)."""
+    for m in _CLAUSE_END.finditer(line):
+        i = m.start()
+        if line[i] in ",." and 0 < i < len(line) - 1 and line[i - 1].isdigit() and line[i + 1].isdigit():
+            continue
+        return i
+    return None
 
 
 def hook_is_auto(doc: dict) -> bool:
