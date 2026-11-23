@@ -315,6 +315,20 @@ async def frame_cover(clean: Path, title: str | None, style: str, aspect: str, a
 
 # ── the render ──────────────────────────────────────────────────────────────
 
+OWN_AUDIO_MISSING = ("Scene {n}'s audio is no longer on this computer, so it can't be rendered — "
+                     "start a new video from your recording.")
+
+
+def own_take(scene: dict, number: int):
+    """The user's own audio for a scene ("My audio"): installed under its key, NEVER
+    synthesised. A missing one fails the render; a silent voice swap is never an option."""
+    from backend.services import voice_take_service as vts
+    take = vts.recorded_take((scene.get("voice") or {}).get("take_key"))
+    if take is None:
+        raise StudioError(OWN_AUDIO_MISSING.format(n=number))
+    return take
+
+
 async def render(job_id: str, project_id: str, user_id: str = "local") -> RenderDone:
     from backend.agents.job_helper import job_cancelled, update_job_status
     from backend.core.ws_manager import ws_manager
@@ -408,6 +422,9 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
         take_slots = asyncio.Semaphore(vts.VOICE_CONCURRENCY)
 
         async def resolve_take(number: int, scene: dict) -> None:
+            if sd.is_own_audio(scene):
+                takes[scene["uid"]] = own_take(scene, number)
+                return
             # A ready scene renders with the take it already has — the one the
             # user listened to.
             take = vts.recorded_take(scene["voice"].get("take_key")) if scene["voice"]["state"] == "ready" else None
@@ -612,6 +629,11 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
                 # timings are the scene's. (Comparing meta.text to the raw line
                 # dropped every scene a pronunciation rule touched.)
                 words = meta.get("words")
+                own = scene["voice"].get("words") if sd.is_own_audio(scene) else None
+                if own:
+                    # The user's own audio: the scene's words are the ones it shows — what Whisper
+                    # heard, or the user's edit of them spread over the same audio (studio_ops).
+                    words = [{"word": w[0], "start": w[1], "end": w[2]} for w in own]
                 segment = {"start": starts[i], "end": starts[i] + take.duration, "text": scene["line"]}
                 if words:
                     segment["words"] = [{"word": w["word"], "start": starts[i] + w["start"], "end": starts[i] + w["end"]}

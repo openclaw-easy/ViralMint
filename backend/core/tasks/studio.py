@@ -218,7 +218,8 @@ async def _start_first_draft_voices(project_id: str, doc: dict, user_id: str) ->
             "studio_plan", "Your voice uses your own API key, so the first draft isn't voiced automatically — "
                            "use Voice all to record it.", user_id=user_id)
         return None
-    uids = [s["uid"] for s in doc["scenes"] if s["line"] and s["voice"]["state"] in ("none", "stale", "failed")]
+    uids = [s["uid"] for s in doc["scenes"] if s["line"] and s["voice"]["state"] in ("none", "stale", "failed")
+            and s["voice"].get("provider") != "own_audio"]       # the user's own audio is never voiced
     if not uids:
         return None
     await store.write_ops(project_id, [
@@ -405,3 +406,177 @@ async def _release_unstarted_voice(job_id: str, project_id: str, uids: list[str]
 
 
 on_unstarted("run_studio_voice")(_release_unstarted_voice)
+
+
+# ── My audio: listening to the user's recording ─────────────────────────────
+
+AUDIO_PLAN_FAILED = "Your scenes are ready, but finding footage for them didn't finish — use Re-plan visuals."
+AUDIO_WATCH_S = 1.0          # how often a listening job looks for a cancel and reports its progress
+
+
+async def _audio_progress(job_id: str, user_id: str, pct: float, step: str) -> None:
+    from backend.agents.job_helper import update_job_status
+    from backend.core.ws_manager import ws_manager
+    await update_job_status(job_id, "running", progress_pct=pct, current_step=step)
+    try:
+        await ws_manager.send_progress(job_id, pct, step, user_id)
+    except Exception:  # noqa: BLE001 — the row has it; the editor reads the row
+        logger.debug("studio_audio progress emit failed", exc_info=True)
+
+
+async def _tell_editor(project_id: str, user_id: str, revision: int | None = None) -> None:
+    """`studio_project_updated` with no revision = "read it again": the listening ended without a
+    write (failed, cancelled), and the open editor must stop saying "Listening…"."""
+    from backend.core.ws_manager import ws_manager
+    try:
+        await ws_manager.send({"type": "studio_project_updated", "project_id": project_id,
+                               **({"revision": revision} if revision is not None else {})}, user_id=user_id)
+    except Exception:  # noqa: BLE001 — the editor's poll is the net under this
+        logger.debug("studio_project_updated emit failed", exc_info=True)
+
+
+async def _no_download_toast(_model: str, _size: str) -> None:
+    """The job's own step names the first-run model download."""
+
+
+async def _listen_and_land(job_id: str, project_id: str, user_id: str):
+    """Listen to the project's own copy of the recording, cut it at its sentences, store each cut as
+    the scene's take and land the scenes in ONE write. `(lines, landed row | None)`, or None when
+    the job was cancelled meanwhile (already stamped). Raises what the listening raises —
+    AudioRefused, WhisperModelUnavailableError, StudioNotFoundError — for the runner to word."""
+    import asyncio
+
+    from backend.agents.job_helper import job_cancelled
+    from backend.services import studio_audio
+    from backend.services import studio_store as store
+    from backend.services.own_audio import AudioRefused
+    from backend.services.whisper_service import whisper_service
+
+    loop = asyncio.get_running_loop()
+    latest: dict = {"pct": 2.0, "step": "Opening your audio"}
+    downloading = {"on": False}
+
+    async def on_step(text: str) -> None:
+        latest.update({"pct": {"Opening your audio": 2.0, "Listening": 10.0}.get(text, 82.0), "step": text})
+
+    def on_fraction(fraction: float) -> None:                    # the Whisper thread
+        loop.call_soon_threadsafe(latest.update, {"pct": round(10 + 70 * max(0.0, min(1.0, fraction)), 1),
+                                                  "step": "Listening"})
+
+    async def work():
+        row = await store.get_project(project_id, user_id)
+        doc = json.loads(row.doc_json)
+        src = studio_audio.source_file(project_id)
+        if src is None:
+            raise AudioRefused("source_gone", studio_audio.SOURCE_GONE)
+        # Before the listening's own limit: that is for decoding, and a first-run model fetch on a
+        # slow line would run it out and read as "took too long".
+        downloading["on"] = not whisper_service.is_model_cached(studio_audio.QUALITY)
+        await whisper_service.ensure_model(studio_audio.QUALITY, on_download=_no_download_toast, user_id=user_id)
+        downloading["on"] = False
+        return await studio_audio.listen(src, doc["input"]["audio"]["audio_id"], on_step=on_step,
+                                         on_fraction=on_fraction, should_stop=lambda: job_cancelled(job_id),
+                                         user_id=user_id)
+
+    await _audio_progress(job_id, user_id, latest["pct"], latest["step"])
+    said = dict(latest)
+    task = asyncio.create_task(work())
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=AUDIO_WATCH_S)
+            if task.done():
+                break
+            if await job_cancelled(job_id):
+                # The job stops now; a Whisper decode nobody waits for stops at its next segment.
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                await _stamp_cancelled(job_id)
+                logger.info("TASK CANCELLED studio_audio | job=%s", job_id[:8])
+                return None
+            now = ({"pct": 2.0, "step": "Getting the speech model ready (first run only)"}
+                   if downloading["on"] else dict(latest))
+            if now != said:
+                await _audio_progress(job_id, user_id, now["pct"], now["step"])
+                said = now
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+    lines, language = task.result()
+    if await job_cancelled(job_id):                           # finished in the same breath as the cancel
+        await _stamp_cancelled(job_id)
+        return None
+    await _audio_progress(job_id, user_id, 90, "Saving your scenes")
+    row = await studio_audio.land(project_id, lines, language, user_id)
+    if row is not None:
+        await _tell_editor(project_id, user_id, row.revision)
+    return lines, row
+
+
+async def run_studio_audio(job_id: str, project_id: str, user_id: str = "local") -> None:
+    """My audio: listen to the project's own copy of the recording, cut it at its sentences, store each
+    cut as the scene's take, land the scenes in ONE write, then plan their visuals like any new
+    project. The project is never left "listening": that state IS this job's row
+    (studio_audio.envelope_fields), so every end below — and a crash — releases it."""
+    from backend.agents.job_helper import job_cancelled, update_job_status
+    from backend.core.exceptions import WhisperModelUnavailableError
+    from backend.services import studio_audio
+    from backend.services.own_audio import AudioRefused
+
+    logger.info("TASK START studio_audio | job=%s project=%s", job_id[:8], project_id[:8])
+
+    async def fail(message: str, code: str | None = None) -> None:
+        output = {"project_id": project_id, **({"refused": code} if code else {})}
+        # A cancel and a failure can both be true: the backstop in update_job_status keeps
+        # `cancelled` and records the reason; no job_failed for something the user already stopped.
+        if await job_cancelled(job_id):
+            await update_job_status(job_id, "failed", error_message=message, output_data=output)
+            return
+        await _end_job(job_id, "studio_audio", "failed", user_id, error=message, output=output)
+
+    try:
+        heard = await _listen_and_land(job_id, project_id, user_id)
+        if heard is None:
+            return
+        lines, row = heard
+        # The scenes exist from here on: whatever the footage search does, the listening succeeded.
+        planned, note = None, None
+        try:
+            await _audio_progress(job_id, user_id, 92, "Finding footage")
+            planned = await plan_into_project(project_id, user_id)
+        except StudioNotFoundError:
+            raise
+        except Exception:  # noqa: BLE001 — a failed plan leaves placeholders; Re-plan is one click
+            logger.warning("studio_audio: planning after the landing failed | job=%s", job_id[:8], exc_info=True)
+            note = AUDIO_PLAN_FAILED
+            from backend.core.ws_manager import ws_manager
+            await ws_manager.send_constraint_warning("studio_plan", note, user_id=user_id)
+        await _end_job(job_id, "studio_audio", "success", user_id, step="Scenes ready", output={
+            "project_id": project_id, "scenes": len(lines), "landed": row is not None,
+            "planned": (planned or {}).get("planned", 0), **({"warning": note} if note else {})})
+        logger.info("TASK DONE studio_audio | job=%s scenes=%d", job_id[:8], len(lines))
+    except StudioNotFoundError:
+        logger.info("TASK CANCELLED studio_audio | job=%s — project deleted", job_id[:8])
+        await _end_job(job_id, "studio_audio", "cancelled", user_id, step="Project deleted")
+    except JobCancelledError:
+        logger.info("TASK CANCELLED studio_audio | job=%s", job_id[:8])
+        await _stamp_cancelled(job_id)
+    except AudioRefused as e:
+        logger.info("TASK REFUSED studio_audio | job=%s code=%s", job_id[:8], e.code)
+        await fail(str(e), e.code)
+    except WhisperModelUnavailableError as e:
+        await fail(str(e))
+    except Exception as e:  # noqa: BLE001 — a runner reports, never raises; never a path or a trace on screen
+        logger.exception("TASK FAILED studio_audio | job=%s", job_id[:8])
+        await fail(studio_audio.TOOK_TOO_LONG if str(e) == studio_audio.TOOK_TOO_LONG else studio_audio.LISTEN_FAILED)
+    finally:
+        await _tell_editor(project_id, user_id)
+
+
+async def _release_unstarted_audio(job_id: str, project_id: str, user_id: str = "local", **_kw) -> None:
+    """Dropped while it queued: nothing was claimed (the job row is the listening state and it is
+    already terminal), so the end is stamped and the open editor is told to read the project again."""
+    await _stamp_if_cancelled(job_id)
+    await _tell_editor(project_id, user_id)
+
+
+on_unstarted("run_studio_audio")(_release_unstarted_audio)

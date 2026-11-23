@@ -154,11 +154,19 @@ def _set_line(doc, op, ctx, st, created, changes):
     if line == scene["line"]:
         return
     scene["line"] = line
+    if sd.is_own_audio(scene):
+        # The user's own audio: the take and its length stay; only the captions follow the words.
+        words = sd.respread_words(scene["voice"].get("words") or [], line, scene["voice"].get("duration"))
+        scene["voice"] = {k: v for k, v in scene["voice"].items() if k != "words"} | ({"words": words} if words else {})
+        changes.append({"op": "set_line", "uid": scene["uid"]})
+        return
     _stale_voice(scene)
     changes.append({"op": "set_line", "uid": scene["uid"]})
 
 
 def _insert_scene(doc, op, ctx, st, created, changes):
+    if sd.is_audio_mode(doc):
+        raise StudioOpError(sd.AUDIO_NO_INSERT)
     scenes = doc["scenes"]
     after = op.get("after_uid")
     at = _index(doc, after, "insert_scene") + 1 if after else len(scenes)
@@ -203,6 +211,8 @@ def _join_all(parts: list[str]) -> str:
 
 def _split_scene(doc, op, ctx, st, created, changes):
     i = _index(doc, op.get("uid"), "split_scene")
+    if sd.is_audio_mode(doc):
+        raise StudioOpError(sd.AUDIO_NO_SPLIT)
     scenes = doc["scenes"]
     _cap(scenes)
     scene = scenes[i]
@@ -246,6 +256,8 @@ def _split_scene(doc, op, ctx, st, created, changes):
 
 def _merge_scenes(doc, op, ctx, st, created, changes):
     i = _index(doc, op.get("uid"), "merge_scenes")
+    if sd.is_audio_mode(doc):
+        raise StudioOpError(sd.AUDIO_NO_SPLIT)
     scenes = doc["scenes"]
     if i >= len(scenes) - 1:
         raise StudioOpError("There is no next scene to merge with.")
@@ -330,6 +342,8 @@ def _set_setting(doc, op, ctx, st, created, changes):
         raise StudioOpError(f"set_setting: {path} is not editable.")
     settings = doc["settings"]
     if path == "voice":
+        if sd.is_audio_mode(doc):
+            raise StudioOpError(sd.AUDIO_NO_VOICE)
         if not isinstance(value, dict) or value.get("provider") not in sd.TTS_PROVIDERS:
             raise StudioOpError("set_setting voice: choose a supported voice.")
         before = sd.voice_identity(settings)
@@ -463,8 +477,8 @@ def _voice_result(doc, op, ctx, st, created, changes):
     it is dropped here (the take stays in the cache for the next time)."""
     uid, voice = op.get("uid"), op.get("voice")
     scene = next((s for s in doc["scenes"] if s["uid"] == uid), None)
-    if scene is None or not isinstance(voice, dict):
-        return
+    if scene is None or not isinstance(voice, dict) or sd.is_own_audio(scene):
+        return                                   # a cut of the user's own audio is never re-voiced
     expect = op.get("expect")
     if expect is not None:
         # The take belongs to a line in a voice; it lands only while the scene

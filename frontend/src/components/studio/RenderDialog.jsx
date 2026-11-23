@@ -5,6 +5,7 @@ import {
 } from "@mui/material"
 import MovieCreationOutlinedIcon from "@mui/icons-material/MovieCreationOutlined"
 import { musicLabel, voiceKindLabel } from "./studioModel"
+import { AUDIO_VOICE_LABEL, isAudioMode } from "./audioMode"
 import { captionStyleLabel } from "../tools/captionOptions"
 import { formatClock } from "../../utils/format"
 
@@ -22,7 +23,8 @@ export default function RenderDialog({ open, onClose, onConfirm, rendering, proj
       group: "Video",
       items: [
         ["Length", `${formatClock(timeline.total)} · ${timeline.scenes.length} scenes · ${project.doc.aspect_ratio}`],
-        ["Voice", `${s.voice?.label || s.voice?.voice || "—"} · ${voiceKindLabel(s.voice?.provider)}`],
+        // A "My audio" project speaks the user's recording: no voice is used.
+        ["Voice", isAudioMode(project.doc) ? AUDIO_VOICE_LABEL : `${s.voice?.label || s.voice?.voice || "—"} · ${voiceKindLabel(s.voice?.provider)}`],
         ["Music", musicLabel(s.music)],
         ["Captions", s.captions?.enabled ? captionStyleLabel(s.captions.style) : "Off"],
       ],

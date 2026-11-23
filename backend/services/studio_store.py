@@ -149,11 +149,13 @@ async def envelope(row: VideoProject) -> dict:
     from backend.services.studio_checks import checks_for
     doc = _doc(row)
     assets = assets_of(row)
+    audio = await _audio_fields(row.id, doc)
     return {"project": {
         **summary(row),
         "revision": row.revision,
         "doc": doc,
-        "derived": sd.derive_timeline(doc),
+        "derived": {**sd.derive_timeline(doc), **({"audio_listening": audio["audio_listening"]} if audio else {})},
+        **({"audio_job_id": audio["audio_job_id"], "audio_failed": audio["audio_failed"]} if audio else {}),
         # What blocks a render and what's worth knowing first — the editor's
         # Render dialog and the render endpoint read the same function.
         "checks": checks_for(doc),
@@ -168,6 +170,14 @@ async def envelope(row: VideoProject) -> dict:
     }}
 
 
+async def _audio_fields(project_id: str, doc: dict) -> dict:
+    """A "My audio" project's listening state (studio_audio.envelope_fields); nothing for any other."""
+    if not sd.is_audio_mode(doc):
+        return {}
+    from backend.services import studio_audio
+    return await studio_audio.envelope_fields(project_id, doc)
+
+
 def _plan_job_id(project_id: str) -> str | None:
     from backend.core.tasks.studio import PLANS_IN_FLIGHT
     job = PLANS_IN_FLIGHT.get(project_id)
@@ -179,6 +189,60 @@ async def create_project(*, script: str, title: str | None = None, aspect_ratio:
                          settings_overrides: dict | None = None,
                          user_id: str = "local") -> VideoProject:
     lines = sd.lines_for_new_project(script)              # StudioDocError → 400
+    settings_doc = new_settings(visual_style, settings_overrides)
+    voice_note = match_voice_to_script(settings_doc, script)
+    if voice_note:
+        try:
+            from backend.core.ws_manager import ws_manager
+            await ws_manager.send_constraint_warning("voice_language_matched", voice_note,
+                                                     severity="info", user_id=user_id)
+        except Exception:  # noqa: BLE001 — a notice must never fail a project
+            logger.debug("voice_language_matched notice failed", exc_info=True)
+    doc = sd.validate_doc({
+        "aspect_ratio": aspect_ratio,
+        "input": {"mode": "script", **(input_meta or {})},
+        "settings": settings_doc,
+        "scenes": [sd.make_scene(line, query=sd.query_from_line(line)) for line in lines],
+    }, settle=False)
+    return await _insert(doc, (sd.normalise_line(title)[:120] if title else "") or lines[0][:60], user_id)
+
+
+async def create_audio_project(*, audio: dict, title: str, aspect_ratio: str = "9:16",
+                               visual_style: str = "cinematic", settings_overrides: dict | None = None,
+                               user_id: str = "local") -> VideoProject:
+    """An empty "My audio" project: no scenes until its listening job lands them."""
+    doc = sd.validate_doc({
+        "aspect_ratio": aspect_ratio,
+        "input": {"mode": "audio", "title": title, "audio": audio},
+        "settings": new_settings(visual_style, settings_overrides),
+        "scenes": [],
+    }, settle=False)
+    return await _insert(doc, sd.normalise_line(title)[:120] or "Your audio", user_id)
+
+
+async def _insert(doc: dict, title: str, user_id: str) -> VideoProject:
+    row = VideoProject(
+        user_id=user_id,
+        title=title,
+        status="draft",
+        aspect_ratio=doc["aspect_ratio"],
+        doc_json=json.dumps(doc, ensure_ascii=False),
+        assets_json=json.dumps({"imports": {}}),
+        revision=1,
+        duration_seconds=sd.derive_timeline(doc)["total"],
+        scene_count=len(doc["scenes"]),
+        visual_style=doc["settings"]["visual_style"],
+    )
+    async with AsyncSessionLocal() as db:
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+    return row
+
+
+def new_settings(visual_style: str, settings_overrides: dict | None) -> dict:
+    """A new project's settings: the defaults plus the preferences a user (or
+    the /generate/stock adapter) carries in."""
     settings_doc = sd.default_settings(visual_style=visual_style if visual_style in sd.VISUAL_STYLES else "cinematic")
     # The preferences a user (or the legacy /generate/stock adapter) carries
     # into a new project; validate_doc normalises them (an unknown voice
@@ -209,37 +273,7 @@ async def create_project(*, script: str, title: str | None = None, aspect_ratio:
         settings_doc["transition"] = settings_overrides["transition"]
     if isinstance((settings_overrides or {}).get("post"), dict):
         settings_doc["post"] = sd.normalise_post({**settings_doc["post"], **settings_overrides["post"]})
-    voice_note = match_voice_to_script(settings_doc, script)
-    if voice_note:
-        try:
-            from backend.core.ws_manager import ws_manager
-            await ws_manager.send_constraint_warning("voice_language_matched", voice_note,
-                                                     severity="info", user_id=user_id)
-        except Exception:  # noqa: BLE001 — a notice must never fail a project
-            logger.debug("voice_language_matched notice failed", exc_info=True)
-    doc = sd.validate_doc({
-        "aspect_ratio": aspect_ratio,
-        "input": {"mode": "script", **(input_meta or {})},
-        "settings": settings_doc,
-        "scenes": [sd.make_scene(line, query=sd.query_from_line(line)) for line in lines],
-    }, settle=False)
-    row = VideoProject(
-        user_id=user_id,
-        title=(sd.normalise_line(title)[:120] if title else "") or lines[0][:60],
-        status="draft",
-        aspect_ratio=doc["aspect_ratio"],
-        doc_json=json.dumps(doc, ensure_ascii=False),
-        assets_json=json.dumps({"imports": {}}),
-        revision=1,
-        duration_seconds=sd.derive_timeline(doc)["total"],
-        scene_count=len(doc["scenes"]),
-        visual_style=doc["settings"]["visual_style"],
-    )
-    async with AsyncSessionLocal() as db:
-        db.add(row)
-        await db.commit()
-        await db.refresh(row)
-    return row
+    return settings_doc
 
 
 async def get_project(project_id: str, user_id: str = "local") -> VideoProject:

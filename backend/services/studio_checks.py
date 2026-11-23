@@ -41,15 +41,27 @@ def effective_voice_state(scene: dict, take_known: Callable[[str], bool]) -> str
 
 def needs_voice(scene: dict, take_known: Callable[[str], bool]) -> bool:
     """Voice all / Voice this scene records it: has a line, and is unvoiced,
-    stale, failed, or ready with its take lost."""
+    stale, failed, or ready with its take lost. Never a cut of the user's own
+    audio: that is the recording, not a voice to record."""
+    if (scene.get("voice") or {}).get("provider") == "own_audio":
+        return False
     return bool(scene.get("line")) and effective_voice_state(scene, take_known) in ("none", "stale", "failed")
 
 
 def compute_checks(doc: dict, take_known: Callable[[str], bool]) -> dict:
     scenes = doc["scenes"]
-    spoken = [s for s in scenes if s["line"]]
+    own = [s for s in scenes if (s.get("voice") or {}).get("provider") == "own_audio"]
+    spoken = [s for s in scenes if s["line"] and s not in own]
     blockers: list[str] = []
     warnings: list[str] = []
+
+    if not scenes:
+        blockers.append("This video has no scenes yet")
+    lost = [s for s in own if recorded_lost(s, take_known)]
+    if lost:
+        # Never voiced instead: a video made from your audio speaks only in your audio.
+        blockers.append(f"Scene {_scene_list(lost, doc)}'s audio {_plural(len(lost), 'is', 'are')} no longer "
+                        "on this computer — start a new video from your recording")
 
     empty = [s for s in scenes if not s["line"]]
     if empty:

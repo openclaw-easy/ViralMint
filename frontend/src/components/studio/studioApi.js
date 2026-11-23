@@ -67,6 +67,25 @@ export async function createProject({ start = {}, aspect_ratio = "9:16", visual_
   return { ...envelope(res), planJobId: res.data.plan_job_id || null }
 }
 
+// "My audio": the user's recording becomes a project whose scenes speak in it. The file is copied
+// and probed inside this request (never transcribed here): seconds, not the default timeout's worth.
+export async function createFromAudio({ file, title = null, aspect_ratio = "9:16", visual_style = "cinematic", settings = null } = {}) {
+  const form = new FormData()
+  form.append("file", file)
+  if (title) form.append("title", title)
+  form.append("aspect_ratio", aspect_ratio)
+  form.append("visual_style", visual_style)
+  if (settings) form.append("settings", JSON.stringify(settings))
+  const res = await http.post("/api/studio/projects/from-audio", form, { timeout: 180000 }).catch(fail)
+  return { ...envelope(res), jobId: res.data.job_id || null }
+}
+
+// Listen again to the recording an audio project already holds (after a failed or stopped listening).
+export async function listenAgain(id) {
+  const res = await http.post(`/api/studio/projects/${id}/listen`).catch(fail)
+  return { ...envelope(res), jobId: res.data.job_id || null }
+}
+
 export async function getProject(id) {
   return envelope(await http.get(`/api/studio/projects/${id}`).catch(fail))
 }

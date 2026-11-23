@@ -41,6 +41,7 @@ from backend.services.tts_service import TTSProvider, normalise_tts_provider
 logger = logging.getLogger(__name__)
 
 TAKE_VERSION = "take-v1"
+OWN_AUDIO_PROVIDER = "own_audio"        # = studio_doc.OWN_AUDIO (tests pin both)
 _KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -60,6 +61,13 @@ class VoiceSpec:
             raise VoiceGenerationError("That voice isn't supported — pick another.")
         return cls(provider=provider, voice=v.get("voice") or "",
                    model=v.get("model") or None, instructions=v.get("instructions") or None)
+
+    @classmethod
+    def own_audio(cls, audio_id: str, start: float, end: float) -> "VoiceSpec":
+        """A cut of the user's own recording ("My audio"): never synthesised. The cut's bounds are
+        part of its identity, so the same sentence said twice is two takes."""
+        return cls(provider=OWN_AUDIO_PROVIDER, voice=str(audio_id),
+                   instructions=f"{float(start):.3f}-{float(end):.3f}")
 
 
 @dataclass(frozen=True)
@@ -174,6 +182,9 @@ async def ensure_take(spec: VoiceSpec, line: str, *, synth: Synth | None = None)
     hit = _cached_take(key)
     if hit:
         return hit
+    if spec.provider == OWN_AUDIO_PROVIDER:
+        # A cut of the user's recording is installed by its listening job, never recorded here.
+        raise VoiceGenerationError("This scene's audio is no longer here. Start again from your recording.")
     lock = _locks.setdefault(key, asyncio.Lock())
     try:
         async with lock:

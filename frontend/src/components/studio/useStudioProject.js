@@ -85,7 +85,8 @@ export default function useStudioProject(projectId, { onError } = {}) {
   // A `rendering` claim whose job is gone (the backend died mid-render) is not
   // work in progress: the envelope says so with `render_alive` (absent on older
   // backends → trust the status).
-  const busy = !!project && (renderInProgress(project) || project.doc.scenes.some(
+  // "My audio": while the app listens the project has no scenes at all (`derived.audio_listening`).
+  const busy = !!project && (renderInProgress(project) || !!project.derived?.audio_listening || project.doc.scenes.some(
     (s) => s.voice?.state === "generating" || s.visual?.state === "generating"))
   // The poll asks "changed?" first (a few bytes) and fetches the whole project
   // only when the revision — or the render's liveness — moved.
@@ -95,7 +96,9 @@ export default function useStudioProject(projectId, { onError } = {}) {
     try {
       const res = await api.pollProject(cur.id, cur.revision)
       if (!res.unchanged) { setP(res); return }
-      if (res.status !== cur.status || (res.render_alive ?? null) !== (cur.render_alive ?? null)) await refresh()
+      // A listening that fails moves no revision: the cheap poll's `audio_alive` is what ends "Listening…".
+      if (res.status !== cur.status || (res.render_alive ?? null) !== (cur.render_alive ?? null)
+          || !!res.audio_alive !== !!cur.derived?.audio_listening) await refresh()
     } catch (e) {
       if (e.status === 404) setNotFound(true)
     }

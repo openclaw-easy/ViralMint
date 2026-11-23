@@ -8,6 +8,8 @@ import {
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome"
 import EditNoteIcon from "@mui/icons-material/EditNoteOutlined"
 import LightbulbOutlinedIcon from "@mui/icons-material/LightbulbOutlined"
+import GraphicEqIcon from "@mui/icons-material/GraphicEqOutlined"
+import AudioStart from "./AudioStart"
 import { PreviewCanvas, STYLES, StyleSwatch } from "../create/SmartVideoStyles"
 import SampleShowcase from "../SampleShowcase"
 import { SMART_VIDEO_SAMPLES } from "../../data/sampleShowcase"
@@ -41,6 +43,7 @@ const TOPIC_EXAMPLES = ["5 money habits", "Morning routine for focus", "Why cats
 const SOURCES = [
   { value: "script", label: "Write a script", icon: <EditNoteIcon fontSize="small" /> },
   { value: "topic", label: "Start from a topic", icon: <LightbulbOutlinedIcon fontSize="small" /> },
+  { value: "audio", label: "My audio", icon: <GraphicEqIcon fontSize="small" /> },
 ]
 
 // Studio Home's script desk. The script is the thing you work on here:
@@ -84,6 +87,7 @@ export default function StartPanel({ onCreate, busy = false, preferTopic = false
   const lines = useMemo(() => planLines(script), [script])
   const stats = narrationStats(script)
   const kept = lines.slice(0, SCENE_MAX)
+  const shown = source === "audio" ? [] : kept     // My audio: the scenes come from listening, not from the text box
   const overflow = Math.max(0, lines.length - SCENE_MAX)
   const totalSeconds = kept.reduce((a, l) => a + estimateSeconds(l) + 0.15, 0)
 
@@ -159,7 +163,9 @@ export default function StartPanel({ onCreate, busy = false, preferTopic = false
         <Box>
           <Typography variant="h6" sx={{ fontWeight: 800, lineHeight: 1.2 }}>New video</Typography>
           <Typography variant="body2" sx={{ color: "text.secondary" }}>
-            Write what the video says. Each sentence or two becomes a scene you can watch and change.
+            {source === "audio"
+              ? "Bring your own recording. Each sentence becomes a scene, spoken in your audio."
+              : "Write what the video says. Each sentence or two becomes a scene you can watch and change."}
           </Typography>
         </Box>
         <ToggleButtonGroup
@@ -205,7 +211,12 @@ export default function StartPanel({ onCreate, busy = false, preferTopic = false
             : <SampleShowcase samples={samples} onUse={loadSample} />}
         </Box>
 
-        {/* ── Writing column ─────────────────────────────── */}
+        {/* ── Writing column (or, in My audio, the recording drop) ── */}
+        {source === "audio" ? (
+          <Box sx={{ display: "flex", flexDirection: "column", minHeight: { xs: 320, md: 0 }, minWidth: 0 }}>
+            <AudioStart aspect={aspect} style={style} />
+          </Box>
+        ) : (
         <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0 }}>
           {source === "topic" && (
             <Box sx={{ px: 3, pt: 2.5, pb: 2, borderBottom: 1, borderColor: "divider" }}>
@@ -313,6 +324,7 @@ export default function StartPanel({ onCreate, busy = false, preferTopic = false
             </Tooltip>
           </Box>
         </Box>
+        )}
 
         {/* ── Scenes + look ──────────────────────────────── */}
         <Box sx={(t) => ({
@@ -325,18 +337,20 @@ export default function StartPanel({ onCreate, busy = false, preferTopic = false
         })}>
           <Stack direction="row" alignItems="baseline" justifyContent="space-between" sx={{ px: 2, pt: 2, pb: 1 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>Scenes</Typography>
-            {kept.length > 0 && (
+            {shown.length > 0 && (
               <Typography variant="caption" sx={{ color: "text.secondary" }}>
-                {kept.length} of up to {SCENE_MAX}
+                {shown.length} of up to {SCENE_MAX}
               </Typography>
             )}
           </Stack>
 
           <Box data-testid="scene-preview" sx={{ flex: 1, minHeight: { xs: 0, md: 0 }, maxHeight: { xs: 320, md: "none" }, overflowY: "auto", px: 1, pb: 1 }}>
-            {kept.length === 0 ? (
+            {shown.length === 0 ? (
               <Box sx={{ px: 1, py: 1, height: "100%", display: "flex", flexDirection: "column", gap: 1.5 }}>
                 <Typography variant="body2" sx={{ color: "text.secondary" }}>
-                  Scenes appear here as you write, so you can see how the video will be cut before you build it.
+                  {source === "audio"
+                    ? "Scenes appear in the editor once we've listened to your recording: one per sentence."
+                    : "Scenes appear here as you write, so you can see how the video will be cut before you build it."}
                 </Typography>
                 {/* Until there are scenes, the rail shows the LOOK instead of
                     nothing — one canvas, so picking a style below has a visible
@@ -353,10 +367,10 @@ export default function StartPanel({ onCreate, busy = false, preferTopic = false
                   </Box>
                 </Box>
               </Box>
-            ) : kept.map((line, i) => (
+            ) : shown.map((line, i) => (
               <ScenePreviewRow key={`${i}:${line.slice(0, 24)}`} index={i} line={line} aspect={aspect} look={look} />
             ))}
-            {overflow > 0 && (
+            {source !== "audio" && overflow > 0 && (
               <Typography variant="body2" sx={{ color: "warning.main", px: 1, py: 1 }}>
                 {overflow} more scene{overflow === 1 ? "" : "s"} won't fit in one video. Shorten the script or split it into two videos.
               </Typography>

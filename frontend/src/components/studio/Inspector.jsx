@@ -37,6 +37,7 @@ import useMusicLibrary from "../../hooks/useMusicLibrary"
 import useVoicePreview from "../../hooks/useVoicePreview"
 import useAppStore from "../../store/appStore"
 import { VoiceRow } from "../create/SmartVideoPanels"
+import { AUDIO_LINE_HINT, AUDIO_VOICE_LABEL, fmtSeconds, isAudioMode, isOwnAudio } from "./audioMode"
 import { STYLES, StyleSwatch } from "../create/SmartVideoStyles"
 import CaptionStylePicker from "../tools/CaptionStylePicker"
 import { captionStyleLabel } from "../tools/captionOptions"
@@ -84,6 +85,7 @@ export function SceneTab({
 
   const provider = settings.voice?.provider
   const voiceState = scene.voice?.state || "none"
+  const ownAudio = isOwnAudio(scene)              // "My audio": the take is a cut of the user's recording
   const hasLine = !!scene.line.trim()
   const short = isShortVisual(scene)
   const kindColor = (t) => (KIND_META[kind] || KIND_META.stock).color(t)
@@ -150,7 +152,8 @@ export function SceneTab({
           helperText={over
             ? `${trimmed.length}/${LINE_MAX} — split this scene first`
             : !trimmed ? (dirty ? "A scene needs a line — delete the scene instead" : "Write this scene's line — it isn't voiced or rendered until you do")
-              : dirty ? "⌘↵ or click away to apply — the voice will be re-recorded" : `${trimmed.length}/${LINE_MAX}`}
+              : dirty ? (ownAudio ? `⌘↵ or click away to apply — ${AUDIO_LINE_HINT.toLowerCase()}` : "⌘↵ or click away to apply — the voice will be re-recorded")
+                : `${trimmed.length}/${LINE_MAX}`}
           slotProps={{ input: { sx: { fontSize: "0.88rem", lineHeight: 1.5 } }, htmlInput: { "aria-label": "Scene line" } }}
         />
         <SceneAssist
@@ -172,19 +175,25 @@ export function SceneTab({
             sx={{ textTransform: "none", fontWeight: 600 }}>
             Play voice{scene.voice?.duration ? ` · ${scene.voice.duration.toFixed(1)}s` : ""}
           </Button>
-          {voiceState !== "ready" && voiceState !== "generating" && (
+          {!ownAudio && voiceState !== "ready" && voiceState !== "generating" && (
             <Button size="small" variant="outlined" disabled={!hasLine || rendering} onClick={() => onVoice([scene.uid])}
               sx={{ textTransform: "none", fontWeight: 700, whiteSpace: "nowrap" }}>
               {voiceState === "stale" ? "Re-voice" : "Voice this scene"}
             </Button>
           )}
         </Stack>
+        {ownAudio ? (
+          <Typography variant="caption" data-testid="own-audio-label" sx={{ color: "text.secondary", display: "block", mt: 0.75 }}>
+            {AUDIO_VOICE_LABEL} · {fmtSeconds(scene.voice?.duration)}. This scene is your own recording. {AUDIO_LINE_HINT}
+          </Typography>
+        ) : (
         <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mt: 0.75 }}>
           {settings.voice?.label || settings.voice?.voice} · {voiceKindLabel(provider)}.
           {voiceState === "stale" ? " The line or voice changed, so this take no longer matches it." : ""}
           {voiceState === "ready" ? " Edit the line or change the voice to re-record." : ""}
           {voiceState === "failed" ? ` Recording failed${scene.voice?.error ? ` — ${scene.voice.error}` : ""}.` : ""}
         </Typography>
+        )}
       </Section>
 
       <Section
@@ -328,9 +337,12 @@ export function SceneTab({
 
       <Section title="Arrange">
         <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0.75 }}>
+          {/* "My audio": a scene is a sentence of the recording — reorder or delete it, never split, merge or add. */}
+          {!ownAudio && (<>
           <Button size="small" variant="outlined" startIcon={<ContentCutIcon />} onClick={() => onSplit(scene.uid)} sx={{ textTransform: "none" }}>Split (S)</Button>
           <Button size="small" variant="outlined" startIcon={<CallMergeIcon />} disabled={isLast} onClick={() => onMerge(scene.uid)} sx={{ textTransform: "none" }}>Merge next (M)</Button>
           <Button size="small" variant="outlined" startIcon={<AddBoxOutlinedIcon />} onClick={() => onInsertAfter(scene.uid)} sx={{ textTransform: "none" }}>Insert after</Button>
+          </>)}
           <Button size="small" variant="outlined" color="error" startIcon={<DeleteOutlineIcon />} disabled={sceneCount <= 1} onClick={() => onRemove(scene.uid)} sx={{ textTransform: "none" }}>Delete (Del)</Button>
         </Box>
       </Section>
@@ -378,6 +390,17 @@ function Group({ title, summary, defaultExpanded = false, children }) {
       </AccordionSummary>
       <AccordionDetails sx={{ px: 2, pt: 0, pb: 2 }}>{children}</AccordionDetails>
     </Accordion>
+  )
+}
+
+function OwnAudioGroup({ audio }) {
+  return (
+    <Group title="Voice" summary={AUDIO_VOICE_LABEL} defaultExpanded>
+      <Typography variant="body2" data-testid="own-audio-group">
+        Every scene speaks in your audio{audio?.title ? `: “${audio.title}”` : ""}{audio?.duration ? ` · ${fmtSeconds(audio.duration)}` : ""}.
+      </Typography>
+      <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mt: 0.5 }}>{AUDIO_LINE_HINT} No voice is recorded.</Typography>
+    </Group>
   )
 }
 
@@ -568,7 +591,9 @@ function ProjectTab({
         </Stack>
       </Group>
 
-      <VoiceGroup settings={s} onApply={onApply} onVoiceAll={onVoiceAll} scenes={timeline.scenes} />
+      {isAudioMode(project.doc)
+        ? <OwnAudioGroup audio={project.doc.input?.audio} />
+        : <VoiceGroup settings={s} onApply={onApply} onVoiceAll={onVoiceAll} scenes={timeline.scenes} />}
 
       <Group title="Captions" summary={s.captions?.enabled ? captionStyleLabel(s.captions.style) : "off"}>
         <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>

@@ -64,7 +64,25 @@ INPUT_MODES = ("topic", "script", "audio", "template", "sample", "draft", "sourc
 # The Smart Video look presets (frontend components/create/SmartVideoStyles.jsx STYLES ids).
 VISUAL_STYLES = ("cinematic", "vlog", "card", "educational", "documentary", "noir", "neon", "vintage")
 
+# ── My audio: a project whose scenes speak in the user's own recording ──────
+# Each scene's take is a cut of the recording (own_audio.cut_lines), installed
+# in the take cache by studio_audio.listen; it is never re-recorded or voiced.
+OWN_AUDIO = "own_audio"
+AUDIO_MIN_S = 3.0
+AUDIO_SCENE_MAX_S = 120.0                 # one scene of the user's own audio
+AUDIO_MAX_S = 480.0                       # 8 minutes: what the scene cap can hold
+AUDIO_LENGTH_SLACK_S = 0.05               # a 3.00 s / 8:00 file probes a few ms off
+WORDS_MAX = 400
+WORD_CHARS_MAX = 60
+OWN_AUDIO_TRAITS = {"paid_per_take": False, "needs_key": False, "heavy": False, "synth": False}
+AUDIO_EVERY_SCENE = "In a video made from your audio, every scene speaks in your audio."
+AUDIO_NO_SPLIT = ("Your audio is cut at its sentences, so scenes can't be split or merged here. "
+                  "Edit the words, reorder or delete a scene instead.")
+AUDIO_NO_INSERT = "Every scene here is a sentence of your audio, so a new scene can't be added."
+AUDIO_NO_VOICE = "This video speaks in your own audio, so there's no voice to change."
+
 _UID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+_AUDIO_ID_RE = re.compile(r"^au_[0-9a-f]{16}$")      # studio_audio._file_id: the recording's own bytes
 _TAKE_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 # A "." ends a sentence only when WHITESPACE follows it; ! ? and the CJK full stops end one with or without,
 # but always after the LAST mark of a run ("?!", "!!!", "...").
@@ -440,6 +458,70 @@ def scene_seconds(scene: dict, tail_gap: float) -> tuple[float, bool]:
     return estimate_line_seconds(scene.get("line") or "") + tail_gap, True
 
 
+def is_own_audio(scene: dict) -> bool:
+    """A scene voiced by a cut of the user's own audio ("My audio")."""
+    return ((scene or {}).get("voice") or {}).get("provider") == OWN_AUDIO
+
+
+def is_audio_mode(doc: dict) -> bool:
+    return ((doc or {}).get("input") or {}).get("mode") == "audio"
+
+
+def is_audio_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(_AUDIO_ID_RE.match(value))
+
+
+def own_audio_scene(line: dict, audio_id: str) -> dict:
+    """The scene one cut of the user's audio lands as ({text, key, duration, words}): its take is
+    there already and is never re-recorded."""
+    scene = make_scene(line["text"], query=query_from_line(line["text"]))
+    scene["voice"] = {"state": "ready", "take_key": line["key"], "duration": line["duration"],
+                      "provider": OWN_AUDIO, "voice": audio_id, **({"words": line["words"]} if line.get("words") else {})}
+    return scene
+
+
+def clean_words(raw: Any, duration: Any = None) -> list[list] | None:
+    """A take's word timings `[[word, start, end], …]` (seconds into the take), shape-checked:
+    finite, in order, inside the take (+0.5 s). None when nothing usable is left."""
+    if not isinstance(raw, list):
+        return None
+    hi = float(duration) + 0.5 if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration > 0 else 36000.0
+    out: list[list] = []
+    prev = 0.0
+    for w in raw[:WORDS_MAX]:
+        if not (isinstance(w, (list, tuple)) and len(w) == 3 and isinstance(w[0], str) and w[0].strip()):
+            continue
+        s, e = w[1], w[2]
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in (s, e)):
+            continue
+        if s < 0 or e < s or e > hi or s < prev - 1e-6:
+            continue
+        out.append([w[0].strip()[:WORD_CHARS_MAX], round(float(s), 3), round(float(e), 3)])
+        prev = float(s)
+    return out or None
+
+
+def respread_words(words: Any, line: str, duration: Any = None) -> list[list]:
+    """A take's timings shared over NEW words (a line edit on own audio): the same span, each new
+    word given time by how long it takes to say (spoken_units). The audio never moves; only its
+    captions do. A line without spaces (CJK) is timed per character."""
+    clean = clean_words(words, duration) or []
+    t0, t1 = (clean[0][1], clean[-1][2]) if clean else (0.0, float(duration or 0))
+    text = normalise_line(line)
+    tokens = text.split() if re.search(r"\s", text) else [ch for ch in text if not ch.isspace()]
+    if not tokens or t1 <= t0:
+        return []
+    weights = [max(1.0, spoken_units(t)) for t in tokens]
+    total = sum(weights)
+    out, t = [], t0
+    for tok, w in zip(tokens, weights):
+        end = t + (t1 - t0) * w / total
+        out.append([tok[:WORD_CHARS_MAX], round(t, 3), round(end, 3)])
+        t = end
+    out[-1][2] = round(t1, 3)
+    return out[:WORDS_MAX]
+
+
 # A stock scene this long cuts to a second clip halfway through: one shot held
 # 5+ s reads as a slideshow, and the planner already found up to 5 alternates
 # per scene. The preview shows the same cut (studioModel.secondShots).
@@ -540,6 +622,13 @@ def _voice(raw: Any, line: str, *, take_known: Callable[[str], bool] | None, set
     if (state == "stale" and "take_key" in out and isinstance(take_voice, list) and len(take_voice) == 4
             and all(v is None or isinstance(v, str) for v in take_voice)):
         out["take_voice"] = take_voice
+    if raw.get("provider") == OWN_AUDIO and "take_key" in out and state == "ready":
+        out["provider"] = OWN_AUDIO
+        if is_audio_id(raw.get("voice")):
+            out["voice"] = raw["voice"]
+        words = clean_words(raw.get("words"), out.get("duration"))
+        if words:
+            out["words"] = words
     if state == "failed":
         out["error"] = _str(raw.get("error"), 300)
     return out
@@ -627,6 +716,23 @@ def _settings(raw: Any) -> dict:
     }
 
 
+def _audio(raw: Any) -> dict | None:
+    """The recording an audio project was made from. Unusable → None."""
+    if not isinstance(raw, dict) or not is_audio_id(raw.get("audio_id")):
+        return None
+    out: dict = {"audio_id": raw["audio_id"]}
+    title = _str(raw.get("title"), 120)
+    if title:
+        out["title"] = title
+    duration = _num(raw.get("duration"), 0, 36000, None)
+    if duration:
+        out["duration"] = round(duration, 3)
+    language = _str(raw.get("language"), 12)
+    if language:
+        out["language"] = language
+    return out
+
+
 def _input(raw: Any) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     return {
@@ -637,6 +743,7 @@ def _input(raw: Any) -> dict:
         "source_id": _str(raw.get("source_id"), 60),
         "audio_id": _str(raw.get("audio_id"), 60),
         "template_id": _str(raw.get("template_id"), 60),
+        **({"audio": audio} if raw.get("mode") == "audio" and (audio := _audio(raw.get("audio"))) else {}),
     }
 
 
@@ -659,7 +766,10 @@ def validate_doc(
     if not isinstance(raw, dict):
         raise StudioDocError("not a project document")
     scenes_raw = raw.get("scenes")
-    if not isinstance(scenes_raw, list) or not scenes_raw:
+    audio_mode = isinstance(raw.get("input"), dict) and raw["input"].get("mode") == "audio"
+    # An audio project has no scenes until its listening lands them; nothing else may be empty.
+    listening = audio_mode and _audio(raw["input"].get("audio")) is not None
+    if not isinstance(scenes_raw, list) or (not scenes_raw and not listening):
         raise StudioDocError("a project needs at least one scene")
     if len(scenes_raw) > SCENE_MAX:
         raise StudioDocError(f"a video can have at most {SCENE_MAX} scenes")
@@ -685,6 +795,9 @@ def validate_doc(
             "visual": _visual(scene.get("visual"), where=where),
             "mood": _str(scene.get("mood"), 20),
         })
+    if audio_mode and any(not is_own_audio(s) for s in scenes):
+        # Never a silent voice swap: a scene of an audio project that lost its own audio would be TTS'd.
+        raise StudioDocError(AUDIO_EVERY_SCENE)
     return {
         "v": DOC_VERSION,
         "aspect_ratio": raw.get("aspect_ratio") if raw.get("aspect_ratio") in ASPECTS else "9:16",
@@ -702,10 +815,11 @@ def enums() -> dict:
         "visual_states": list(VISUAL_STATES), "fits": list(FITS), "transitions": list(TRANSITIONS),
         "tts_providers": list(TTS_PROVIDERS),
         "music_sources": list(MUSIC_SOURCES), "visual_styles": list(VISUAL_STYLES),
-        "limits": {"line_max": LINE_MAX, "scene_max": SCENE_MAX, "tail_gap_max": TAIL_GAP_MAX},
+        "limits": {"line_max": LINE_MAX, "scene_max": SCENE_MAX, "tail_gap_max": TAIL_GAP_MAX,
+                   "audio_min_s": AUDIO_MIN_S, "audio_max_s": AUDIO_MAX_S},
         # Per provider: needs a key, spends that key per take (a first draft
         # never auto-voices with such a provider) — one answer every screen uses.
-        "voice_providers": provider_traits(),
+        "voice_providers": {**provider_traits(), OWN_AUDIO: dict(OWN_AUDIO_TRAITS)},
         "post_toggles": list(POST_TOGGLES), "caption_emoji_styles": list(CAPTION_EMOJI_STYLES),
     }
 

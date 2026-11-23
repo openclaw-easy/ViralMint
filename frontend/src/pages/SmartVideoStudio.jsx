@@ -25,6 +25,8 @@ import {
 } from "../components/studio/studioModel"
 import { createPlayhead, usePlayhead } from "../components/studio/playheadStore"
 import { controlOf } from "../components/studio/editorKeys"
+import AudioListening from "../components/studio/AudioListening"
+import { AUDIO_NO_INSERT, AUDIO_NO_SPLIT, isAudioMode } from "../components/studio/audioMode"
 import { projectSettingsFrom } from "../utils/studioHandoff"
 import useAppStore from "../store/appStore"
 import useDocumentTitle from "../hooks/useDocumentTitle"
@@ -60,10 +62,16 @@ function StudioEditor({ projectId }) {
   // The server's derived timing for this document (one estimate, D10).
   const timeline = useMemo(() => withTimeline(project?.doc, project?.derived), [project?.doc, project?.derived])
   // The critic runs once; the Project panel shows all notes, the Scene panel its own.
-  const findings = useMemo(() => critique(timeline), [timeline])
+  // In a "My audio" project a scene can't be split (its take is a cut of the recording), so the
+  // critic's "split this scene" fix isn't offered there.
+  const audioMode = isAudioMode(project?.doc)
+  const audioModeRef = useRef(false); audioModeRef.current = audioMode
+  const findings = useMemo(() => critique(timeline).filter((f) => !(audioMode && f.fix?.kind === "split")),
+    [timeline, audioMode])
   const projectRef = useRef(project); projectRef.current = project
   const scenes = timeline.scenes
   const [selectedUid, setSelectedUid] = useState(null)
+  const [listenRetrying, setListenRetrying] = useState(false)
   const selected = scenes.find((s) => s.uid === selectedUid) || null
   // The playhead lives in a store, not in this page's state: playback moves
   // it ~30×/s and only the parts that draw it subscribe (playheadStore.js).
@@ -163,33 +171,40 @@ function StudioEditor({ projectId }) {
 
   const commitLine = useCallback(async (uid, line) => {
     const res = await apply([{ op: "set_line", uid, line }])
-    if (res && autoVoiceRef.current) voiceScenes([uid])
+    // "My audio": the take is the user's recording; an edit changes only the captions.
+    if (res && autoVoiceRef.current && !audioModeRef.current) voiceScenes([uid])
   }, [apply, voiceScenes])
 
   const splitScene = useCallback(async (uid) => {
+    if (audioModeRef.current) { showSnackbar(AUDIO_NO_SPLIT, "info"); return null }
     const res = await apply([{ op: "split_scene", uid }])
     if (res && autoVoiceRef.current) voiceScenes([uid, ...(res.created || [])])
-  }, [apply, voiceScenes])
+    return res
+  }, [apply, voiceScenes, showSnackbar])
 
   const mergeScene = useCallback(async (uid) => {
+    if (audioModeRef.current) { showSnackbar(AUDIO_NO_SPLIT, "info"); return null }
     const list = timelineRef.current.scenes
     const next = list[list.findIndex((s) => s.uid === uid) + 1]
-    if (!next) return
+    if (!next) return null
     const res = await apply([{ op: "merge_scenes", uid, next_uid: next.uid }])
     if (res && autoVoiceRef.current) voiceScenes([uid])
-  }, [apply, voiceScenes])
+    return res
+  }, [apply, voiceScenes, showSnackbar])
 
   const insertAfter = useCallback(async (uid) => {
+    if (audioModeRef.current) { showSnackbar(AUDIO_NO_INSERT, "info"); return }
     // Starts with no line: it isn't voiced or rendered until written.
     const res = await apply([{ op: "insert_scene", after_uid: uid, line: "" }])
     if (res?.created?.[0]) setSelectedUid(res.created[0])
-  }, [apply])
+  }, [apply, showSnackbar])
 
   const appendLine = useCallback(async (line) => {
+    if (audioModeRef.current) { showSnackbar(AUDIO_NO_INSERT, "info"); return }
     const last = timelineRef.current.scenes.at(-1)
     const res = await apply([{ op: "insert_scene", after_uid: last ? last.uid : null, line }])
     if (res && autoVoiceRef.current) voiceScenes(res.created || [])
-  }, [apply, voiceScenes])
+  }, [apply, voiceScenes, showSnackbar])
 
   // Cycle a stock scene through the planner's alternates (N): the footage
   // changes without leaving the timeline. Chosen = pinned (D29), like Use.
@@ -607,10 +622,10 @@ function StudioEditor({ projectId }) {
           }
           break
         case "s": case "S":
-          if (sel) { const n = timelineRef.current.scenes.findIndex((x) => x.uid === sel) + 1; a.splitScene(sel).then(() => a.toastUndo(`Scene ${n} split in two`)) }
+          if (sel) { const n = timelineRef.current.scenes.findIndex((x) => x.uid === sel) + 1; a.splitScene(sel).then((res) => res && a.toastUndo(`Scene ${n} split in two`)) }
           break
         case "m": case "M":
-          if (sel) { const n = timelineRef.current.scenes.findIndex((x) => x.uid === sel) + 1; a.mergeScene(sel).then(() => a.toastUndo(`Scenes ${n} and ${n + 1} merged`)) }
+          if (sel) { const n = timelineRef.current.scenes.findIndex((x) => x.uid === sel) + 1; a.mergeScene(sel).then((res) => res && a.toastUndo(`Scenes ${n} and ${n + 1} merged`)) }
           break
         case "n": case "N": if (sel) a.nextAlternate(sel); break
         case "Escape":
@@ -717,6 +732,21 @@ function StudioEditor({ projectId }) {
         <Typography variant="h6" sx={{ fontWeight: 800 }}>This project doesn't exist</Typography>
         <Button variant="contained" onClick={() => navigate("/stock")}>All projects</Button>
       </Stack>
+    )
+  }
+
+  // "My audio" before its scenes land: the app is listening (or that listening ended without scenes).
+  if (audioMode && project.doc.scenes.length === 0) {
+    return (
+      <AudioListening
+        project={project} retrying={listenRetrying}
+        onRetry={async () => {
+          setListenRetrying(true)
+          try { adopt(await studioApi.listenAgain(project.id)) } catch (e) { onError(e.message || "Couldn't start listening again.") }
+          finally { setListenRetrying(false) }
+        }}
+        onStartOver={() => navigate("/stock")}
+      />
     )
   }
 

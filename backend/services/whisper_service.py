@@ -343,6 +343,7 @@ class WhisperService:
         on_progress=None,
         on_download=None,
         user_id: str = "local",
+        skip_if_no_speech: bool = False,
     ) -> dict:
         """
         Transcribe audio file. Returns:
@@ -379,6 +380,18 @@ class WhisperService:
         from backend.services.ffmpeg_service import has_audio_stream
         if not await has_audio_stream(Path(audio_path)):
             raise ValueError(f"No audio stream found in {audio_path}")
+
+        # `skip_if_no_speech` ("My audio"): run the speech detector faster-whisper ships (Silero)
+        # first, at a permissive threshold, and return an EMPTY transcript without decoding when it
+        # finds no speech at all. On audio with no speech, beam 5 and the temperature fallbacks run
+        # every window to the token cap (5 s of silence took 43-51 s). The detector only decides
+        # whether to decode; if it fails or can't tell, the decode runs as before.
+        if skip_if_no_speech:
+            heard = await asyncio.to_thread(speech_seconds, Path(audio_path))
+            if heard is not None and heard < NO_SPEECH_MIN_S:
+                logger.info("Whisper skipped %s: the speech detector heard %.2fs of speech",
+                            Path(audio_path).name, heard)
+                return {"text": "", "language": None, "language_probability": 0.0, "segments": []}
 
         # NOT `self.load(quality)`: that is a synchronous call which, on a cold
         # cache, downloads 150 MB - 3 GB inline and froze the whole event loop
@@ -476,6 +489,30 @@ class WhisperService:
         finally:
             type(self)._last_used = time.monotonic()
             type(self)._arm_evictor()
+
+
+# `transcribe(skip_if_no_speech=True)`: the speech detector's bar for "there is no speech here".
+# Permissive on purpose (Silero's own default threshold is 0.5): a wrongly skipped recording is a
+# refusal of real speech, a wrongly decoded one only costs the old wait.
+NO_SPEECH_THRESHOLD = 0.2
+NO_SPEECH_MIN_SPAN_MS = 250
+NO_SPEECH_MIN_S = 0.25
+
+
+def speech_seconds(audio_path: Path) -> float | None:
+    """Seconds of speech the bundled Silero detector hears in the file, at NO_SPEECH_THRESHOLD;
+    None when it can't tell (missing runtime, unreadable file). Blocking, bounded (one ONNX pass,
+    about 1 s per 8 minutes of audio): run it in a thread. Never raises."""
+    try:
+        from faster_whisper.audio import decode_audio
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+        audio = decode_audio(str(audio_path), sampling_rate=16000)
+        spans = get_speech_timestamps(audio, VadOptions(threshold=NO_SPEECH_THRESHOLD,
+                                                        min_speech_duration_ms=NO_SPEECH_MIN_SPAN_MS))
+        return sum(s["end"] - s["start"] for s in spans) / 16000
+    except Exception as exc:                       # the decode then runs as before: never a refusal
+        logger.warning("Speech detector couldn't read %s (%s): decoding it anyway", Path(audio_path).name, exc)
+        return None
 
 
 whisper_service = WhisperService()

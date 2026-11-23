@@ -18,9 +18,11 @@ import asyncio
 import json
 import re
 import logging
+import secrets
+from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from backend.core.exceptions import (
@@ -187,6 +189,114 @@ async def _record(event_type: str, data: dict) -> None:
         logger.debug("record_event %s failed", event_type, exc_info=True)
 
 
+# ── My audio ────────────────────────────────────────────────────────────────
+
+def _audio_refused(e) -> HTTPException:
+    return studio_error(400, e.code if isinstance(getattr(e, "code", None), str) else "invalid", str(e))
+
+
+async def _start_listening(project_id: str) -> str:
+    """The listening job of an audio project (Whisper: the heavy lane)."""
+    from backend.agents.job_helper import create_job
+    from backend.core import task_runner
+    from backend.core.tasks import studio as studio_tasks
+    from backend.services import studio_audio
+    job = await create_job(studio_audio.JOB_TYPE, USER, {"project_id": project_id}, title="Listening to your audio")
+    task_runner.dispatch(studio_tasks.run_studio_audio(job.id, project_id, USER))
+    return job.id
+
+
+@router.post("/studio/projects/from-audio")
+async def create_project_from_audio(file: UploadFile = File(...), title: str | None = Form(None),
+                                    aspect_ratio: str = Form("9:16"), visual_style: str = Form("cinematic"),
+                                    settings: str | None = Form(None)):
+    """My audio: a project that speaks in the user's own recording. Checked before anything is
+    made — 400 `media` (not audio or video) / `too_large` / `no_audio` / `too_short` / `too_long`
+    — then an empty `input.mode="audio"` project holding its OWN COPY of the recording, and the
+    listening job that lands its scenes. `{job_id, project}`; the editor shows "Listening…" from
+    `derived.audio_listening`."""
+    from backend.config import settings as app_settings
+    from backend.services import studio_audio
+    from backend.services.own_audio import AudioRefused
+    overrides = None
+    if settings:
+        try:
+            overrides = json.loads(settings)
+        except ValueError:
+            overrides = None
+        if not isinstance(overrides, dict):
+            raise studio_error(400, "invalid", "Those settings weren't valid.")
+        style = (overrides.get("captions") or {}).get("style") if isinstance(overrides.get("captions"), dict) else None
+        if style is not None:
+            await _check_caption_style(style, "invalid")
+    overrides = overrides or await saved_settings()
+
+    name = file.filename or "audio"
+    suffix = Path(name).suffix.lower()
+    if suffix not in studio_audio.UPLOAD_SUFFIXES:
+        raise studio_error(400, "media", studio_audio.BAD_TYPE)
+    await asyncio.to_thread(app_settings.TMP_DIR.mkdir, parents=True, exist_ok=True)
+    part = app_settings.TMP_DIR / f"studio_audio_in_{secrets.token_hex(8)}{suffix}"
+    size = 0
+    try:
+        # Off the event loop, 1 MB at a time, and never past the limit.
+        out = await asyncio.to_thread(open, part, "wb")
+        try:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > studio_audio.MAX_BYTES:
+                    raise studio_error(400, "too_large", studio_audio.TOO_LARGE)
+                await asyncio.to_thread(out.write, chunk)
+        finally:
+            await asyncio.to_thread(out.close)
+        if size == 0:
+            raise studio_error(400, "no_audio", studio_audio.EMPTY)
+        try:
+            row = await studio_audio.create(part, (title or "").strip() or name, aspect_ratio=aspect_ratio,
+                                            visual_style=visual_style, settings_overrides=overrides, user_id=USER)
+        except AudioRefused as e:
+            raise _audio_refused(e)
+        except StudioDocError as e:
+            raise studio_error(400, "invalid", str(e))
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 — never echo an internal error (paths, ffmpeg output) to the page
+        logger.warning("studio: the audio %r couldn't be made a project", name, exc_info=True)
+        raise studio_error(400, "media", "That file couldn't be read — try another file.")
+    finally:
+        await asyncio.to_thread(part.unlink, True)
+    try:
+        job_id = await _start_listening(row.id)
+    except BaseException:
+        await store.delete_project(row.id, USER)          # nothing will ever listen to it
+        raise
+    await _record("studio_project_created", {"project_id": row.id, "scenes": 0, "aspect_ratio": row.aspect_ratio,
+                                             "own_audio": True})
+    return {"job_id": job_id, **await store.envelope(row)}
+
+
+@router.post("/studio/projects/{project_id}/listen")
+async def listen_again(project_id: str):
+    """Try the listening again on the project's own copy of the recording: after a failed or
+    stopped one. 400 `invalid` unless it is an audio project still without scenes, 409 `busy` while
+    one runs, 400 `source_gone` when the copy is no longer on this computer."""
+    from backend.services import studio_audio
+    try:
+        row = await store.get_project(project_id, USER)
+    except StudioNotFoundError as e:
+        raise _not_found(e)
+    doc = json.loads(row.doc_json)
+    if not sd.is_audio_mode(doc) or doc["scenes"]:
+        raise studio_error(400, "invalid", studio_audio.NOT_WAITING)
+    running = await studio_audio.live_job_id(project_id)
+    if running:
+        raise studio_error(409, "busy", studio_audio.BUSY, job_id=running)
+    if studio_audio.source_file(project_id) is None:
+        raise studio_error(400, "source_gone", studio_audio.SOURCE_GONE)
+    job_id = await _start_listening(project_id)
+    return {"job_id": job_id, **await store.envelope(row)}
+
+
 async def _start_plan(project_id: str, *, first_draft: bool, scene_uids: list[str] | None = None) -> str:
     """One plan per project at a time (a plan is two AI calls plus a stock
     search per scene against the Pexels rate limit): a second request while
@@ -303,8 +413,11 @@ async def get_project(project_id: str, known_revision: int | None = None):
         if known_revision is not None:
             revision, status = await store.project_head(project_id, USER)
             if revision == known_revision:
+                from backend.services import studio_audio
                 return {"unchanged": True, "revision": revision, "status": status,
-                        "render_alive": status == "rendering" and await store.render_alive(project_id)}
+                        "render_alive": status == "rendering" and await store.render_alive(project_id),
+                        # Present only while a listening job runs: the editor keeps its poll on.
+                        **({"audio_alive": True} if await studio_audio.live_job_id(project_id) else {})}
         return await store.envelope(await store.get_project(project_id, USER))
     except StudioNotFoundError as e:
         raise _not_found(e)
