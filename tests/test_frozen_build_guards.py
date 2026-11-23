@@ -113,7 +113,7 @@ def test_imported_packages_are_declared(package):
 def test_the_spec_collects_the_data_the_app_reads_at_run_time():
     src = (SCRIPTS / "viralmint.spec").read_text()
     assert 'for p in ("trafilatura", "justext", "tld"):' in src and "datas += collect_data_files(p)" in src
-    assert 'importlib.util.find_spec("tld") is None' in src      # tld is skipped, not an error, once courlan drops it
+    assert 'if p in ("tld", "justext") and importlib.util.find_spec(p) is None' in src   # skipped once dropped upstream
     assert 'collect_data_files("yt_dlp", includes=["extractor/youtube/jsc/_builtin/vendor/*.js"])' in src
 
 
@@ -125,10 +125,23 @@ def test_the_data_gate_names_what_is_missing_or_empty(tmp_path, capsys):
         path.write_text("x")
     assert gate.main(["x", str(tmp_path)]) == 0
     (tmp_path / "trafilatura" / "settings.cfg").unlink()
-    (tmp_path / "justext" / "stoplists" / "English.txt").write_text("")
+    (tmp_path / "yt_dlp" / "extractor" / "youtube" / "jsc" / "_builtin" / "vendor" / "yt.solver.core.js").write_text("")
     assert gate.main(["x", str(tmp_path)]) == 1
     err = capsys.readouterr().err
-    assert "trafilatura/settings.cfg" in err and "justext/stoplists/English.txt" in err
+    assert "trafilatura/settings.cfg" in err and "yt.solver.core.js" in err
+
+
+@pytest.mark.parametrize("package,rel", [("tld", "tld/res/effective_tld_names.dat.txt"),
+                                         ("justext", "justext/stoplists/English.txt")])
+def test_optional_package_data_is_required_only_while_it_is_installed(monkeypatch, package, rel):
+    """courlan 1.5 dropped tld and trafilatura 2.4 dropped justext: a fresh install
+    has neither, the spec collects nothing for them, and demanding their files
+    failed every build."""
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a, **k: None if name == package else real(name, *a, **k))
+    assert rel not in _load("check_frozen_data").REQUIRED
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a, **k: object() if name == package else real(name, *a, **k))
+    assert rel in _load("check_frozen_data").REQUIRED
 
 
 def test_tld_is_required_only_while_it_is_installed(monkeypatch):

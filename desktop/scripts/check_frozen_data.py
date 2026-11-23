@@ -5,7 +5,7 @@
 
 PyInstaller follows imports, not the data files a package reads at run time,
 and the app then degrades without an error. Without trafilatura's settings.cfg,
-justext's stoplists and tld's suffix list, article extraction fails on every
+justext's stoplists and tld's suffix list (while installed), article extraction fails on every
 packaged build and silently falls back to raw <p> tags. Dev has them all.
 
 One file per thing that can be lost, each one a file the running app really
@@ -20,20 +20,26 @@ import importlib.util
 import sys
 from pathlib import Path
 
-# tld's suffix list is needed only while tld is installed: courlan (trafilatura's
-# URL helper) used it up to 1.4 and dropped the dependency in 1.5, so a fresh
-# install no longer has the package, the spec collects nothing for it and the
-# app never reads the file. Demanding it then fails every build for a file no
+# Two packages' data is needed only while the package is installed:
+#  - tld's suffix list: courlan (trafilatura's URL helper) used it up to 1.4 and
+#    dropped the dependency in 1.5;
+#  - justext's stoplists: trafilatura used justext up to 2.3; 2.4 vendors its own
+#    stopword-free `justext_lite` and dropped the dependency.
+# A fresh install then has no such package, the spec collects nothing for it and
+# the app never reads the file. Demanding it failed every build for a file no
 # code asks for.
-_TLD_SUFFIXES = "tld/res/effective_tld_names.dat.txt"
+_OPTIONAL = {
+    "tld/res/effective_tld_names.dat.txt": "tld",
+    "justext/stoplists/English.txt": "justext",
+}
 
 REQUIRED = tuple(rel for rel in (
     "trafilatura/settings.cfg",
     "justext/stoplists/English.txt",
-    _TLD_SUFFIXES,
+    "tld/res/effective_tld_names.dat.txt",
     "yt_dlp/extractor/youtube/jsc/_builtin/vendor/yt.solver.core.js",
     "backend/services/caption_fonts/NotoEmoji-Bold.ttf",
-) if rel != _TLD_SUFFIXES or importlib.util.find_spec("tld") is not None)
+) if rel not in _OPTIONAL or importlib.util.find_spec(_OPTIONAL[rel]) is not None)
 
 
 def missing(internal: Path) -> list[str]:
