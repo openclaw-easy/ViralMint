@@ -992,6 +992,20 @@ def _build_hook_event(hook_text: str, hook_duration: float, font: str | None = N
 _OVERLAP_TAIL_SECONDS = 0.6
 
 
+_CONTINUES_WORD = frozenset(",.;:!?%'’)]}…\"”-")
+
+
+def _continues_word(prev: str, raw: str) -> bool:
+    """A Whisper token with no leading space that belongs to the word before it: ",000", ".99",
+    "%", "'s", "?", or digits after digits. Whisper hears "60,000" as " 60" + ",000", and each
+    token used to be its own caption word ("60 ,000"). A letter never qualifies, so a producer
+    that drops the leading spaces can't glue two real words together."""
+    if not prev or not raw or raw[0].isspace():
+        return False
+    first = raw[0]
+    return first in _CONTINUES_WORD or (first.isdigit() and prev[-1].isdigit())
+
+
 def _extract_word_timestamps(segments: list[dict]) -> list[dict]:
     """
     Extract flat list of words with timestamps from Whisper segments.
@@ -1011,7 +1025,10 @@ def _extract_word_timestamps(segments: list[dict]) -> list[dict]:
             for w in seg["words"]:
                 if not isinstance(w, dict):
                     continue
-                text = (w.get("word") or w.get("text") or "").strip()
+                raw = w.get("word") or w.get("text") or ""
+                if not isinstance(raw, str):
+                    continue
+                text = raw.strip()
                 if not text:
                     continue
                 try:
@@ -1030,6 +1047,12 @@ def _extract_word_timestamps(segments: list[dict]) -> list[dict]:
                 if end <= start:
                     end = start + 0.1
                 last_end = end
+                if words and _continues_word(words[-1]["text"], raw):
+                    # The rest of the word before it: " 60" + ",000", " $9" + ".99" (Whisper's own
+                    # tokens). One caption word, the first token's start, the last token's end.
+                    words[-1]["text"] += text
+                    words[-1]["end"] = max(words[-1]["end"], end)
+                    continue
                 words.append({"text": text, "start": start, "end": end})
         else:
             # Fall back: split segment text evenly
