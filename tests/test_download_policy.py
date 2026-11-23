@@ -100,18 +100,36 @@ def test_certain_answers_stop_at_once(cls, outcome):
     assert len(steps) == 1 and steps[0].outcome is outcome
 
 
-def test_403_refreshes_then_drops_cookies_then_waits_once_then_escalates():
+def test_403_refreshes_then_drops_cookies_then_waits_once_then_tries_each_format_then_escalates():
     steps = run(video(), [E.HTTP_403])
     assert kinds(steps) == [
         ("retry", 0.0, (REFRESH_COOKIES,)),
         ("retry", 0.0, (DROP_COOKIES,)),
         ("retry", 8.0, (MARK_WAITED_403,)),
+        ("next_format", 0.0, ()),
+        ("next_format", 0.0, ()),
         ("escalate", 0.0, ()),
     ]
 
 
-def test_403_without_cookies_waits_once_then_escalates():
+def test_403_without_cookies_waits_once_then_tries_each_format_then_escalates():
     steps = run(video(has_cookies=False, can_refresh_cookies=False), [E.HTTP_403])
+    assert [s.kind for s in steps] == [StepKind.RETRY, StepKind.NEXT_FORMAT, StepKind.NEXT_FORMAT, StepKind.ESCALATE]
+
+
+def test_a_403_on_a_videos_separate_streams_reaches_the_single_stream_rung():
+    """youtube.com/shorts/CLco-qq94Lo, 2026-11-20: rungs 1 and 2 (separate https streams) answer 403, rung 3 ("best", one HLS stream) downloads."""
+    st = video(has_cookies=False, can_refresh_cookies=False)
+    taken = []
+    for _ in range(3):      # the three failures before the last rung is reached
+        step = decide(E.HTTP_403, st)
+        st.record(E.HTTP_403, step)
+        taken.append(step.kind)
+    assert taken == [StepKind.RETRY, StepKind.NEXT_FORMAT, StepKind.NEXT_FORMAT] and st.formats_left == 0 and st.budget.attempts == 4
+
+
+def test_403_with_no_format_left_escalates_as_before():
+    steps = run(video(has_cookies=False, can_refresh_cookies=False, formats_left=0), [E.HTTP_403])
     assert [s.kind for s in steps] == [StepKind.RETRY, StepKind.ESCALATE]
 
 

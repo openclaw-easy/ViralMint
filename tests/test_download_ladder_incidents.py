@@ -164,13 +164,14 @@ async def test_a_403_without_cookies_gets_one_wait_and_a_passing_one_downloads(y
 
 
 @pytest.mark.asyncio
-async def test_a_403_without_cookies_that_stays_escalates_after_two_tries(ytdlp, tmp_path, monkeypatch):
-    # Was 5 backoff attempts on the rung (and before 2026-10-25, on every rung).
+async def test_a_403_without_cookies_that_stays_escalates_after_one_wait_and_one_try_per_format(ytdlp, tmp_path, monkeypatch):
+    # Was 5 backoff attempts on the rung (and before 2026-10-25, on every rung). Since 2026-11-20 each remaining format gets ONE try, with no
+    # wait: YouTube can refuse a video's separate streams and serve its single stream (test_download_engine, the 2026-11-20 case).
     use_store(monkeypatch, tmp_path, ytdlp, disabled=True)
     ytdlp.script = [E403]
     with pytest.raises(ExtractorMissingError, match="403"):
         await engine.run(video(tmp_path))
-    assert len(ytdlp.calls) == 2 and ytdlp.waits == [8.0] and ytdlp.browser_reads == 0
+    assert len(ytdlp.calls) == 4 and ytdlp.waits == [8.0] and ytdlp.browser_reads == 0
 
 
 # ── Optional postprocessors ──────────────────────────────────────────────────
@@ -360,3 +361,12 @@ async def test_a_refresh_while_the_browser_is_unreadable_keeps_the_jar_and_reads
     assert ytdlp.store.jar_path.read_text() == before
     assert "cookiefile" not in ytdlp.calls[1]               # it went straight to "without cookies"
 
+
+@pytest.mark.asyncio
+async def test_a_403_that_stays_tries_each_remaining_format_once_then_escalates(ytdlp, tmp_path):
+    """Refresh the cookies, drop them, wait once; then each remaining format once, with no more waiting."""
+    ytdlp.script = [E403]
+    with pytest.raises(ExtractorMissingError):
+        await engine.run(video(tmp_path))
+    assert len(ytdlp.calls) == 6 and ytdlp.waits == [8.0]
+    assert [c["format"] for c in ytdlp.calls][-3:] == list(opts.FORMAT_CHAIN)

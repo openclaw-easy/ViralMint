@@ -1,7 +1,7 @@
 # Web
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
-python-multipart==0.0.33
+python-multipart==0.0.34
 # websockets is a uvicorn[standard] extra — nothing here imports it directly,
 # so the pin exists only to keep the WS transport reproducible.
 websockets==17.1
@@ -11,7 +11,7 @@ websockets==17.1
 fastmcp==3.4.4
 
 # DB
-sqlalchemy[asyncio]==2.0.52
+sqlalchemy[asyncio]==2.0.58
 aiosqlite==0.22.1
 alembic==1.19.1
 

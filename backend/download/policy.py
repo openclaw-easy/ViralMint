@@ -186,7 +186,10 @@ def decide(c: E, st: LadderState) -> Step:
             return _retry(c, st, do=(DROP_COOKIES,))
         if MARK_WAITED_403 not in st.done:
             return _retry(c, st, wait_s=8.0, do=(MARK_WAITED_403,))
-        return _final(c)
+        # Still refused: the refusal can be of the FORMAT, not the video. YouTube answers 403 on a video's separate
+        # https streams while the same video's single HLS stream (the chain's last rung, "best") downloads at once
+        # (reproduced 2026-11-20, youtube.com/shorts/CLco-qq94Lo: rungs 1 and 2 → 403, rung 3 → 1080p in 10 s).
+        return _next_format(c, st)
 
     if c is E.ANTI_BOT_CHALLENGE:
         if n == 0:

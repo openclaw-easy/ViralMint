@@ -17,7 +17,7 @@ from backend.core.exceptions import (
     BotDetectionError, DownloadError, DownloadStalledError, ExtractorMissingError,
     JobCancelledError, RateLimitError, VideoUnavailableError,
 )
-from backend.download import engine, health, outputs, progress
+from backend.download import engine, health, opts, outputs, progress
 from backend.download.classify import ErrorClass as E
 from backend.download.cookies import CookieState
 from backend.download.policy import Budget
@@ -99,10 +99,18 @@ async def test_2026_10_25_a_403_that_survives_everything_escalates_after_three_r
         await engine.run(video(tmp_path))
     assert "refused the download (HTTP 403 Forbidden)" in str(err.value)
     assert err.value.error_class is E.HTTP_403
-    assert len(ytdlp.calls) == 4 and ytdlp.waits == [8.0]
+    assert len(ytdlp.calls) == 6 and ytdlp.waits == [8.0]   # still bounded: the four below, then one try on each remaining format, no more waiting
     assert ytdlp.browser_reads == 2                         # the first jar, then one refresh
-    assert ["cookiefile" in c for c in ytdlp.calls] == [True, True, False, False]
-    assert {c["format"] for c in ytdlp.calls} == {ytdlp.calls[0]["format"]}   # a format change can't fix a 403
+    assert ["cookiefile" in c for c in ytdlp.calls] == [True, True, False, False, False, False]
+    assert [c["format"] for c in ytdlp.calls] == [*[opts.FORMAT_CHAIN[0]] * 4, opts.FORMAT_CHAIN[1], opts.FORMAT_CHAIN[2]]
+
+
+async def test_2026_11_20_a_403_on_the_separate_streams_downloads_on_the_single_stream_format(ytdlp, tmp_path):
+    # youtube.com/shorts/CLco-qq94Lo: YouTube refused that video's separate https streams (403) and served its single HLS stream ("best").
+    # The ladder used to stop before the last format, so the phone was told "needs signing in" for a video that downloads.
+    ytdlp.script = [E403, E403, E403, E403, E403, "ok"]
+    result = await engine.run(video(tmp_path))
+    assert result["video_path"] and ytdlp.calls[-1]["format"] == opts.FORMAT_CHAIN[-1] and ytdlp.waits == [8.0]
 
 
 async def test_2026_07_28_a_403_caused_by_the_cookies_is_fixed_by_dropping_them(ytdlp, tmp_path):
