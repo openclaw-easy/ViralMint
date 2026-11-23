@@ -527,14 +527,17 @@ async def import_local_video(
     MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024
     file_size = 0
     try:
-        with open(dest_path, "wb") as f:
+        # Writes off the event loop (up to 2 GB, 1 MB at a time): a write on
+        # the loop stalled every other request for the length of the upload.
+        f = await asyncio.to_thread(open, dest_path, "wb")
+        try:
             while chunk := await file.read(1024 * 1024):  # 1MB chunks
                 file_size += len(chunk)
                 if file_size > MAX_UPLOAD_SIZE:
-                    f.close()
-                    dest_path.unlink(missing_ok=True)
                     raise HTTPException(413, "File too large. Maximum upload size is 2GB.")
-                f.write(chunk)
+                await asyncio.to_thread(f.write, chunk)
+        finally:
+            await asyncio.to_thread(f.close)
     except BaseException:
         # BaseException, not Exception: a client disconnect surfaces as anyio's
         # cancelled-exception class on some stacks, which derives from

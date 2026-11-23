@@ -693,7 +693,10 @@ async def render(job_id: str, project_id: str, user_id: str = "local") -> Render
                 task.cancel()           # a take's timings are cached by whoever finishes them later
         if fetcher is not None:
             fetcher.cancel()            # a clip still on the wire, for a render that is over
-        shutil.rmtree(scratch, ignore_errors=True)
+        # Off the event loop: a render's scratch folder is hundreds of MB of
+        # scene files. (A cancel arriving here can't lose it — the thread
+        # finishes on its own.)
+        await asyncio.to_thread(shutil.rmtree, scratch, ignore_errors=True)
 
 
 def after_hook(segments: list[dict], hook_s: float) -> list[dict]:
