@@ -110,10 +110,25 @@ async def run_studio_voice(job_id: str, project_id: str, uids: list[str], user_i
     # settling it here would silently cancel that job's take.
     pending = list(uids)
     cancelled = False
+    # A scene whose landing raised (the project deleted, a write that lost
+    # every retry). The job will fail — but only ONCE, after the takes already
+    # in flight have finished and landed; takes that have not started don't
+    # (they stay in `pending` and are settled in `finally`).
+    broken = False
 
     async def record(uid: str, gate: asyncio.Semaphore) -> None:
+        nonlocal broken
+        try:
+            await _record(uid, gate)
+        except BaseException:
+            broken = True
+            raise
+
+    async def _record(uid: str, gate: asyncio.Semaphore) -> None:
         nonlocal landed, failed_n, done_n, cancelled
         async with gate:
+            if broken:
+                return                            # left in `pending` → settled in finally
             if cancelled or await job_cancelled(job_id):
                 cancelled = True
                 return                            # left in `pending` → settled in finally
@@ -157,7 +172,15 @@ async def run_studio_voice(job_id: str, project_id: str, uids: list[str], user_i
     try:
         await update_job_status(job_id, "running", 2, "Recording voices")
         gate = asyncio.Semaphore(vts.VOICE_CONCURRENCY)
-        await asyncio.gather(*(record(uid, gate) for uid in uids))
+        # return_exceptions: a plain gather raised on the FIRST failure while
+        # the sibling takes kept recording behind a job already reported
+        # failed, and `finally` settled scenes still being recorded (their
+        # takes then landed on scenes no longer marked, or were lost). Every
+        # take is awaited; then the first error is raised once.
+        results = await asyncio.gather(*(record(uid, gate) for uid in uids), return_exceptions=True)
+        error = next((r for r in results if isinstance(r, BaseException)), None)
+        if error is not None:
+            raise error
         if cancelled:
             logger.info("TASK CANCELLED studio_voice | job=%s after %d/%d", job_id[:8], done_n, len(uids))
             await _stamp_cancelled(job_id, step=f"Cancelled after {done_n} of {len(uids)}")
@@ -172,7 +195,8 @@ async def run_studio_voice(job_id: str, project_id: str, uids: list[str], user_i
         await _end_job(job_id, "studio_voice", "cancelled", user_id, step="Project deleted")
     except Exception as e:  # noqa: BLE001 — a runner reports, never raises
         logger.exception("TASK FAILED studio_voice | job=%s", job_id[:8])
-        await _end_job(job_id, "studio_voice", "failed", user_id, error=str(e)[:300] or "Voicing failed")
+        await _end_job(job_id, "studio_voice", "failed", user_id, error=str(e)[:300] or "Voicing failed", output={
+            "project_id": project_id, "voiced": landed - failed_n, "failed": failed_n})
     finally:
         await _settle_generating(project_id, pending, user_id)
 
