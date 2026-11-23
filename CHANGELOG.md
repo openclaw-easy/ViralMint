@@ -7,6 +7,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Fixed
+- **A video that YouTube refuses in one format downloads in another.**
+  YouTube can refuse a video's separate audio and video streams (HTTP 403)
+  while serving the same video as one stream. A refusal that outlasted the
+  cookie steps and one wait used to end the download; each remaining format
+  now gets one try first.
+- **Prices, decimals and links stay in one scene.** Video Studio cut a script
+  after every full stop, so "$9.99" became the scenes "$9." and "99", "3.5"
+  two scenes, a web address two and "..." three, each voiced on its own. A
+  full stop now ends a sentence only when a space follows it, and the
+  opening title no longer stops at the comma inside "60,000".
+- **A failed voice job no longer leaves takes recording behind it.** When
+  one scene's voice failed to save, the job reported failure at once while
+  the other scenes kept recording, and their spinners could be cleared under
+  them. The job now waits for the takes in flight, lets them land, doesn't
+  start new ones, and then reports the failure once.
+- **Cancelling a render in its last second keeps the video.** The video was
+  already written, but the cancelled job pointed at nothing, so it looked
+  lost. It now stays cancelled and links to the finished video.
+- **Edit in words works again after a crash mid-render.** The project still
+  read "rendering", so every edit was refused until a new render ran.
+- **Space and Delete work after clicking a timeline scene.** The click left
+  the keyboard on the scene's block, where both keys did nothing until the
+  next click.
+- **The app stays responsive while a big video imports or a render cleans
+  up.** Writing an import (up to 2 GB) and deleting a render's scratch files
+  ran on the server's main loop and stalled every other request meanwhile.
+- **A failed attempt to start a render can't lock the project.** If saving
+  the project failed at that moment, it stayed "already rendering" until
+  the app restarted.
 - **AI clips stay inside the length you set.** After the AI picks a clip,
   each end is nudged up to 2 seconds onto the nearest sentence boundary, and
   moving both ends could push a clip past your maximum (a 20-second pick came
