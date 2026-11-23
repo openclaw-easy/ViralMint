@@ -24,6 +24,7 @@ import {
   autoRevoices, critique, isFixedVisual, sceneAt, suggestMatches, voiceProvider, withTimeline,
 } from "../components/studio/studioModel"
 import { createPlayhead, usePlayhead } from "../components/studio/playheadStore"
+import { controlOf } from "../components/studio/editorKeys"
 import { projectSettingsFrom } from "../utils/studioHandoff"
 import useAppStore from "../store/appStore"
 import useDocumentTitle from "../hooks/useDocumentTitle"
@@ -582,8 +583,11 @@ function StudioEditor({ projectId }) {
       const sel = selectedRef.current?.uid
       // Real buttons AND focusable tiles (role="button" divs: thumbnails,
       // alternates, stock tiles) — Backspace on a focused tile is not "delete
-      // the scene".
-      const onButton = tag === "BUTTON" || !!el?.closest?.('[role="button"]')
+      // the scene". The one exception is the SELECTED scene's own block in the
+      // timeline: a click selects the scene and leaves the focus on it, so
+      // until the next click every Space and Delete landed on a "button" and
+      // did nothing. That block is the scene, not a control.
+      const onButton = !!controlOf(el)
       switch (e.key) {
         case " ":
           // Space on a focused tile activates the tile, not the player.

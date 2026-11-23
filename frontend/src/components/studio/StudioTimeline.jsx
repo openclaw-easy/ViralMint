@@ -191,7 +191,9 @@ function StudioTimeline({
                 aria-label={`Scene ${sc.index + 1}: ${(sc.line || "empty line").slice(0, 80)}`}
                 aria-pressed={selected}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); onSelect?.(sc.uid) }
+                  // Once it IS the selected scene, Space is the editor's play / pause again: a click
+                  // leaves the focus here, and re-selecting what is already selected swallowed the key.
+                  if (e.key === "Enter" || (e.key === " " && !selected)) { e.preventDefault(); e.stopPropagation(); onSelect?.(sc.uid) }
                   else if (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
                     e.preventDefault(); e.stopPropagation()
                     const order = scenes.map((x) => x.uid)
