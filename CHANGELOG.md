@@ -6,7 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- **My audio: make a video from your own recording.** Video Studio has a
+  third way to start. Drop a voice memo, a voiceover or a podcast cut (or a
+  video, for its sound), 3 seconds to 8 minutes, and ViralMint listens to it
+  on your computer and opens a project with one scene per sentence, each
+  spoken in your recording, with footage planned like any new video. Edit a
+  scene's words to fix its captions (the audio stays as you said it),
+  reorder or delete scenes, change the footage, then render. Your file is
+  copied, never moved or changed. A recording with no speech is turned down
+  in about a second instead of after a long wait.
+
 ### Fixed
+- **Word-by-word captions show numbers whole.** Whisper hears "60,000" and
+  "$9.99" as two pieces each, and captions showed them as two words: "60
+  ,000", "$9 .99". They now read as one word, highlighted together.
 - **A video that YouTube refuses in one format downloads in another.**
   YouTube can refuse a video's separate audio and video streams (HTTP 403)
   while serving the same video as one stream. A refusal that outlasted the
