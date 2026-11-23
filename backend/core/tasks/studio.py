@@ -335,6 +335,17 @@ async def run_studio_render(job_id: str, project_id: str, user_id: str = "local"
     logger.info("TASK START studio_render | job=%s project=%s", job_id[:8], project_id[:8])
     try:
         done = await studio_render.render(job_id, project_id, user_id)
+        from backend.agents.job_helper import job_cancelled, update_job_status
+        if await job_cancelled(job_id):
+            # The cancel landed after the last gate: the video is already
+            # written. The job stays `cancelled` (the user asked) but keeps the
+            # link to the video, and nothing says "Video ready!" — a poller
+            # that saw a cancelled job with no output rendered it again.
+            logger.info("TASK CANCELLED studio_render | job=%s — the video had already finished; keeping it",
+                        job_id[:8])
+            await update_job_status(job_id, "cancelled", current_step="Cancelled — the video had already finished",
+                                    output_data=done.output)
+            return
         await _end_job(job_id, "generate", "success", user_id, step="Video ready!", output=done.output,
                        result=done.result)
         logger.info("TASK DONE studio_render | job=%s", job_id[:8])

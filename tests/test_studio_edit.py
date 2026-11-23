@@ -122,3 +122,37 @@ def test_the_video_ready_message_has_its_length():
     from backend.messaging.manager import _build_payload
     p = _build_payload(NotificationEvent.VIDEO_GENERATED, {"title": "Plants", "duration_seconds": 31})
     assert "(31s)" in p.body and "Plants" in p.body
+
+
+def test_a_render_claim_left_by_a_crash_does_not_lock_edit_in_words():
+    """edit_project read the raw `rendering` status, so after a crash
+    mid-render every edit was refused until someone rendered again. Every
+    other door asks whether a render is actually alive."""
+    from backend.database import init_db
+    from backend.services import studio_store as store
+
+    asyncio.run(init_db())
+    row = asyncio.run(store.create_project(script="Plants sleep in winter. Water less.", user_id=U))
+    asyncio.run(store.claim_render(row.id, U))
+    store.release_render(row.id)                       # the process died: the claim is on the row, no job is alive
+    assert asyncio.run(store.get_project(row.id, U)).status == "rendering"
+    reply = json.dumps({"changes": [{"type": "title", "text": "Winter plant care"}], "summary": "Renamed."})
+    out = asyncio.run(studio_edit.edit_project(row.id, "rename it", user_id=U, ai_client=AI(reply)))
+    assert out["applied"] and asyncio.run(store.get_project(row.id, U)).title == "Winter plant care"
+    asyncio.run(store.delete_project(row.id, U))
+
+
+def test_a_live_render_still_refuses_edit_in_words():
+    from backend.database import init_db
+    from backend.services import studio_store as store
+
+    asyncio.run(init_db())
+    row = asyncio.run(store.create_project(script="Plants sleep in winter. Water less.", user_id=U))
+    asyncio.run(store.claim_render(row.id, U))         # alive in this process
+    try:
+        with pytest.raises(studio_edit.EditError, match="rendering"):
+            asyncio.run(studio_edit.edit_project(row.id, "rename it", user_id=U, ai_client=AI("{}")))
+    finally:
+        store.release_render(row.id)
+        asyncio.run(store.finish_render(row.id, user_id=U))
+        asyncio.run(store.delete_project(row.id, U))

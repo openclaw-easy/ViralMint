@@ -170,7 +170,7 @@ async def edit_project(project_id: str, instruction: str, *, user_id: str = "loc
     if not instruction:
         raise EditError("Say what you'd like changed.")
     row = await store.get_project(project_id, user_id)
-    if row.status == "rendering":
+    if row.status == "rendering" and await store.render_alive(project_id):   # a crashed render's claim doesn't lock edits
         raise EditError("This video is rendering — edit it once the render finishes.")
     doc = json.loads(row.doc_json)
     if ai_client is None:
