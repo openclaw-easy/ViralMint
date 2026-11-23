@@ -446,6 +446,18 @@ def release_render(project_id: str) -> None:
     _live_renders.discard(project_id)
 
 
+async def abandon_render(project_id: str, user_id: str = "local") -> None:
+    """Give a render claim back: the project returns to draft (a no-op once the
+    render marked it rendered) AND this process's lock on it is freed — always
+    both, the lock even when the row write fails, or the project stays
+    "already rendering" until a restart. For every path where a claimed render
+    will not run, or has ended."""
+    try:
+        await finish_render(project_id, user_id=user_id)
+    finally:
+        release_render(project_id)
+
+
 async def render_alive(project_id: str) -> bool:
     """A render of this project is running — here, or as a live job of a
     draining predecessor process (lifespan handoff)."""

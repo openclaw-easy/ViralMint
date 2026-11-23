@@ -121,8 +121,7 @@ async def _dispatch_smart_video_render(body: StockGenerateRequest) -> dict:
             {"source_id": body.source_id} if body.source_id else {})}, title=row.title)
         task_runner.dispatch(studio_tasks.run_studio_from_legacy(job.id, project_id, body.model_dump(), "local"))
     except Exception:
-        await store.finish_render(project_id)                 # release the claim — nothing is rendering
-        store.release_render(project_id)
+        await store.abandon_render(project_id)                # release the claim — nothing is rendering
         raise
     return {"job_id": job.id, "project_id": project_id}
 

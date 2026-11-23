@@ -317,10 +317,7 @@ async def run_studio_from_legacy(job_id: str, project_id: str, request: dict, us
                    str(e)[:300] if isinstance(e, StudioError) and str(e) else
                    "Planning the video failed — try again.")
         await _end_job(job_id, "generate", "failed", user_id, error=message)
-        try:
-            await store.finish_render(project_id, user_id=user_id)   # release the claim — nothing will render
-        finally:
-            store.release_render(project_id)
+        await store.abandon_render(project_id, user_id=user_id)   # release the claim — nothing will render
         return
     await run_studio_render(job_id, project_id, user_id)
 
@@ -367,10 +364,7 @@ async def run_studio_render(job_id: str, project_id: str, user_id: str = "local"
                    "The render failed — try rendering again.")
         await _end_job(job_id, "generate", "failed", user_id, error=message)
     finally:
-        try:
-            await store.finish_render(project_id, user_id=user_id)   # no-op once the render marked it rendered
-        finally:
-            store.release_render(project_id)
+        await store.abandon_render(project_id, user_id=user_id)   # no-op once the render marked it rendered
 
 
 # Every runner here that a route took something for owes it back when it is
@@ -388,10 +382,7 @@ async def _release_unstarted_render(job_id: str, project_id: str, user_id: str =
     """The render never started (cancelled while queued, or dropped waiting
     for a slot): the endpoint's claim would stay on the project until a restart."""
     from backend.services import studio_store as store
-    try:
-        await store.finish_render(project_id, user_id=user_id)
-    finally:
-        store.release_render(project_id)
+    await store.abandon_render(project_id, user_id=user_id)
     await _stamp_if_cancelled(job_id)
 
 

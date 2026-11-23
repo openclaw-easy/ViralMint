@@ -589,8 +589,7 @@ async def render_project(project_id: str):
         job = await create_job("generate", USER, {"project_id": project_id, "source": "studio"}, title=row.title)
         task_runner.dispatch(studio_tasks.run_studio_render(job.id, project_id, USER))
     except Exception:
-        await store.finish_render(project_id, user_id=USER)      # release the claim — nothing is rendering
-        store.release_render(project_id)
+        await store.abandon_render(project_id, user_id=USER)     # release the claim — nothing is rendering
         raise
     doc = json.loads(row.doc_json)
     await _record("studio_render_started", {
